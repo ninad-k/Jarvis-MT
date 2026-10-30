@@ -18,6 +18,11 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # jsonwebtoken 10+ needs the rust_crypto backend, which pulls in the `rsa` crate
+      # (RUSTSEC-2023-0071, no fix). Stay on 9.x until that changes.
+      - dependency-name: jsonwebtoken
+        update-types: [version-update:semver-major]
 
   # Tauri desktop shell (own lockfile, excluded from the workspace)
   - package-ecosystem: cargo

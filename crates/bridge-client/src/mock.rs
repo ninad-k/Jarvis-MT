@@ -564,10 +564,7 @@ async fn serve(mut socket: RepSocket, shared: Arc<Shared>, mut stopped: oneshot:
             }
         };
         shared.requests.fetch_add(1, Ordering::SeqCst);
-        let swallow = shared
-            .drop_next
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
+        let swallow = take_one(&shared.drop_next);
         if swallow {
             continue;
         }
@@ -777,4 +774,22 @@ impl MockState {
     fn knows(&self, symbol: &str) -> bool {
         self.prices.iter().any(|p| p.symbol == symbol)
     }
+}
+
+/// Decrement `counter` if it is above zero; true when one was taken. A plain
+/// compare-exchange loop (works on every supported Rust version).
+fn take_one(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    let mut current = counter.load(Ordering::SeqCst);
+    while current > 0 {
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
 }

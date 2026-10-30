@@ -90,7 +90,7 @@ impl BridgeKey {
             return Err(KeyError::Length(text.chars().count()));
         }
         let mut bytes = [0u8; KEY_BYTES];
-        for (slot, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        for (slot, pair) in bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
             let hi = hex_val(pair[0]).ok_or(KeyError::NotHex)?;
             let lo = hex_val(pair[1]).ok_or(KeyError::NotHex)?;
             *slot = (hi << 4) | lo;
@@ -178,7 +178,7 @@ fn hex_decode_lower(frame: &[u8]) -> Option<[u8; 32]> {
         return None;
     }
     let mut out = [0u8; 32];
-    for (slot, pair) in out.iter_mut().zip(frame.chunks_exact(2)) {
+    for (slot, pair) in out.iter_mut().zip(frame.as_chunks::<2>().0) {
         if pair.iter().any(u8::is_ascii_uppercase) {
             return None;
         }
