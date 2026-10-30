@@ -2,12 +2,19 @@
 	import { tick } from 'svelte';
 	import { chat } from '#lib/state/chat.svelte.ts';
 	import { backend } from '#lib/state/hud.svelte.ts';
+	import { sendTurn } from '#lib/state/turn.svelte.ts';
+	import { voice } from '#lib/state/voice.svelte.ts';
 	import ToolChip from './ToolChip.svelte';
 
 	let scroller = $state<HTMLElement>();
 	let stick = true;
 
-	const SUGGESTIONS = ["What's gold at?", 'Show my open positions', "What's my equity?"];
+	const SUGGESTIONS = [
+		"What's gold at?",
+		'Show my open positions',
+		"What's my equity?",
+		'Buy 0.1 gold with SL 2300'
+	];
 
 	function onScroll() {
 		if (!scroller) return;
@@ -40,12 +47,12 @@
 	aria-label="Conversation"
 	tabindex="0"
 >
-	{#if chat.messages.length === 0}
+	{#if chat.messages.length === 0 && !voice.busy}
 		<div class="mx-auto flex h-full max-w-md flex-col items-center justify-center gap-4 text-center">
 			<div>
 				<p class="text-sm text-ink">Ask Jarvis about your markets.</p>
 				<p class="mt-1 text-xs text-mute">
-					Read-only for now: prices, your account and open positions.
+					Prices, your account and positions, or ask for a trade. Nothing executes until you confirm it.
 				</p>
 			</div>
 			<ul class="flex flex-wrap justify-center gap-2">
@@ -55,7 +62,7 @@
 							type="button"
 							class="border border-line-hi bg-accent/5 px-3 py-1.5 text-xs text-mute transition-colors hover:border-accent hover:text-ink disabled:opacity-40"
 							disabled={chat.pending || backend.offline}
-							onclick={() => chat.send(s)}
+							onclick={() => sendTurn(s)}
 						>
 							{s}
 						</button>
@@ -71,7 +78,7 @@
 						<div
 							class="max-w-[85%] border border-accent-dim/70 bg-accent/10 px-3 py-2 text-sm break-words whitespace-pre-wrap"
 						>
-							<span class="sr-only">You: </span>{m.text}
+							<span class="sr-only">You: </span>{#if m.voice}<svg viewBox="0 0 24 24" class="mr-1.5 inline size-3.5 -translate-y-px text-accent" fill="none" stroke="currentColor" stroke-width="2" role="img" aria-label="Spoken"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0" stroke-linecap="round" /></svg>{/if}{m.text}
 						</div>
 						<span class="num px-1 text-2xs text-faint">{time(m.at)}</span>
 					{:else if m.role === 'assistant'}
@@ -86,6 +93,17 @@
 							</ul>
 						{/if}
 						<span class="num pl-3 text-2xs text-faint">{time(m.at)} · {m.provider}</span>
+					{:else if m.role === 'note'}
+						<div
+							class="max-w-[92%] border-l-2 py-1 pr-2 pl-3 text-xs break-words {m.tone === 'ok'
+								? 'border-up/70 text-up'
+								: m.tone === 'warn'
+									? 'border-warn/70 text-warn'
+									: 'border-down/70 text-down'}"
+							data-testid="note"
+						>
+							<span aria-hidden="true">{m.tone === 'ok' ? '✓' : m.tone === 'warn' ? '△' : '✕'} </span>{m.text}
+						</div>
 					{:else}
 						<div
 							class="max-w-[92%] border border-down/50 bg-down/10 px-3 py-2 text-sm break-words text-down"
@@ -97,6 +115,17 @@
 					{/if}
 				</li>
 			{/each}
+			{#if voice.phase === 'listening' || voice.phase === 'starting'}
+				<li class="flex items-center justify-end gap-2 pr-1 text-xs text-down" data-testid="listening-row">
+					<span class="size-2 animate-[pulse-dot_1s_ease-in-out_infinite] rounded-full bg-down" aria-hidden="true"></span>
+					{voice.phase === 'starting' ? 'Waiting for the microphone…' : `Listening… ${(voice.elapsedMs / 1000).toFixed(0)} s`}
+				</li>
+			{:else if voice.phase === 'transcribing'}
+				<li class="flex items-center justify-end gap-2 pr-1 text-xs text-mute" data-testid="transcribing-row">
+					<span class="size-2 animate-[pulse-dot_1s_ease-in-out_infinite] rounded-full bg-violet" aria-hidden="true"></span>
+					Transcribing…
+				</li>
+			{/if}
 			{#if chat.pending}
 				<li class="flex items-center gap-2 pl-3 text-xs text-mute" aria-hidden="true">
 					<span class="flex gap-1">

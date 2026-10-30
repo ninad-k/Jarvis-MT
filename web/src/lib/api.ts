@@ -2,6 +2,16 @@
  * Typed client for the Jarvis HTTP API. Mirrors docs/api.md exactly.
  * In mock mode (VITE_MOCK=1) every call is answered by ./mock instead of the network.
  */
+import {
+	ApiError,
+	errorFromResponse,
+	type ApiErrorBody,
+	type ApiErrorCode,
+	type ClientErrorCode
+} from './errors';
+
+export { ApiError };
+export type { ApiErrorBody, ApiErrorCode, ClientErrorCode };
 
 // ---- Types (docs/api.md) -------------------------------------------------
 
@@ -27,11 +37,41 @@ export interface LlmProvider {
 	available: boolean;
 }
 
+export interface KillSwitchState {
+	engaged: boolean;
+	reason: string | null;
+	changed_at_ms: number | null;
+}
+
+export interface AuthStatus {
+	enabled: boolean;
+	username: string | null;
+}
+
+export interface VoiceStatus {
+	stt: boolean;
+	tts: boolean;
+}
+
+export interface Limits {
+	max_lot: number;
+	max_positions: number;
+	max_daily_loss: number;
+	allowed_symbols: string[];
+	trading_hours: unknown;
+}
+
 export interface Status {
 	version: string;
 	mode: Mode;
+	mode_mismatch?: boolean;
 	bridge: BridgeStatus;
 	llm: { default: string; providers: LlmProvider[] };
+	/** Sprint 2-5 fields. Absent on an older server, which the UI treats as "feature off". */
+	kill_switch?: KillSwitchState;
+	auth?: AuthStatus;
+	voice?: VoiceStatus;
+	limits?: Limits;
 }
 
 export interface Account {
@@ -69,6 +109,33 @@ export interface PositionsResponse {
 	positions: Position[];
 }
 
+export type OrderType =
+	| 'buy_limit'
+	| 'sell_limit'
+	| 'buy_stop'
+	| 'sell_stop'
+	| 'buy_stop_limit'
+	| 'sell_stop_limit';
+
+/** A pending order (bridge `get_orders`). */
+export interface PendingOrder {
+	ticket: number;
+	symbol: string;
+	type: OrderType;
+	volume_initial: number;
+	volume_current: number;
+	price_open: number;
+	sl: number | null;
+	tp: number | null;
+	/** Unix seconds. */
+	time_setup: number;
+	comment: string;
+}
+
+export interface OrdersResponse {
+	orders: PendingOrder[];
+}
+
 export interface PriceTick {
 	symbol: string;
 	bid: number;
@@ -90,10 +157,14 @@ export interface WatchlistResponse {
 	errors: SymbolError[];
 }
 
+// ---- Chat, previews, confirmation ----------------------------------------
+
 export interface ChatRequest {
 	session_id?: string;
 	message: string;
 	provider?: string;
+	/** The turn came from the microphone: previews use `after_readback` timing. */
+	voice?: boolean;
 }
 
 export interface ToolCall {
@@ -103,86 +174,167 @@ export interface ToolCall {
 	duration_ms: number;
 }
 
+export interface EstPnl {
+	current: number | null;
+	at_sl: number | null;
+	at_tp: number | null;
+}
+
+export type PreviewStage = 'first' | 'second';
+export type PreviewTiming = 'immediate' | 'after_readback';
+
+export interface PreviewDto {
+	id: string;
+	description: string;
+	symbols: string[];
+	tickets: number[];
+	total_volume: number;
+	est_pnl: EstPnl;
+	is_batch: boolean;
+	count: number;
+	warnings: string[];
+	token: string;
+	stage: PreviewStage;
+	expires_at_ms: number;
+	timing: PreviewTiming;
+}
+
 export interface ChatResponse {
 	session_id: string;
 	reply: string;
 	provider: string;
 	tool_calls: ToolCall[];
+	preview?: PreviewDto | null;
 }
 
-export type ApiErrorCode =
-	| 'bad_request'
-	| 'bridge_unavailable'
-	| 'bridge_error'
-	| 'llm_error'
-	| 'internal';
-
-export interface ApiErrorBody {
-	error: { code: ApiErrorCode; message: string };
+export interface TradeResult {
+	ticket: number;
+	ok: boolean;
+	retcode: number;
+	retcode_description: string;
+	order?: number | null;
+	deal?: number | null;
+	price?: number | null;
+	volume?: number | null;
+	error?: string | null;
 }
 
-/** Client-side codes for failures that never produced a server error body. */
-export type ClientErrorCode = 'network' | 'timeout' | 'aborted' | 'unknown';
-
-export class ApiError extends Error {
-	readonly code: ApiErrorCode | ClientErrorCode;
-	readonly status: number;
-
-	constructor(code: ApiErrorCode | ClientErrorCode, message: string, status = 0) {
-		super(message);
-		this.name = 'ApiError';
-		this.code = code;
-		this.status = status;
-	}
-
-	/** The Jarvis server itself could not be reached (as opposed to the MT5 bridge). */
-	get isOffline(): boolean {
-		return this.code === 'network';
-	}
+export interface ConfirmExecuted {
+	status: 'executed';
+	preview_id: string;
+	results: TradeResult[];
 }
+
+export interface ConfirmNeedsSecond {
+	status: 'needs_second_confirmation';
+	preview_id: string;
+	token: string;
+	stage: 'second';
+	expires_at_ms: number;
+	count: number;
+	message: string;
+}
+
+export type ConfirmResponse = ConfirmExecuted | ConfirmNeedsSecond;
+
+export interface ClosePositionsRequest {
+	symbol: string | null;
+	side: Side | null;
+	all: boolean;
+}
+
+// ---- Auth, audit, voice ---------------------------------------------------
+
+export interface LoginRequest {
+	username: string;
+	password: string;
+	totp: string;
+}
+
+export interface Session {
+	username: string;
+	/** Unix seconds or ms; only displayed loosely, never used for security decisions. */
+	expires_at: number | string;
+}
+
+export interface AuditEntry {
+	id: number;
+	/** Unix ms or an ISO string; use `auditTime()` in format.ts. */
+	ts: number | string;
+	session_id: string | null;
+	kind: string;
+	payload: unknown;
+}
+
+export interface AuditResponse {
+	entries: AuditEntry[];
+}
+
+export type VoiceIntent = 'confirm' | 'cancel' | 'other';
+
+export interface TranscribeResponse {
+	text: string;
+	raw: string;
+	audio_ms: number;
+	elapsed_ms: number;
+	intent: VoiceIntent;
+}
+
+/** Events pushed over `GET /api/ws`. */
+export type WsEvent =
+	| { type: 'kill_switch'; engaged: boolean; reason: string | null }
+	| { type: 'preview_expired'; token: string }
+	| { type: 'trade_executed'; preview_id: string; results: TradeResult[] }
+	| { type: 'positions_changed' };
 
 // ---- Transport -----------------------------------------------------------
 
 export const MOCK = import.meta.env.VITE_MOCK === '1';
 
-const SERVER_CODES: readonly string[] = [
-	'bad_request',
-	'bridge_unavailable',
-	'bridge_error',
-	'llm_error',
-	'internal'
-];
-
-interface RequestOptions {
+export interface RequestOptions {
 	method?: 'GET' | 'POST';
+	/** JSON body. */
 	body?: unknown;
+	/** Binary body (voice upload); sent with its own content type. */
+	blob?: Blob;
+	/** Expect a binary response (voice playback). */
+	asBlob?: boolean;
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	/** A 401 is an answer here (wrong login code), not a reason to leave for /login. */
+	keepOn401?: boolean;
 }
 
-function isErrorBody(v: unknown): v is ApiErrorBody {
-	if (typeof v !== 'object' || v === null || !('error' in v)) return false;
-	const e = (v as { error: unknown }).error;
-	return (
-		typeof e === 'object' &&
-		e !== null &&
-		typeof (e as { code?: unknown }).code === 'string' &&
-		typeof (e as { message?: unknown }).message === 'string'
-	);
+let onUnauthorized: (() => void) | null = null;
+
+/** The auth store registers here: any 401 outside `keepOn401` routes the user to /login. */
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+	onUnauthorized = fn;
 }
 
 async function networkRequest<T>(path: string, opts: RequestOptions): Promise<T> {
 	const timeout = AbortSignal.timeout(opts.timeoutMs ?? 10_000);
 	const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
 
+	const headers: Record<string, string> = {};
+	let body: BodyInit | undefined;
+	if (opts.blob) {
+		headers['content-type'] = opts.blob.type || 'application/octet-stream';
+		body = opts.blob;
+	} else if (opts.body !== undefined) {
+		headers['content-type'] = 'application/json';
+		body = JSON.stringify(opts.body);
+	}
+
 	let res: Response;
 	try {
 		res = await fetch(path, {
 			method: opts.method ?? 'GET',
-			headers: opts.body === undefined ? undefined : { 'content-type': 'application/json' },
-			body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+			headers,
+			body,
 			signal,
-			cache: 'no-store'
+			cache: 'no-store',
+			credentials: 'same-origin'
 		});
 	} catch {
 		if (opts.signal?.aborted) throw new ApiError('aborted', 'Request cancelled');
@@ -190,38 +342,41 @@ async function networkRequest<T>(path: string, opts: RequestOptions): Promise<T>
 		throw new ApiError('network', 'Cannot reach the Jarvis server');
 	}
 
-	let json: unknown = undefined;
-	let parsed = false;
-	try {
-		json = await res.json();
-		parsed = true;
-	} catch {
-		parsed = false;
-	}
-
 	if (!res.ok) {
-		if (parsed && isErrorBody(json)) {
-			const code = SERVER_CODES.includes(json.error.code) ? json.error.code : 'unknown';
-			throw new ApiError(code as ApiErrorCode | 'unknown', json.error.message, res.status);
+		let json: unknown;
+		try {
+			json = await res.json();
+		} catch {
+			json = undefined;
 		}
-		// A 5xx without our error shape is a dead proxy target, not an application error.
-		if (res.status >= 500) throw new ApiError('network', 'Cannot reach the Jarvis server', res.status);
-		throw new ApiError('unknown', `Unexpected response (HTTP ${res.status})`, res.status);
+		throw errorFromResponse(res.status, json, res.headers.get('retry-after'));
 	}
-	if (!parsed) {
+	if (res.status === 204) return undefined as T;
+	if (opts.asBlob) return (await res.blob()) as T;
+
+	try {
+		return (await res.json()) as T;
+	} catch {
 		// e.g. the SPA fallback page answering /api/* when no backend is wired up.
 		throw new ApiError('network', 'The server returned a non-JSON response', res.status);
 	}
-	return json as T;
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-	if (MOCK) {
-		const { mockRequest } = await import('./mock');
-		return mockRequest<T>(path, opts);
+	try {
+		if (MOCK) {
+			const { mockRequest } = await import('./mock');
+			return await mockRequest<T>(path, opts);
+		}
+		return await networkRequest<T>(path, opts);
+	} catch (e) {
+		if (e instanceof ApiError && e.isUnauthorized && !opts.keepOn401) onUnauthorized?.();
+		throw e;
 	}
-	return networkRequest<T>(path, opts);
 }
+
+const post = <T>(path: string, body?: unknown, extra: RequestOptions = {}) =>
+	request<T>(path, { method: 'POST', body, ...extra });
 
 // ---- Endpoints -----------------------------------------------------------
 
@@ -229,10 +384,56 @@ export const api = {
 	status: (signal?: AbortSignal) => request<Status>('/api/status', { signal }),
 	account: (signal?: AbortSignal) => request<Account>('/api/account', { signal }),
 	positions: (signal?: AbortSignal) => request<PositionsResponse>('/api/positions', { signal }),
+	/**
+	 * Pending orders. docs/api.md lists no read endpoint for them; `GET /api/orders` returning
+	 * `{orders}` is assumed (bridge `get_orders` shape). A server without it answers 404.
+	 */
+	orders: (signal?: AbortSignal) => request<OrdersResponse>('/api/orders', { signal }),
 	watchlist: (signal?: AbortSignal) => request<WatchlistResponse>('/api/watchlist', { signal }),
 	/** LLM turns can be slow on local models, so allow a generous timeout. */
 	chat: (body: ChatRequest, signal?: AbortSignal) =>
-		request<ChatResponse>('/api/chat', { method: 'POST', body, signal, timeoutMs: 180_000 })
-};
+		post<ChatResponse>('/api/chat', body, { signal, timeoutMs: 180_000 }),
 
-export type { RequestOptions };
+	confirm: (token: string) =>
+		post<ConfirmResponse>(`/api/confirm/${encodeURIComponent(token)}`, undefined, {
+			// Batch closes run sequentially on the server; allow for slow brokers.
+			timeoutMs: 60_000
+		}),
+	cancel: (token: string) => post<void>(`/api/cancel/${encodeURIComponent(token)}`),
+	readback: (token: string) =>
+		post<{ expires_at_ms: number }>(`/api/readback/${encodeURIComponent(token)}`),
+	closePosition: (ticket: number, volume: number | null) =>
+		post<PreviewDto>(`/api/positions/${ticket}/close`, { volume }),
+	closePositions: (body: ClosePositionsRequest) => post<PreviewDto>('/api/positions/close', body),
+	cancelOrder: (ticket: number) => post<PreviewDto>(`/api/orders/${ticket}/cancel`),
+
+	killSwitch: (signal?: AbortSignal) => request<KillSwitchState>('/api/killswitch', { signal }),
+	setKillSwitch: (body: { engaged: boolean; reason?: string; totp?: string }) =>
+		post<KillSwitchState>('/api/killswitch', body, { keepOn401: body.engaged === false }),
+
+	login: (body: LoginRequest) => post<Session>('/api/auth/login', body, { keepOn401: true }),
+	logout: () => post<void>('/api/auth/logout', undefined, { keepOn401: true }),
+	me: (signal?: AbortSignal) => request<Session>('/api/auth/me', { signal, keepOn401: true }),
+
+	audit: (opts: { limit?: number; beforeId?: number | null } = {}, signal?: AbortSignal) => {
+		const q = new URLSearchParams({ limit: String(opts.limit ?? 50) });
+		if (opts.beforeId != null) q.set('before_id', String(opts.beforeId));
+		return request<AuditResponse>(`/api/audit?${q}`, { signal });
+	},
+
+	transcribe: (wav: Blob, signal?: AbortSignal) =>
+		request<TranscribeResponse>('/api/voice/transcribe', {
+			method: 'POST',
+			blob: wav,
+			signal,
+			timeoutMs: 60_000
+		}),
+	speak: (text: string, signal?: AbortSignal) =>
+		request<Blob>('/api/voice/speak', {
+			method: 'POST',
+			body: { text },
+			asBlob: true,
+			signal,
+			timeoutMs: 60_000
+		})
+};

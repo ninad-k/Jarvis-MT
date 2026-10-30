@@ -1,11 +1,14 @@
 import {
 	api,
 	type Account,
+	type PendingOrder,
 	type Position,
 	type PriceTick,
 	type Status,
 	type WatchlistResponse
 } from '#lib/api.ts';
+import { writeBlockReason } from '#lib/trading.ts';
+import { killSwitch } from './killswitch.svelte';
 import { Poller } from './poller.svelte';
 
 const POLL_MS = 2000;
@@ -42,13 +45,21 @@ export const moves = new Moves();
 
 export const status = new Poller<Status>((s) => api.status(s), {
 	interval: STATUS_MS,
-	maxInterval: MAX_BACKOFF_MS
+	maxInterval: MAX_BACKOFF_MS,
+	onData: (next) => {
+		if (next.kill_switch) killSwitch.apply(next.kill_switch);
+	}
 });
 export const account = new Poller<Account>((s) => api.account(s), {
 	interval: POLL_MS,
 	maxInterval: MAX_BACKOFF_MS
 });
 export const positions = new Poller<Position[]>(async (s) => (await api.positions(s)).positions, {
+	interval: POLL_MS,
+	maxInterval: MAX_BACKOFF_MS
+});
+/** Pending orders. `GET /api/orders` is assumed (see api.ts); the section hides itself on a 404. */
+export const orders = new Poller<PendingOrder[]>(async (s) => (await api.orders(s)).orders, {
 	interval: POLL_MS,
 	maxInterval: MAX_BACKOFF_MS
 });
@@ -72,6 +83,25 @@ class Backend {
 	get bridgeDown(): boolean {
 		return !this.offline && status.data !== null && !status.data.bridge.connected;
 	}
+	/** The kill switch is engaged on the server (status poll, toggle response or WebSocket). */
+	get killSwitchEngaged(): boolean {
+		return killSwitch.engaged;
+	}
+	/** Why every write control is disabled right now, or null when trading actions are allowed. */
+	get writeBlockedReason(): string | null {
+		return writeBlockReason({
+			offline: this.offline,
+			bridgeDown: this.bridgeDown,
+			killSwitchEngaged: killSwitch.engaged
+		});
+	}
+	/** Whether the server reports microphone transcription as available. */
+	get sttAvailable(): boolean {
+		return status.data?.voice?.stt === true;
+	}
+	get ttsAvailable(): boolean {
+		return status.data?.voice?.tts === true;
+	}
 	/** Anything that isn't explicitly "demo" is treated as live money. */
 	get isLive(): boolean {
 		return status.data !== null && status.data.mode !== 'demo';
@@ -80,8 +110,21 @@ class Backend {
 
 export const backend = new Backend();
 
+const all = [status, account, positions, orders, watchlist];
+
+/** Re-read everything a trade can change. Called after an execute and on server events. */
+export function refreshTrading(): void {
+	positions.refresh();
+	orders.refresh();
+	account.refresh();
+}
+
+/** Drop cached data (sign-out), so the next user never sees the previous one's positions. */
+export function resetPollers(): void {
+	for (const p of all) p.reset();
+}
+
 export function startPolling(): () => void {
-	const all = [status, account, positions, watchlist];
 	for (const p of all) p.start();
 	return () => {
 		for (const p of all) p.stop();

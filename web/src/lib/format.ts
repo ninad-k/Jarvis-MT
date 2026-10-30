@@ -79,3 +79,26 @@ export function summarizeArgs(args: Record<string, unknown> | null | undefined):
 	if (entries.length === 1) return short(entries[0][1]);
 	return entries.map(([k, v]) => `${k}=${short(v)}`).join(', ');
 }
+
+/** Audit timestamps may be Unix seconds, Unix milliseconds or an ISO string. Returns epoch ms. */
+export function auditMs(ts: number | string): number {
+	if (typeof ts === 'string') {
+		const t = Date.parse(ts);
+		return Number.isNaN(t) ? 0 : t;
+	}
+	return ts < 1e11 ? ts * 1000 : ts;
+}
+
+/** One-line summary of an audit payload: `key=value` pairs, long values clipped. */
+export function payloadSummary(payload: unknown, max = 110): string {
+	if (payload === null || payload === undefined) return '';
+	if (typeof payload !== 'object') return String(payload).slice(0, max);
+	const parts: string[] = [];
+	for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+		if (v === null || v === undefined) continue;
+		const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+		parts.push(`${k}=${val.length > 32 ? `${val.slice(0, 31)}…` : val}`);
+	}
+	const line = parts.join(' ');
+	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}

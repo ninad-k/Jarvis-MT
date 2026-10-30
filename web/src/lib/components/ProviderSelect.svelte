@@ -7,7 +7,7 @@
 </script>
 
 <div class="flex items-center gap-2 {klass} sm:col-auto">
-	<label for="llm-provider" class="hud-title">LLM</label>
+	<label for="llm-provider" class="hud-title max-[420px]:sr-only">LLM</label>
 	<select
 		id="llm-provider"
 		class="num h-7 min-w-0 flex-1 border border-line bg-panel/70 px-2 text-2xs text-ink focus-visible:border-accent disabled:opacity-50 sm:max-w-none sm:flex-none"

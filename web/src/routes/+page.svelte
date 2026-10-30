@@ -9,13 +9,28 @@
 	import Transcript from '#lib/components/Transcript.svelte';
 	import Composer from '#lib/components/Composer.svelte';
 	import Segmented from '#lib/components/Segmented.svelte';
+	import ConfirmModal from '#lib/components/ConfirmModal.svelte';
 	import { positions, startPolling, watchlist } from '#lib/state/hud.svelte.ts';
 	import { chat } from '#lib/state/chat.svelte.ts';
+	import { auth } from '#lib/state/auth.svelte.ts';
+	import { events } from '#lib/state/events.svelte.ts';
+	import { killSwitch } from '#lib/state/killswitch.svelte.ts';
+	import { preview } from '#lib/state/preview.svelte.ts';
+	import { attachPushToTalk } from '#lib/state/voice.svelte.ts';
 
 	type Tab = 'chat' | 'watchlist' | 'positions';
 	let tab = $state<Tab>('chat');
 
-	onMount(() => startPolling());
+	onMount(() => {
+		const stops = [startPolling(), events.start(), attachPushToTalk()];
+		void auth.refresh();
+		return () => stops.forEach((stop) => stop());
+	});
+
+	// Engaging the kill switch revokes every live token: close the open confirmation with a reason.
+	$effect(() => {
+		if (killSwitch.engaged) preview.onKillSwitch();
+	});
 
 	const tabs = $derived([
 		{ id: 'chat' as const, label: 'Chat' },
@@ -26,6 +41,8 @@
 	// Below lg only the selected tab's panel is shown; at lg everything is visible.
 	const show = (t: Tab) => (tab === t ? '' : 'max-lg:hidden');
 </script>
+
+<ConfirmModal />
 
 <div class="flex h-dvh flex-col">
 	<TopBar />

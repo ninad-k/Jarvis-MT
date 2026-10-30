@@ -3,5 +3,6 @@
 	"compilerOptions": {
 		"strict": true
 	},
-	"include": ["src", "vite.config.ts"]
+	"include": ["src", "vite.config.ts", "vitest.config.ts", "playwright.config.ts", "e2e"],
+	"exclude": ["src/service-worker"]
 }

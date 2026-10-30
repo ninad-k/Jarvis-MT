@@ -12,8 +12,9 @@ const reduced = () =>
 	typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * Single source of truth for the orb. The chat store drives it today; Sprint 3 voice will
- * call `set('listening')` and `setLevel()` with the microphone / TTS level.
+ * Single source of truth for the orb. The chat store and the voice stores drive it:
+ * `listening` follows the live microphone level, `speaking` follows the playing TTS audio's level
+ * (`speakLive`), and `speak(ms)` is a synthetic envelope kept for dev pinning.
  */
 class OrbStore {
 	state = $state<OrbState>('idle');
@@ -22,6 +23,8 @@ class OrbStore {
 	private speakStart = 0;
 	private speakMs = 0;
 	private level = 0;
+	/** True while `speaking` is driven by a real audio level instead of the synthetic envelope. */
+	private live = false;
 
 	get label(): string {
 		return ORB_LABEL[this.state];
@@ -29,7 +32,9 @@ class OrbStore {
 
 	set(next: OrbState): void {
 		clearTimeout(this.timer);
+		this.live = false;
 		this.state = next;
+		if (next !== 'listening' && next !== 'speaking') this.level = 0;
 	}
 
 	/** Externally measured audio level (0..1), used while listening or speaking real audio. */
@@ -37,7 +42,13 @@ class OrbStore {
 		this.level = Math.min(1, Math.max(0, v));
 	}
 
-	/** Fake speech envelope for ~`ms`, then back to idle. Replaced by real TTS levels in Sprint 3. */
+	/** Speaking driven by `setLevel()` from real playback; stays until `set()` is called. */
+	speakLive(): void {
+		this.set('speaking');
+		this.live = true;
+	}
+
+	/** Synthetic speech envelope for ~`ms`, then back to idle (dev pinning only). */
 	speak(ms = 1500): void {
 		this.set('speaking');
 		this.speakStart = performance.now();
@@ -53,6 +64,7 @@ class OrbStore {
 
 	/** Current amplitude 0..1. Read every frame by the renderer, so intentionally not reactive. */
 	get amplitude(): number {
+		if (this.state === 'speaking' && this.live) return this.level;
 		if (this.state === 'speaking') {
 			if (reduced()) return 0.4;
 			const t = (performance.now() - this.speakStart) / 1000;

@@ -1,6 +1,10 @@
 <script lang="ts">
 	import { chat, MAX_MESSAGE } from '#lib/state/chat.svelte.ts';
 	import { backend } from '#lib/state/hud.svelte.ts';
+	import { sendTurn } from '#lib/state/turn.svelte.ts';
+	import { voice } from '#lib/state/voice.svelte.ts';
+	import { primeAudio } from '#lib/voice/audio.ts';
+	import MicButton from './MicButton.svelte';
 
 	let text = $state('');
 	let input = $state<HTMLTextAreaElement>();
@@ -22,7 +26,8 @@
 		hadFocus = document.activeElement === input;
 		text = '';
 		queueMicrotask(grow);
-		await chat.send(msg);
+		primeAudio(); // lets a spoken reply play (browsers need a gesture first)
+		await sendTurn(msg);
 	}
 
 	function onkeydown(e: KeyboardEvent) {
@@ -81,29 +86,7 @@
 			{/if}
 		</div>
 
-		<!-- Voice lands in Sprint 3: focusable and announced, but inert. -->
-		<span class="group relative">
-			<button
-				type="button"
-				aria-disabled="true"
-				aria-describedby="mic-tip"
-				aria-label="Voice input"
-				class="grid size-10 cursor-not-allowed place-items-center border border-line text-faint"
-				onclick={(e) => e.preventDefault()}
-			>
-				<svg viewBox="0 0 24 24" class="size-5" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-					<rect x="9" y="3" width="6" height="11" rx="3" />
-					<path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke-linecap="round" />
-				</svg>
-			</button>
-			<span
-				id="mic-tip"
-				role="tooltip"
-				class="pointer-events-none absolute right-0 bottom-full mb-2 hidden border border-line-hi bg-deck px-2 py-1 text-2xs whitespace-nowrap text-mute group-focus-within:block group-hover:block"
-			>
-				Voice arrives in Sprint 3
-			</span>
-		</span>
+		<MicButton />
 
 		<button
 			type="submit"
@@ -113,5 +96,12 @@
 			Send
 		</button>
 	</div>
-	<p class="sr-only">Enter sends, Shift plus Enter adds a new line.</p>
+	{#if voice.message}
+		<p class="mx-auto mt-2 max-w-3xl text-xs text-warn" role="alert" data-testid="voice-message">
+			<span aria-hidden="true">△ </span>{voice.message}
+		</p>
+	{/if}
+	<p class="sr-only">
+		Enter sends, Shift plus Enter adds a new line. Outside this box, hold Space to talk.
+	</p>
 </form>

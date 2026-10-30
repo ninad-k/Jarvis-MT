@@ -1,2 +1,12 @@
 allowBuilds:
   esbuild: true
+# pnpm ignores `minimum-release-age` in .npmrc; this is the setting it reads. A version must be
+# a week old (in minutes) before it can be chosen when the lockfile is updated, and the
+# lockfile is checked against it on install.
+minimumReleaseAge: 10080
+# These three exact versions were locked before the rule was active and are younger than a week.
+# They pass on their own from 2026-11-03: delete this list then.
+minimumReleaseAgeExclude:
+  - magic-string@1.4.5
+  - postcss@8.5.32
+  - svelte@5.57.3

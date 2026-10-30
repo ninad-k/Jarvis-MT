@@ -62,6 +62,18 @@ export class Poller<T> {
 		document.removeEventListener('visibilitychange', this.onVisibility);
 	}
 
+	/** Forget everything (sign-out): the next poll starts from a blank state. */
+	reset(): void {
+		this.generation++;
+		this.ctrl?.abort();
+		this.data = null;
+		this.error = null;
+		this.settled = false;
+		this.lastOk = null;
+		this.failures = 0;
+		if (this.running) void this.poll();
+	}
+
 	/** Poll now and restart the schedule. */
 	refresh(): void {
 		if (this.running) void this.poll();

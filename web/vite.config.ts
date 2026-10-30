@@ -24,9 +24,9 @@ export default defineConfig({
 		})
 	],
 	server: {
-		proxy: { '/api': { target: API_TARGET } }
+		proxy: { '/api': { target: API_TARGET, ws: true } }
 	},
 	preview: {
-		proxy: { '/api': { target: API_TARGET } }
+		proxy: { '/api': { target: API_TARGET, ws: true } }
 	}
 });
