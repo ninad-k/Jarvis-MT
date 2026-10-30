@@ -1,0 +1,31 @@
+[package]
+name = "jarvis-bridge-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes = "1.12.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros", "net"] }
+tracing = "0.1.44"
+uuid = { version = "1.26.1", features = ["v4"] }
+zeromq = { version = "0.6.0", default-features = false, features = ["tokio-runtime", "tcp-transport"] }
+
+[dev-dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tracing-subscriber = "0.3.23"
+
+[features]
+# In-process ZeroMQ REP server that speaks the bridge protocol with canned data (tests, offline dev).
+mock = []
+
+# Standalone mock EA for offline development: `cargo run -p jarvis-bridge-client --features mock --example mock_server`
+[[example]]
+name = "mock_server"
+required-features = ["mock"]

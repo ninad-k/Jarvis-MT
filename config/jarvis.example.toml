@@ -1,0 +1,65 @@
+# Jarvis MT settings. Copy to config/jarvis.toml and edit.
+# Secrets (API keys) never go here: put them in .env (see .env.example).
+
+# "demo" (default) or "live". LIVE also needs the account to be real; DEMO refuses to
+# start against a real account.
+mode = "demo"
+
+[server]
+bind = "127.0.0.1:8787"
+
+[bridge]
+# The EA binds here. Must be loopback.
+endpoint = "tcp://127.0.0.1:5555"
+timeout_ms = 3000
+
+[database]
+url = "sqlite://data/jarvis.db"
+
+[symbols]
+# Appended to every resolved symbol, for brokers that use names like "XAUUSD.m".
+suffix = ""
+# Symbols shown in the UI watchlist.
+watchlist = ["XAUUSD", "USTEC", "US30", "EURUSD", "GBPUSD", "BTCUSD"]
+
+# Spoken/typed name -> broker symbol (before suffix). Matching is case-insensitive.
+[symbols.aliases]
+gold = "XAUUSD"
+cold = "XAUUSD"     # common speech-to-text mishearing
+sona = "XAUUSD"     # Hindi
+silver = "XAGUSD"
+nasdaq = "USTEC"         # IC Markets name; other brokers use US100 or NAS100
+nas = "USTEC"
+dow = "US30"
+"dow jones" = "US30"
+"s&p" = "US500"
+spx = "US500"
+euro = "EURUSD"
+fiber = "EURUSD"
+cable = "GBPUSD"
+pound = "GBPUSD"
+bitcoin = "BTCUSD"
+btc = "BTCUSD"
+
+[llm]
+# Provider used when a chat request does not name one.
+default = "local"
+
+[[llm.providers]]
+name = "local"
+kind = "ollama"
+model = "qwen3.5:9b"            # fits an 8 GB GPU; ~2 s per reply once loaded
+base_url = "http://127.0.0.1:11434"
+timeout_secs = 180              # the first request after a cold start loads the model (~100 s)
+
+[[llm.providers]]
+name = "claude"
+kind = "anthropic"
+model = "claude-sonnet-5-5"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[[llm.providers]]
+name = "openai"
+kind = "openai"
+model = "gpt-5"                 # set to the model your key can use
+api_key_env = "OPENAI_API_KEY"

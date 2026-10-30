@@ -1,0 +1,1 @@
+{"id":"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1005","ok":true,"data":{"orders":[{"ticket":2001001,"symbol":"EURUSD","type":"buy_limit","volume_initial":0.2,"volume_current":0.2,"price_open":1.08,"sl":1.075,"tp":1.09,"time_setup":1793254800,"comment":""}]},"retcode":0}
