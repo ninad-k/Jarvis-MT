@@ -1,0 +1,110 @@
+name: Bug report
+description: Something does not work as documented.
+title: "[Bug]: "
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        **Security problems** (for example a way around the confirmation step, the limits or the kill switch) must not be reported here. Use [private vulnerability reporting](https://github.com/ninad-k/Jarvis-MT/security/advisories/new) instead.
+
+        **Remove secrets before you paste anything.** Redact API keys, tokens, account numbers, logins and broker server names.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that shows the problem. Include what you typed or said.
+      placeholder: |
+        1. Start jarvis-api with the demo config
+        2. Type "show my positions"
+        3. See the error
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - API (jarvis-api)
+        - MT5 EA (JarvisBridge)
+        - Web app
+        - Desktop app
+        - Voice (speech to text or text to speech)
+        - Action gate (limits, confirmation, kill switch)
+        - LLM provider
+        - Docs
+        - Other or not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Jarvis MT version
+      description: A release tag such as v0.1.0, or the commit hash if you build from source.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: account-mode
+    attributes:
+      label: MT5 account type
+      description: Were you connected to a demo or a real account?
+      options:
+        - Demo
+        - Real
+        - Not connected (mock bridge)
+    validations:
+      required: true
+
+  - type: input
+    id: mt5
+    attributes:
+      label: MetaTrader 5 build
+      description: Help > About in the terminal. Leave the broker name out if you prefer.
+      placeholder: "Build 5xxx"
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11 23H2
+
+  - type: dropdown
+    id: llm
+    attributes:
+      label: LLM provider
+      options:
+        - Ollama (local)
+        - Anthropic
+        - OpenAI
+        - Not relevant
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and output
+      description: API log lines (`RUST_LOG=debug`), the MT5 Experts tab, or browser console output. Redact secrets and account details.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I removed API keys, tokens, account numbers and logins from everything above.
+          required: true

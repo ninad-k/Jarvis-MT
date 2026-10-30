@@ -49,3 +49,25 @@ web/playwright-report/
 *.pem
 *.key
 /target-*/
+
+# --- CI, security scans and releases ---
+*.sarif
+/dist/
+/release/
+/scratch/
+gitleaks-report.*
+semgrep-report.*
+
+# desktop (Tauri)
+apps/desktop/node_modules/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/schemas/
+apps/desktop/build/
+apps/desktop/.svelte-kit/
+
+# editors and OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+Thumbs.db
+.DS_Store

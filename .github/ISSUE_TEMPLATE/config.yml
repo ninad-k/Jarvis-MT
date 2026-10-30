@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea (Discussions)
+    url: https://github.com/ninad-k/Jarvis-MT/discussions
+    about: Ask how to set something up, share a setup, or float an idea before opening an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/ninad-k/Jarvis-MT/security/policy
+    about: Do not open a public issue for a vulnerability. Read the policy and report it privately.

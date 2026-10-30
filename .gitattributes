@@ -1,0 +1,40 @@
+# Normalise line endings: text files are stored with LF in the repository.
+* text=auto eol=lf
+
+# MetaEditor and Windows PowerShell 5.1 are happiest with CRLF in the working tree.
+# The repository still stores LF (git converts on checkout).
+*.mq5  text eol=crlf
+*.mqh  text eol=crlf
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Scripts that run on Linux runners or in Git Bash must keep LF.
+*.sh   text eol=lf
+
+# Binary files: never touch, never diff as text.
+*.dll  binary
+*.exe  binary
+*.ex5  binary
+*.lib  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.otf  binary
+*.wav  binary
+*.onnx binary
+*.bin  binary
+*.zip  binary
+*.db   binary
+
+# Lockfiles are generated: collapse them in diffs and language stats.
+Cargo.lock       linguist-generated=true
+pnpm-lock.yaml   linguist-generated=true
+package-lock.json linguist-generated=true

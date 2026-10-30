@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the stable toolchain
+        shell: bash
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # `mock` is the in-process bridge used by tests. The `whisper` feature needs
+      # CMake and LLVM and is built in whisper.yml instead.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features jarvis-bridge-client/mock -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --features jarvis-bridge-client/mock
+
+  web:
+    name: Web (check, unit, build, e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # pnpm is installed with npm so that a future `packageManager` field cannot conflict
+      # with a version pinned in this file. The lockfile format (9.0) works with pnpm 9 to 11.
+      - name: Install pnpm
+        run: npm install --global pnpm@11.24.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run check
+
+      - name: Unit tests (vitest)
+        run: pnpm run --if-present test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Install Playwright browser
+        if: hashFiles('web/playwright.config.ts', 'web/playwright.config.js', 'web/playwright.config.mjs') != ''
+        run: pnpm exec playwright install --with-deps chromium
+
+      # The Playwright config starts `pnpm run dev:mock` (no MT5 or API needed).
+      - name: End-to-end tests (Playwright, chromium)
+        if: hashFiles('web/playwright.config.ts', 'web/playwright.config.js', 'web/playwright.config.mjs') != ''
+        run: pnpm run test:e2e
+        env:
+          CI: "true"
+
+      - name: Upload Playwright report
+        if: failure() && hashFiles('web/playwright.config.ts', 'web/playwright.config.js', 'web/playwright.config.mjs') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  desktop:
+    name: Desktop (Tauri, debug build)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The job passes without doing anything until apps/desktop/src-tauri exists.
+      - name: Detect the desktop app
+        id: detect
+        shell: bash
+        run: |
+          if [ -f apps/desktop/src-tauri/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "apps/desktop/src-tauri not found; skipping."
+          fi
+
+      - name: Install the stable toolchain
+        if: steps.detect.outputs.present == 'true'
+        shell: bash
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+
+      - name: Cache Cargo
+        if: steps.detect.outputs.present == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Install pnpm
+        if: steps.detect.outputs.present == 'true'
+        run: npm install --global pnpm@11.24.0
+
+      - name: Set up Node.js
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install desktop dependencies
+        if: steps.detect.outputs.present == 'true' && hashFiles('apps/desktop/pnpm-lock.yaml') != ''
+        run: pnpm --dir apps/desktop install --frozen-lockfile
+
+      - name: Format
+        if: steps.detect.outputs.present == 'true'
+        working-directory: apps/desktop/src-tauri
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        if: steps.detect.outputs.present == 'true'
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build (debug)
+        if: steps.detect.outputs.present == 'true'
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --locked
+
+  docs:
+    name: Docs (relative links)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # --offline checks links to files in the repository and never touches the network,
+      # so the job cannot fail because a third-party site is down.
+      - name: Check Markdown links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --offline
+            --no-progress
+            --root-dir ${{ github.workspace }}
+            './*.md'
+            './docs/**/*.md'
+            './tasks/**/*.md'
+            './web/README.md'
+            './mql5/**/*.md'
+            './.github/**/*.md'
+          fail: true
+
+  workflows:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        run: pipx run actionlint-py==1.7.12.25 -color
+
+  # One stable name for branch protection: require "CI result" instead of each job.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [rust, web, desktop, docs, workflows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) exit 1 ;;
+          esac

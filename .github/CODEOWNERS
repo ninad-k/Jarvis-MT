@@ -1,0 +1,13 @@
+# Default owner for everything.
+*                   @ninad-k
+
+# Safety-critical code: every change here is reviewed by the maintainer.
+/mql5/              @ninad-k
+/crates/gate/       @ninad-k
+/crates/api/        @ninad-k
+
+# Supply chain and release automation.
+/.github/           @ninad-k
+/deny.toml          @ninad-k
+/SECURITY.md        @ninad-k
+/SPEC.md            @ninad-k

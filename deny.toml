@@ -1,0 +1,66 @@
+# cargo-deny configuration. Run with `cargo deny check` (CI: .github/workflows/security.yml).
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check every target we ship or build on, not just the host.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+version = 2
+# Yanked crates are a hard failure.
+yanked = "deny"
+# Unmaintained crates are reported as warnings (workspace dependencies only,
+# so an unmaintained transitive dependency does not block a release).
+unmaintained = "workspace"
+# Advisories are denied by default. Ignore an advisory only with a reason and a
+# review date, for example:
+#   { id = "RUSTSEC-0000-0000", reason = "not reachable: we never call X" },
+ignore = []
+
+[licenses]
+version = 2
+# The project is distributed under Apache-2.0, so only permissive licences and
+# weak copyleft (MPL-2.0, file level) are accepted. Strong copyleft (GPL, LGPL
+# as the only option) and "no licence" are rejected.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    # Public-domain dedication. Needed by whisper-rs and whisper-rs-sys (feature `whisper`).
+    "Unlicense",
+]
+confidence-threshold = 0.9
+# Some allowed licences are only needed by crates that are not in the root
+# workspace yet (for example MPL-2.0 and Apache-2.0 WITH LLVM-exception come in
+# with the Tauri desktop shell). Do not warn about them.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions are common while the ecosystem moves (for example two
+# `syn` majors). Warn so they stay visible, do not fail.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies inside the workspace may omit a version.
+allow-wildcard-paths = true
+highlight = "all"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,234 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: cargo-deny (workspace)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+
+      # The Tauri shell is excluded from the workspace and has its own lockfile.
+      - name: cargo-deny (desktop)
+        if: hashFiles('apps/desktop/src-tauri/Cargo.lock') != ''
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: apps/desktop/src-tauri/Cargo.toml
+          command: check
+          arguments: --all-features --config deny.toml
+
+  cargo-audit:
+    name: cargo-audit (RustSec)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-audit
+
+      # RUSTSEC-2023-0071 (rsa, Marvin attack) is listed in Cargo.lock only because sqlx
+      # declares an optional MySQL driver. `cargo tree -i rsa --target all -e all` shows
+      # that rsa is not compiled into any Jarvis MT binary and no fix exists upstream.
+      # Remove the ignore when sqlx drops it from the lockfile.
+      - name: Audit the workspace lockfile
+        run: cargo audit --ignore RUSTSEC-2023-0071
+
+      - name: Audit the desktop lockfile
+        if: hashFiles('apps/desktop/src-tauri/Cargo.lock') != ''
+        run: cargo audit --file apps/desktop/src-tauri/Cargo.lock
+
+  pnpm-audit:
+    name: pnpm audit (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [web, apps/desktop]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect the lockfile
+        id: detect
+        run: |
+          if [ -f "${{ matrix.dir }}/pnpm-lock.yaml" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "${{ matrix.dir }}/pnpm-lock.yaml not found; skipping."
+          fi
+
+      - name: Set up Node.js
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        if: steps.detect.outputs.present == 'true'
+        run: npm install --global pnpm@11.24.0
+
+      - name: Audit production dependencies
+        if: steps.detect.outputs.present == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: pnpm audit --prod --audit-level high
+
+  gitleaks:
+    name: gitleaks (full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The CLI is used instead of gitleaks/gitleaks-action, whose licence terms require a
+      # key for organisation accounts. The download is pinned by SHA-256.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
+
+      - name: Scan the git history
+        run: gitleaks git --redact --no-banner --verbose --exit-code 1 .
+
+  semgrep:
+    name: semgrep (SARIF to code scanning)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install semgrep
+        run: python -m pip install --no-cache-dir semgrep==1.183.0
+
+      - name: Scan
+        run: |
+          semgrep scan \
+            --config p/default --config p/rust --config p/typescript --config p/secrets \
+            --config p/github-actions \
+            --metrics=off \
+            --exclude node_modules --exclude target --exclude build --exclude .svelte-kit \
+            --sarif --output semgrep.sarif
+
+      # Forks cannot write code-scanning alerts.
+      - name: Upload SARIF
+        if: always() && hashFiles('semgrep.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      # Semgrep marks "note" rules (low-risk hygiene such as env::args) as blocking by itself.
+      # Fail the job only for results at warning level or above; notes stay visible in code
+      # scanning.
+      - name: Gate on warning and error results
+        run: |
+          python - <<'PY'
+          import json, sys
+          sarif = json.load(open("semgrep.sarif", encoding="utf-8"))
+          bad = []
+          notes = 0
+          for run in sarif["runs"]:
+              levels = {r["id"]: r.get("defaultConfiguration", {}).get("level", "warning")
+                        for r in run["tool"]["driver"].get("rules", [])}
+              for res in run["results"]:
+                  level = res.get("level") or levels.get(res["ruleId"], "warning")
+                  loc = res["locations"][0]["physicalLocation"]
+                  where = f'{loc["artifactLocation"]["uri"]}:{loc["region"]["startLine"]}'
+                  if level in ("error", "warning"):
+                      bad.append(f"{level}: {res['ruleId']} at {where}")
+                  else:
+                      notes += 1
+          print(f"{len(bad)} blocking result(s), {notes} note(s)")
+          for line in bad:
+              print(line)
+          sys.exit(1 if bad else 0)
+          PY
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Rust is supported by CodeQL since 2.23 (GA); `actions` analyses these workflows.
+        language: [javascript-typescript, rust, actions]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}
