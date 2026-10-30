@@ -106,11 +106,14 @@ Plan and decisions: [plan-sprints-2-5.md](plan-sprints-2-5.md).
 - [x] Open-source project setup: CI, security scanning, release workflow, Dependabot, templates, community docs, ADRs.
 - [x] Security review and fixes (docs/security/audit-2026-10-30.md), including BR-1 (authenticated bridge, protocol 2) and BR-2 (libzmq 4.3.5).
 - [x] Live verification on a demo account: read, propose, confirm, close and kill switch through the full stack over the signed bridge.
+- [x] Personas (Jarvis and Friday) with a switch in the HUD, and a Settings page with preferences and tighten-only limits.
+- [x] Broker symbol mapping (ADR-0018): canonical names with aliases, curated, detected and user maps per broker. Verified on CFI3-Demo (EA 0.4.0): 5,867 symbols read, 30 of 35 instruments mapped; the other five are not offered by that broker.
+- [x] GitHub settings: private vulnerability reporting, branch protection on `main`, a `v*` tag ruleset, a `release` environment with a required reviewer, secret scanning with push protection.
+- [x] Low/Info audit findings: all fixed or accepted with a reason, except REL-2 (code signing, below).
 
 ## Open
 
-- [ ] Remaining Low/Info audit findings (see the audit's Findings table for status).
-- [ ] Code-sign the Windows installer (needs a signing certificate).
-- [ ] GitHub settings: private vulnerability reporting, branch protection on `main`, tag protection for `v*`, a `release` environment with a required reviewer, secret scanning with push protection.
+- [ ] Code-sign the Windows installer (needs a signing certificate). Audit finding REL-2.
+- [ ] Stop and restart the EA mid-session against a real terminal and confirm the next call recovers (covered by mock tests).
 - [ ] Android and iOS builds (scaffolded; need the Android SDK or macOS).
 - [ ] First tagged release (`v0.2.0`) once the above are settled.
