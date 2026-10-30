@@ -1549,6 +1549,7 @@ dependencies = [
  "jarvis-bridge-client",
  "jarvis-gate",
  "jarvis-llm",
+ "jarvis-persona",
  "jarvis-voice",
  "jsonwebtoken",
  "qrcode",

@@ -325,7 +325,16 @@ ever sent to the browser, never to the LLM.
 - `GET /api/audit?limit=100&before_id=` → `{"entries":[{"id","ts","session_id","kind","payload"}]}` newest first.
 
 Audit kinds added: `intent`, `preview`, `gate_rejected`, `confirm`, `confirm_second`,
-`cancel`, `trade_result`, `kill_switch`, `login`, `login_failed`, `voice_stt`, `voice_tts`.
+`cancel`, `trade_result`, `kill_switch`, `login`, `login_failed`, `voice_stt`, `voice_tts`,
+`limits_changed`, `ungrounded_reply`, `ungrounded_reply_blocked`.
+
+**Grounding check.** Every final chat reply is checked for figures (prices, amounts,
+percentages, lots) that did not come from a tool result, the user's own messages or the
+clock in this conversation. An ungrounded reply is never shown: the model is asked once to
+fetch the figures with a tool (`ungrounded_reply` audit row); if it still states an
+unsourced figure, the user gets "I couldn't verify that from MetaTrader just now, so I
+won't guess. Please ask again." (`ungrounded_reply_blocked`). This applies identically to
+every persona and provider.
 
 - `intent` rows are written once per chat turn, **only for intents other than `Other`**
   (a confirm, cancel, order, close, modify or cancel-orders request); small talk and questions
@@ -537,7 +546,11 @@ The config file sets the limits. The UI can only make them **stricter**.
   `max_lot`, `max_positions`, `max_daily_loss` ≤ config; `allowed_symbols` ⊆ config;
   `trading_hours` days ⊆ config days and the window inside the config window (same-day
   windows only). Anything looser → 422 `limit_not_stricter`. Needs a valid TOTP code
-  when login is on (401 `unauthorized` "code not accepted" otherwise).
+  when login is on (401 `unauthorized` "code not accepted" otherwise). The fields sent are
+  merged into the stored overrides (fields left out keep their override); an empty body
+  is 400. Malformed (400) and looser (422) requests are refused before the TOTP check, so
+  they do not use up the code. A change emits `settings_changed` and writes a
+  `limits_changed` audit row.
 - `DELETE /api/settings/limits` `{ "totp": "123456" }` → removes the overrides (back to
   the config values). Needs a TOTP code when login is on.
 
@@ -554,5 +567,12 @@ the effective limits at that moment.
   in the body to preview another persona's voice in settings).
 - `POST /api/voice/transcribe?wake=1`: in wake-word mode the response gains
   `"wake": {"detected": true, "persona": "friday", "command": "what's gold at"}`.
-  A detected wake phrase also switches the active persona to the one that was called.
-  Without a wake phrase, `detected` is false and the UI ignores the segment.
+  A detected wake phrase also switches the active persona to the one that was called,
+  except while a confirmation is open (the phrase is still detected and its command used,
+  but the persona stays the one the confirmation started with).
+  Without a wake phrase the object is `{"detected": false, "persona": null, "command": ""}`
+  and the UI ignores the segment.
+- `GET /api/audit` entries gain `"persona"` (null for rows written before personas).
+- `GET /api/watchlist` uses the caller's watchlist and aliases from settings.
+- If saved limit overrides cannot be read at startup, new orders are refused until they
+  are reset with `DELETE /api/settings/limits` (fail closed, like the kill switch).

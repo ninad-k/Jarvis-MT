@@ -24,13 +24,13 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::agent::ToolCallSummary;
+use crate::agent::{ToolCallSummary, TurnUser};
 use crate::auth::http::{self as auth_http, MaybeSession, authenticate_headers, peer_ip_of};
 use crate::security::{self, Security};
 use crate::state::{AppState, Budget, ProviderSlot};
 use crate::static_site::StaticSite;
 use crate::trading::{ConfirmResponse, PreviewDto, ProposeRequest, ProposeSource, TradingError};
-use crate::{voice, ws};
+use crate::{settings_routes, voice, ws};
 
 /// Longest accepted chat message, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 2000;
@@ -60,7 +60,7 @@ pub fn app(state: AppState) -> Router {
         .collect();
     let cors = CorsLayer::new()
         .allow_origin(dev_origins)
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([header::CONTENT_TYPE])
         .allow_credentials(true);
 
@@ -88,6 +88,17 @@ pub fn app(state: AppState) -> Router {
         .route("/api/positions", get(positions))
         .route("/api/orders", get(orders))
         .route("/api/watchlist", get(watchlist))
+        .route("/api/personas", get(settings_routes::personas))
+        .route(
+            "/api/settings",
+            get(settings_routes::settings_get).put(settings_routes::settings_put),
+        )
+        .route(
+            "/api/settings/limits",
+            get(settings_routes::limits_get)
+                .put(settings_routes::limits_put)
+                .delete(settings_routes::limits_delete),
+        )
         .route("/api/cancel/{token}", post(cancel))
         .route("/api/readback/{token}", post(readback))
         .route("/api/positions/{ticket}/close", post(close_position))
@@ -242,6 +253,8 @@ pub enum ApiError {
     PayloadTooLarge,
     /// 422: the gate refused to build a preview.
     GateRejected(String),
+    /// 422 `limit_not_stricter`: a limit override that is looser than the config.
+    LimitNotStricter(String),
     TokenUnknown,
     TokenExpired,
     TokenUsed,
@@ -299,6 +312,11 @@ impl ApiError {
             ApiError::GateRejected(m) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "gate_rejected", m.clone())
             }
+            ApiError::LimitNotStricter(m) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "limit_not_stricter",
+                m.clone(),
+            ),
             ApiError::TokenUnknown => (
                 StatusCode::NOT_FOUND,
                 "token_unknown",
@@ -418,6 +436,8 @@ impl IntoResponse for ApiError {
 // ---------------------------------------------------------------------------
 
 async fn status(State(state): State<AppState>, MaybeSession(session): MaybeSession) -> Json<Value> {
+    let settings = state.user_settings(session.as_ref()).await;
+    let persona = state.persona_for(&settings);
     let started = Instant::now();
     let ping = state.ping_bridge().await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -463,6 +483,7 @@ async fn status(State(state): State<AppState>, MaybeSession(session): MaybeSessi
         "auth": state.auth_status(session.as_ref()),
         "voice": state.voice_status(),
         "limits": state.trading().limits(),
+        "persona": { "id": persona.id, "name": persona.name },
     }))
 }
 
@@ -501,12 +522,19 @@ struct Watchlist {
     errors: Vec<WatchlistError>,
 }
 
-async fn watchlist(State(state): State<AppState>) -> Result<Json<Watchlist>, ApiError> {
-    let names = state.config().symbols.watchlist.clone();
+async fn watchlist(
+    State(state): State<AppState>,
+    MaybeSession(session): MaybeSession,
+) -> Result<Json<Watchlist>, ApiError> {
+    // The caller's own watchlist (the configured one until they change it), resolved with
+    // their aliases.
+    let settings = state.user_settings(session.as_ref()).await;
+    let resolver = state.resolver_for(&settings);
+    let names = settings.watchlist.clone();
     let mut tasks = JoinSet::new();
     for (index, name) in names.iter().enumerate() {
         let bridge = state.bridge().clone();
-        let resolved = state.resolver().resolve(name);
+        let resolved = resolver.resolve(name);
         let name = name.clone();
         tasks.spawn(async move {
             let result = match resolved {
@@ -578,12 +606,14 @@ struct ChatResponseBody {
     session_id: Uuid,
     reply: String,
     provider: String,
+    persona: String,
     tool_calls: Vec<ToolCallSummary>,
     preview: Option<PreviewDto>,
 }
 
 async fn chat(
     State(state): State<AppState>,
+    MaybeSession(session): MaybeSession,
     body: Bytes,
 ) -> Result<Json<ChatResponseBody>, ApiError> {
     // Parse by hand so malformed bodies get the standard error shape.
@@ -611,11 +641,21 @@ async fn chat(
                 .map_err(|_| ApiError::BadRequest("session_id is not a valid UUID".to_owned()))?,
         ),
     };
-    let provider_name = req
+    let settings = state.user_settings(session.as_ref()).await;
+    let explicit = req
         .provider
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    // Without a provider in the request, the user's preferred one (if it is usable right now),
+    // else the server default.
+    let preferred = settings.llm_provider.as_deref().filter(|name| {
+        state
+            .provider(name)
+            .is_some_and(|e| matches!(e.slot, ProviderSlot::Available(_)))
+    });
+    let provider_name = explicit
+        .or(preferred)
         .unwrap_or(&state.config().llm.default);
     let entry = state.provider(provider_name).ok_or_else(|| {
         let known: Vec<&str> = state
@@ -641,9 +681,13 @@ async fn chat(
         return Err(ApiError::ModeMismatch);
     }
 
+    let user = TurnUser {
+        persona: state.persona_for(&settings),
+        resolver: state.resolver_for(&settings),
+    };
     let outcome = match state
         .agent()
-        .run_turn(provider.as_ref(), session_id, message, req.voice)
+        .run_turn(provider.as_ref(), &user, session_id, message, req.voice)
         .await
     {
         Ok(o) => o,
@@ -656,6 +700,7 @@ async fn chat(
         session_id: outcome.session_id,
         reply: outcome.reply,
         provider: provider_name.to_owned(),
+        persona: outcome.persona,
         tool_calls: outcome.tool_calls,
         preview: outcome.preview,
     }))
@@ -720,8 +765,11 @@ fn optional_body<T: serde::de::DeserializeOwned + Default>(body: &Bytes) -> Resu
 
 async fn propose_from_ui(
     state: &AppState,
+    session: Option<&crate::auth::Session>,
     action: ProposedAction,
 ) -> Result<Json<PreviewDto>, ApiError> {
+    // The audit rows of a button press carry the persona the user has active.
+    let settings = state.user_settings(session).await;
     let preview = state
         .trading()
         .propose(ProposeRequest {
@@ -729,6 +777,7 @@ async fn propose_from_ui(
             session: None,
             voice: false,
             source: ProposeSource::Ui,
+            persona: Some(state.persona_for(&settings).id.clone()),
         })
         .await?;
     Ok(Json(preview))
@@ -749,6 +798,7 @@ fn parse_ticket(raw: &str) -> Result<u64, ApiError> {
 
 async fn close_position(
     State(state): State<AppState>,
+    MaybeSession(session): MaybeSession,
     Path(ticket): Path<String>,
     body: Bytes,
 ) -> Result<Json<PreviewDto>, ApiError> {
@@ -756,6 +806,7 @@ async fn close_position(
     let body: CloseOneBody = optional_body(&body)?;
     propose_from_ui(
         &state,
+        session.as_ref(),
         ProposedAction::Close(CloseSelector {
             tickets: vec![ticket],
             volume: body.volume,
@@ -777,9 +828,11 @@ struct CloseManyBody {
 
 async fn close_positions(
     State(state): State<AppState>,
+    MaybeSession(session): MaybeSession,
     body: Bytes,
 ) -> Result<Json<PreviewDto>, ApiError> {
     let body: CloseManyBody = optional_body(&body)?;
+    let resolver = state.resolver_for(&state.user_settings(session.as_ref()).await);
     let symbol =
         match body
             .symbol
@@ -788,12 +841,13 @@ async fn close_positions(
             .filter(|s| !s.is_empty())
         {
             None => None,
-            Some(s) => Some(state.resolver().resolve(s).ok_or_else(|| {
+            Some(s) => Some(resolver.resolve(s).ok_or_else(|| {
                 ApiError::BadRequest(format!("'{s}' is not a usable symbol name"))
             })?),
         };
     propose_from_ui(
         &state,
+        session.as_ref(),
         ProposedAction::Close(CloseSelector {
             tickets: Vec::new(),
             symbol,
@@ -807,11 +861,13 @@ async fn close_positions(
 
 async fn cancel_order(
     State(state): State<AppState>,
+    MaybeSession(session): MaybeSession,
     Path(ticket): Path<String>,
 ) -> Result<Json<PreviewDto>, ApiError> {
     let ticket = parse_ticket(&ticket)?;
     propose_from_ui(
         &state,
+        session.as_ref(),
         ProposedAction::Cancel(CancelSelector {
             tickets: vec![ticket],
             ..CancelSelector::default()
@@ -905,6 +961,7 @@ async fn audit_log(
                 "session_id": r.session_id,
                 "kind": r.kind,
                 "payload": r.payload,
+                "persona": r.persona,
             })
         })
         .collect();

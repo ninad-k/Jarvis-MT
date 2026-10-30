@@ -38,6 +38,13 @@ pub enum AuditKind {
     LoginFailed,
     VoiceStt,
     VoiceTts,
+    /// The tighten-only trading limits were set or reset from the UI.
+    LimitsChanged,
+    /// The model's final reply stated figures that no tool, user message or clock reported.
+    /// The model got one retry.
+    UngroundedReply,
+    /// The retried reply was ungrounded again and was replaced with a safe reply.
+    UngroundedReplyBlocked,
 }
 
 impl AuditKind {
@@ -61,6 +68,9 @@ impl AuditKind {
             AuditKind::LoginFailed => "login_failed",
             AuditKind::VoiceStt => "voice_stt",
             AuditKind::VoiceTts => "voice_tts",
+            AuditKind::LimitsChanged => "limits_changed",
+            AuditKind::UngroundedReply => "ungrounded_reply",
+            AuditKind::UngroundedReplyBlocked => "ungrounded_reply_blocked",
         }
     }
 }
@@ -73,6 +83,9 @@ pub struct AuditRow {
     pub session_id: Option<String>,
     pub kind: String,
     pub payload: Value,
+    /// The persona that was active for this step; `None` for old rows and for steps that
+    /// belong to no conversation.
+    pub persona: Option<String>,
 }
 
 /// Handle to the audit table. Cheap to clone.
@@ -107,16 +120,29 @@ impl Audit {
         Ok(Self { pool })
     }
 
-    /// Append one row. Failures are logged at error level and swallowed.
+    /// Append one row that belongs to no persona. Failures are logged at error level and
+    /// swallowed.
     pub async fn record(&self, session_id: Option<Uuid>, kind: AuditKind, payload: Value) {
+        self.record_as(session_id, None, kind, payload).await;
+    }
+
+    /// Append one row, noting which persona was active (rule 10).
+    pub async fn record_as(
+        &self,
+        session_id: Option<Uuid>,
+        persona: Option<&str>,
+        kind: AuditKind,
+        payload: Value,
+    ) {
         let ts = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let result = sqlx::query(
-            "INSERT INTO audit (ts, session_id, kind, payload) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO audit (ts, session_id, kind, payload, persona)              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(ts)
         .bind(session_id.map(|s| s.to_string()))
         .bind(kind.as_str())
         .bind(payload.to_string())
+        .bind(persona)
         .execute(&self.pool)
         .await;
         if let Err(e) = result {
@@ -134,7 +160,7 @@ impl Audit {
         let rows = match session_id {
             Some(id) => {
                 sqlx::query(
-                    "SELECT id, ts, session_id, kind, payload FROM audit \
+                    "SELECT id, ts, session_id, kind, payload, persona FROM audit \
                      WHERE session_id = ?1 ORDER BY id",
                 )
                 .bind(id.to_string())
@@ -142,9 +168,11 @@ impl Audit {
                 .await?
             }
             None => {
-                sqlx::query("SELECT id, ts, session_id, kind, payload FROM audit ORDER BY id")
-                    .fetch_all(&self.pool)
-                    .await?
+                sqlx::query(
+                    "SELECT id, ts, session_id, kind, payload, persona FROM audit ORDER BY id",
+                )
+                .fetch_all(&self.pool)
+                .await?
             }
         };
         rows.into_iter().map(row_from).collect()
@@ -158,7 +186,8 @@ impl Audit {
         before_id: Option<i64>,
     ) -> anyhow::Result<Vec<AuditRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, session_id, kind, payload FROM audit              WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
+            "SELECT id, ts, session_id, kind, payload, persona FROM audit \
+             WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
         )
         .bind(before_id)
         .bind(i64::from(limit))
@@ -218,6 +247,7 @@ fn row_from(r: sqlx::sqlite::SqliteRow) -> anyhow::Result<AuditRow> {
         session_id: r.try_get("session_id")?,
         kind: r.try_get("kind")?,
         payload: serde_json::from_str(&payload)?,
+        persona: r.try_get("persona")?,
     })
 }
 
@@ -259,6 +289,37 @@ mod tests {
         assert_eq!(rows[0].payload["text"], "hi");
         assert_eq!(rows[1].session_id, None);
         assert_eq!(audit.rows(Some(sid)).await.unwrap().len(), 1);
+        audit.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn rows_carry_the_persona_when_one_was_active() {
+        let (dir, url) = temp_db_url("persona");
+        let audit = Audit::connect(&url).await.unwrap();
+        audit.record(None, AuditKind::KillSwitch, json!({})).await;
+        audit
+            .record_as(None, Some("friday"), AuditKind::Utterance, json!({}))
+            .await;
+        // A row written before the column existed reads back as None.
+        sqlx::query(
+            "INSERT INTO audit (ts, session_id, kind, payload) VALUES ('t', NULL, 'old', '{}')",
+        )
+        .execute(&audit.pool)
+        .await
+        .unwrap();
+        let rows = audit.rows(None).await.unwrap();
+        let personas: Vec<_> = rows.iter().map(|r| r.persona.as_deref()).collect();
+        assert_eq!(personas, [None, Some("friday"), None]);
+        let recent = audit.recent(10, None).await.unwrap();
+        assert_eq!(recent[1].persona.as_deref(), Some("friday"));
+        // Still append-only with the new column.
+        assert!(
+            sqlx::query("UPDATE audit SET persona = 'x'")
+                .execute(&audit.pool)
+                .await
+                .is_err()
+        );
         audit.close().await;
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -350,7 +350,7 @@ async fn chat_as(app: &TestApp, cookie: &str) -> (StatusCode, axum::http::Header
 async fn chat_is_limited_per_session_with_a_retry_after() {
     let (app, _mock) = app_with(
         "chat_rate_limit_per_minute = 3",
-        ScriptedLlm::always("fake", text_response("Gold is at 2391.")),
+        ScriptedLlm::always("fake", text_response("Gold is steady.")),
         true,
     )
     .await;

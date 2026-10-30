@@ -62,6 +62,38 @@ pub struct Config {
     /// `[voice]`. Absent means voice is off.
     #[serde(default)]
     pub voice: Option<VoiceSection>,
+    /// `[personas]`: where the persona packs live and which one is the default.
+    #[serde(default)]
+    pub personas: PersonasConfig,
+}
+
+/// `[personas]`: a folder of `<id>.toml` packs (see `personas/jarvis.toml`) and the persona
+/// a user gets until they pick another. Both are optional.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonasConfig {
+    /// Relative paths are resolved from the working directory.
+    #[serde(default = "default_personas_dir")]
+    pub dir: PathBuf,
+    /// The id of a pack in `dir`.
+    #[serde(default = "default_persona")]
+    pub default: String,
+}
+
+impl Default for PersonasConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_personas_dir(),
+            default: default_persona(),
+        }
+    }
+}
+
+fn default_personas_dir() -> PathBuf {
+    PathBuf::from("personas")
+}
+fn default_persona() -> String {
+    "jarvis".to_owned()
 }
 
 /// `[auth]`: password + TOTP login with a JWT session cookie (ADR-0011).
@@ -645,6 +677,34 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = include_str!("../../../config/jarvis.example.toml");
+
+    #[test]
+    fn personas_section_defaults_and_overrides() {
+        let c = Config::from_toml_str(&minimal("")).unwrap();
+        assert_eq!(c.personas.dir, PathBuf::from("personas"));
+        assert_eq!(c.personas.default, "jarvis");
+        let c = Config::from_toml_str(&minimal(
+            "[personas]
+dir = \"packs\"
+default = \"friday\"",
+        ))
+        .unwrap();
+        assert_eq!(c.personas.dir, PathBuf::from("packs"));
+        assert_eq!(c.personas.default, "friday");
+        let c = Config::from_toml_str(&minimal(
+            "[personas]
+default = \"friday\"",
+        ))
+        .unwrap();
+        assert_eq!(c.personas.dir, PathBuf::from("personas"));
+        assert!(
+            Config::from_toml_str(&minimal(
+                "[personas]
+folder = \"x\""
+            ))
+            .is_err()
+        );
+    }
 
     fn minimal(extra: &str) -> String {
         format!(

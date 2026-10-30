@@ -11,6 +11,7 @@ use jarvis_bridge_client::protocol::{PingInfo, TradeMode};
 use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError};
 use jarvis_gate::KillSwitch;
 use jarvis_llm::{LlmProvider, ProviderConfig, ProviderKind, build_provider};
+use jarvis_persona::{PersonaPack, PersonaRegistry, Theme};
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, watch};
 
@@ -21,7 +22,11 @@ use crate::auth::{AuthParts, AuthReleaseGuard, AuthService, Session};
 use crate::clock::{ServerClock, TimeSource, WallClock};
 use crate::config::{Config, Mode};
 use crate::events::EventBus;
+use crate::limit_overrides::PartialLimits;
 use crate::ratelimit::RateLimiter;
+use crate::settings::{
+    LOCAL_USER, Rules, SettingsError, SettingsPatch, SettingsStore, UserSettings, apply_patch,
+};
 use crate::symbols::SymbolResolver;
 use crate::tools::ToolRegistry;
 use crate::trading::{Trading, TradingParts, WriteSink};
@@ -45,6 +50,9 @@ pub struct Overrides {
     pub auth: Option<Arc<AuthService>>,
     /// Speech engines (default: voice off).
     pub voice: Option<Voice>,
+    /// The persona packs (default: loaded from `[personas] dir`, or one built-in Jarvis pack
+    /// when that folder cannot be read; [`AppState::build`] refuses to start instead).
+    pub personas: Option<PersonaRegistry>,
 }
 
 /// A configured LLM provider that is either ready or missing something (usually an API key).
@@ -171,6 +179,49 @@ impl ShutdownSignal {
     }
 }
 
+/// Why `PUT /api/settings` failed.
+#[derive(Debug)]
+pub enum SettingsUpdateError {
+    /// 400.
+    Invalid(SettingsError),
+    /// 500.
+    Storage(anyhow::Error),
+}
+
+/// The personas of the config folder, or, when that cannot be read (tests and embedding that
+/// do not ship a `personas/` folder), one built-in pack so the state is still complete.
+fn load_personas_or_builtin(config: &Config) -> PersonaRegistry {
+    match PersonaRegistry::load_dir(&config.personas.dir, &config.personas.default) {
+        Ok(registry) => registry,
+        Err(e) => {
+            tracing::warn!("{e}; using the built-in Jarvis persona");
+            builtin_personas()
+        }
+    }
+}
+
+fn builtin_personas() -> PersonaRegistry {
+    let jarvis = PersonaPack {
+        id: "jarvis".to_owned(),
+        name: "Jarvis".to_owned(),
+        description: "Calm, formal and concise.".to_owned(),
+        system_prompt: "Speak like a composed, formal British butler who happens to be an \
+                        expert trader's aide. Be brief and precise: lead with the answer, then \
+                        the essential numbers."
+            .to_owned(),
+        voice_model: "models/piper/en_GB-alan-medium.onnx".into(),
+        wake_word: "hey jarvis".to_owned(),
+        theme: Theme {
+            accent: "#38bdf8".to_owned(),
+            accent_soft: "#0c4a6e".to_owned(),
+            orb_core: "#7dd3fc".to_owned(),
+            orb_glow: "#0ea5e9".to_owned(),
+        },
+    };
+    PersonaRegistry::from_packs(vec![jarvis], "jarvis")
+        .expect("the built-in persona is valid by construction")
+}
+
 /// Open WebSocket connections allowed at once.
 const MAX_SOCKETS: usize = crate::ws::MAX_SOCKETS;
 
@@ -189,6 +240,8 @@ struct Inner {
     release_guard: RwLock<Arc<dyn ReleaseGuard>>,
     auth: Option<Arc<AuthService>>,
     voice: Voice,
+    personas: PersonaRegistry,
+    settings: SettingsStore,
     shutdown: ShutdownSignal,
     ws_slots: Arc<Semaphore>,
     /// Per-session budgets of the expensive routes (NET-2).
@@ -241,6 +294,10 @@ impl AppState {
             &config.symbols.aliases,
             &config.symbols.suffix,
         ));
+        let personas = overrides
+            .personas
+            .unwrap_or_else(|| load_personas_or_builtin(&config));
+        let settings = SettingsStore::new(audit.pool().clone());
         let providers = config
             .llm
             .providers
@@ -288,6 +345,8 @@ impl AppState {
             release_guard: RwLock::new(release_guard),
             auth,
             voice: overrides.voice.unwrap_or_else(Voice::disabled),
+            personas,
+            settings,
             shutdown: ShutdownSignal::new(),
             ws_slots: Arc::new(Semaphore::new(MAX_SOCKETS)),
             chat_limiter: RateLimiter::new(chat_per_minute, REQUEST_RATE_WINDOW_MS),
@@ -307,6 +366,24 @@ impl AppState {
             Duration::from_millis(config.bridge.timeout_ms),
             key,
         ))?;
+        let personas = PersonaRegistry::load_dir(&config.personas.dir, &config.personas.default)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to start: the personas are unusable: {e}. Fix or restore the pack \
+                     files in {}, or point [personas] dir and default at working ones.",
+                    config.personas.dir.display()
+                )
+            })?;
+        tracing::info!(
+            default = personas.default_id(),
+            "personas loaded: {}",
+            personas
+                .list()
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let audit = Audit::connect(&config.database.url).await?;
         let auth = if config.auth.enabled {
             let secret = std::env::var(JWT_SECRET_ENV).unwrap_or_default();
@@ -340,7 +417,9 @@ impl AppState {
             None
         };
         let voice = match config.voice.as_ref().map(|v| v.to_voice_config()) {
-            Some(Ok(Some(voice_config))) => Voice::from_config(&voice_config).await,
+            Some(Ok(Some(voice_config))) => {
+                Voice::from_config(&voice_config, personas.list()).await
+            }
             Some(Err(e)) => {
                 tracing::warn!("voice is off: {e:#}");
                 Voice::disabled()
@@ -372,11 +451,14 @@ impl AppState {
             Overrides {
                 auth,
                 voice: Some(voice),
+                personas: Some(personas),
                 ..Overrides::default()
             },
         );
         // A kill switch engaged before a restart stays engaged (SPEC rule 6).
         state.trading().restore_kill_switch().await;
+        // So do limits the user tightened.
+        state.restore_limit_overrides().await;
         Ok(state)
     }
 
@@ -433,6 +515,146 @@ impl AppState {
     }
     pub fn voice(&self) -> &Voice {
         &self.0.voice
+    }
+    /// The persona packs.
+    pub fn personas(&self) -> &PersonaRegistry {
+        &self.0.personas
+    }
+    pub fn settings_store(&self) -> &SettingsStore {
+        &self.0.settings
+    }
+
+    /// The persona a user has chosen (the default if theirs no longer exists).
+    pub fn persona_for(&self, settings: &UserSettings) -> &PersonaPack {
+        self.0
+            .personas
+            .get(&settings.persona)
+            .unwrap_or_else(|_| self.0.personas.default_persona())
+    }
+
+    /// The symbol resolver for a user's turns: the configured aliases with the user's own
+    /// merged over them.
+    pub fn resolver_for(&self, settings: &UserSettings) -> Arc<SymbolResolver> {
+        if settings.aliases.is_empty() {
+            self.0.resolver.clone()
+        } else {
+            Arc::new(self.0.resolver.with_user_aliases(&settings.aliases))
+        }
+    }
+
+    /// Where a caller's settings are stored: their login name, or one shared local profile
+    /// when login is off.
+    pub fn settings_key(session: Option<&Session>) -> &str {
+        session.map_or(LOCAL_USER, |s| s.username.as_str())
+    }
+
+    fn default_settings(&self) -> UserSettings {
+        UserSettings::defaults(
+            self.0.personas.default_id(),
+            &self.0.config.symbols.watchlist,
+        )
+    }
+
+    /// Replace values that no longer exist (a persona pack or provider that was removed).
+    fn sanitize(&self, mut settings: UserSettings) -> UserSettings {
+        if self.0.personas.get(&settings.persona).is_err() {
+            settings.persona = self.0.personas.default_id().to_owned();
+        }
+        if settings
+            .llm_provider
+            .as_deref()
+            .is_some_and(|name| self.provider(name).is_none())
+        {
+            settings.llm_provider = None;
+        }
+        settings
+    }
+
+    /// The caller's settings. A storage failure is logged and answered with the defaults, so
+    /// chat keeps working.
+    pub async fn user_settings(&self, session: Option<&Session>) -> UserSettings {
+        match self.stored_settings(session).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("reading user settings failed, using the defaults: {e:#}");
+                self.default_settings()
+            }
+        }
+    }
+
+    async fn stored_settings(&self, session: Option<&Session>) -> anyhow::Result<UserSettings> {
+        let stored = self.0.settings.get(Self::settings_key(session)).await?;
+        Ok(self.sanitize(stored.unwrap_or_else(|| self.default_settings())))
+    }
+
+    /// `PUT /api/settings`: validate and store a partial update; returns the full settings.
+    pub async fn update_settings(
+        &self,
+        session: Option<&Session>,
+        patch: SettingsPatch,
+    ) -> Result<UserSettings, SettingsUpdateError> {
+        let key = Self::settings_key(session);
+        let _write = self.0.settings.lock().await;
+        let current = self
+            .stored_settings(session)
+            .await
+            .map_err(SettingsUpdateError::Storage)?;
+        let rules = Rules {
+            personas: &self.0.personas,
+            providers: self
+                .0
+                .providers
+                .iter()
+                .map(|p| p.config.name.as_str())
+                .collect(),
+            resolver: &self.0.resolver,
+        };
+        let next = apply_patch(current, patch, &rules).map_err(SettingsUpdateError::Invalid)?;
+        self.0
+            .settings
+            .put(key, &next)
+            .await
+            .map_err(SettingsUpdateError::Storage)?;
+        Ok(next)
+    }
+
+    /// Make `persona` the caller's active persona (a spoken wake phrase). `persona` must be a
+    /// loaded pack.
+    pub async fn set_user_persona(
+        &self,
+        session: Option<&Session>,
+        persona: &str,
+    ) -> anyhow::Result<UserSettings> {
+        let key = Self::settings_key(session);
+        let _write = self.0.settings.lock().await;
+        let mut settings = self.stored_settings(session).await?;
+        persona.clone_into(&mut settings.persona);
+        let settings = self.sanitize(settings);
+        self.0.settings.put(key, &settings).await?;
+        Ok(settings)
+    }
+
+    /// Startup: load the stored tighten-only limit overrides into the gate. If they cannot be
+    /// read, trading is switched off by an empty symbol list until they are reset (fail
+    /// closed, like the kill switch).
+    pub async fn restore_limit_overrides(&self) {
+        match self.0.settings.load_limit_overrides().await {
+            Ok(Some(overrides)) => {
+                let effective = self.0.trading.set_limit_overrides(Some(overrides));
+                tracing::info!(?effective, "tightened limits restored");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(
+                    "cannot read the saved limit overrides; new orders are refused until they \
+                     are reset in Settings: {e:#}"
+                );
+                self.0.trading.set_limit_overrides(Some(PartialLimits {
+                    allowed_symbols: Some(Vec::new()),
+                    ..PartialLimits::default()
+                }));
+            }
+        }
     }
     /// `voice` object of `GET /api/status`.
     pub fn voice_status(&self) -> Value {

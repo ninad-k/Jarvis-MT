@@ -1,11 +1,12 @@
 //! The agent loop: system prompt, per-session history, tool rounds, audit.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::{SecondsFormat, Utc};
 use jarvis_llm::{ChatRequest, LlmError, LlmProvider, Message};
+use jarvis_persona::{PersonaPack, compose_system_prompt};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -14,6 +15,8 @@ use jarvis_gate::intent::Intent;
 
 use crate::audit::{Audit, AuditKind};
 use crate::clock::ServerClock;
+use crate::grounding;
+use crate::symbols::SymbolResolver;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::trading::PreviewDto;
 
@@ -40,6 +43,8 @@ pub struct ToolCallSummary {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatOutcome {
     pub session_id: Uuid,
+    /// The persona that answered this turn.
+    pub persona: String,
     pub reply: String,
     pub tool_calls: Vec<ToolCallSummary>,
     /// The last preview created during this turn, if any.
@@ -48,25 +53,31 @@ pub struct ChatOutcome {
 
 struct Session {
     messages: Vec<Message>,
+    /// The persona that answered the latest turn. A session keeps its history when the
+    /// user switches persona; the next turn is answered by the new one.
+    persona: String,
     last_used: Instant,
+}
+
+/// Who a turn is for: the persona that speaks, and the symbol resolver that includes the
+/// user's own aliases. Nothing here changes what a tool may do.
+pub struct TurnUser<'a> {
+    pub persona: &'a PersonaPack,
+    pub resolver: Arc<SymbolResolver>,
 }
 
 pub struct Agent {
     tools: ToolRegistry,
     audit: Audit,
-    /// `(spoken alias, broker symbol)` pairs shown to the model.
-    aliases: Vec<(String, String)>,
     clock: ServerClock,
     sessions: Mutex<HashMap<Uuid, Session>>,
 }
 
 impl Agent {
     pub fn new(tools: ToolRegistry, audit: Audit, clock: ServerClock) -> Self {
-        let aliases = tools.resolver().alias_list();
         Self {
             tools,
             audit,
-            aliases,
             clock,
             sessions: Mutex::new(HashMap::new()),
         }
@@ -84,47 +95,58 @@ impl Agent {
     pub async fn run_turn(
         &self,
         provider: &dyn LlmProvider,
+        user: &TurnUser<'_>,
         session_id: Option<Uuid>,
         message: &str,
         voice: bool,
     ) -> Result<ChatOutcome, LlmError> {
         let sid = session_id.unwrap_or_else(Uuid::new_v4);
+        let persona = user.persona;
+        // The tools resolve symbols with this user's aliases; the gate and the bridge are shared.
+        let tools = self.tools.with_resolver(user.resolver.clone());
         let mut history = self.snapshot(sid);
         let turn_start = history.len();
         history.push(Message::User {
             text: message.to_owned(),
         });
-        self.audit
-            .record(
-                Some(sid),
-                AuditKind::Utterance,
-                json!({ "text": message, "provider": provider.name(), "model": provider.model() }),
-            )
-            .await;
+        self.rec(
+            sid,
+            persona,
+            AuditKind::Utterance,
+            json!({ "text": message, "provider": provider.name(), "model": provider.model() }),
+        )
+        .await;
 
         // What the user actually said, as far as the deterministic parser can tell. Every
         // propose_* call is cross-checked against it (SPEC rule 9).
-        let intent = self.tools.parse_intent(message);
+        let intent = tools.parse_intent(message);
         if intent != Intent::Other {
-            self.audit
-                .record(
-                    Some(sid),
-                    AuditKind::Intent,
-                    json!({ "text": message, "intent": &intent, "voice": voice }),
-                )
-                .await;
+            self.rec(
+                sid,
+                persona,
+                AuditKind::Intent,
+                json!({ "text": message, "intent": &intent, "voice": voice }),
+            )
+            .await;
         }
         let ctx = ToolContext {
             session_id: sid,
             intent,
             voice,
+            persona: Some(persona.id.clone()),
         };
 
-        let system = self.system_prompt();
-        let tools = self.tools.specs();
+        let (system, time_text) = self.prompt_and_clock(persona, &user.resolver);
+        let specs = tools.specs();
         let mut summaries = Vec::new();
         let mut preview: Option<PreviewDto> = None;
         let reply;
+        // The grounding check (see `grounding.rs`): after an ungrounded final reply the model
+        // gets one retry. `injected` holds the history indices of that exchange (the rejected
+        // reply and the correction); they are dropped again before the turn is stored, and
+        // never count as a source of figures.
+        let mut retried = false;
+        let mut injected: Vec<usize> = Vec::new();
 
         let mut round = 0;
         loop {
@@ -132,16 +154,14 @@ impl Agent {
             let request = ChatRequest {
                 system: Some(system.clone()),
                 messages: history.clone(),
-                tools: tools.clone(),
+                tools: specs.clone(),
                 max_tokens: None,
                 temperature: Some(0.2),
             };
             let response = match provider.chat(&request).await {
                 Ok(r) => r,
                 Err(e) => {
-                    self.audit
-                        .record(
-                            Some(sid),
+                    self.rec(sid, persona,
                             AuditKind::Error,
                             json!({ "where": "llm", "provider": provider.name(), "message": e.to_string() }),
                         )
@@ -156,11 +176,61 @@ impl Agent {
                     .map(|t| t.trim().to_owned())
                     .filter(|t| !t.is_empty());
                 let text = text.unwrap_or_else(|| EMPTY_REPLY.to_owned());
+                let sources = grounding::collect_sources(&history, &injected, &time_text);
+                let ungrounded = grounding::ungrounded_figures(&text, &sources);
+                if ungrounded.is_empty() {
+                    history.push(Message::Assistant {
+                        text: Some(text.clone()),
+                        tool_calls: vec![],
+                    });
+                    reply = text;
+                    break;
+                }
+                if !retried {
+                    retried = true;
+                    tracing::warn!(session = %sid, persona = %persona.id, ?ungrounded,
+                        "reply stated figures no tool reported; asking the model again");
+                    self.rec(
+                        sid,
+                        persona,
+                        AuditKind::UngroundedReply,
+                        json!({
+                            "reply": text,
+                            "figures": ungrounded,
+                            "persona": persona.id,
+                            "provider": provider.name(),
+                            "retry": true,
+                        }),
+                    )
+                    .await;
+                    // The rejected draft is not kept: showing it back to the model makes it
+                    // apologise for it, which the user would read as an answer to nothing.
+                    drop(text);
+                    let correction = grounding::correction_message(&ungrounded, message);
+                    injected.push(history.len());
+                    history.push(Message::User { text: correction });
+                    continue;
+                }
+                tracing::warn!(session = %sid, persona = %persona.id, ?ungrounded,
+                    "the retried reply still stated ungrounded figures; replaced it");
+                self.rec(
+                    sid,
+                    persona,
+                    AuditKind::UngroundedReplyBlocked,
+                    json!({
+                        "reply": text,
+                        "figures": ungrounded,
+                        "persona": persona.id,
+                        "provider": provider.name(),
+                        "retry": false,
+                    }),
+                )
+                .await;
                 history.push(Message::Assistant {
-                    text: Some(text.clone()),
+                    text: Some(grounding::UNVERIFIED_REPLY.to_owned()),
                     tool_calls: vec![],
                 });
-                reply = text;
+                reply = grounding::UNVERIFIED_REPLY.to_owned();
                 break;
             }
 
@@ -181,38 +251,33 @@ impl Agent {
             });
             for call in &response.tool_calls {
                 let started = Instant::now();
-                let outcome = self
-                    .tools
-                    .execute_in(&ctx, &call.name, &call.arguments)
-                    .await;
+                let outcome = tools.execute_in(&ctx, &call.name, &call.arguments).await;
                 if let Some(p) = &outcome.preview {
                     preview = Some(p.clone());
                 }
                 let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
                 if let Some(req) = &outcome.bridge_request {
-                    self.audit
-                        .record(Some(sid), AuditKind::BridgeRequest, req.clone())
+                    self.rec(sid, persona, AuditKind::BridgeRequest, req.clone())
                         .await;
                 }
                 if let Some(reply) = &outcome.bridge_reply {
-                    self.audit
-                        .record(Some(sid), AuditKind::BridgeReply, reply.clone())
+                    self.rec(sid, persona, AuditKind::BridgeReply, reply.clone())
                         .await;
                 }
-                self.audit
-                    .record(
-                        Some(sid),
-                        AuditKind::ToolCall,
-                        json!({
-                            "name": call.name,
-                            "arguments": call.arguments,
-                            "ok": !outcome.is_error,
-                            "duration_ms": duration_ms,
-                            "result": truncate(&outcome.content, 2000),
-                        }),
-                    )
-                    .await;
+                self.rec(
+                    sid,
+                    persona,
+                    AuditKind::ToolCall,
+                    json!({
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "ok": !outcome.is_error,
+                        "duration_ms": duration_ms,
+                        "result": truncate(&outcome.content, 2000),
+                    }),
+                )
+                .await;
 
                 summaries.push(ToolCallSummary {
                     name: call.name.clone(),
@@ -229,20 +294,30 @@ impl Agent {
             }
         }
 
-        self.audit
-            .record(
-                Some(sid),
-                AuditKind::AssistantReply,
-                json!({ "text": reply, "provider": provider.name(), "tool_calls": summaries.len() }),
-            )
-            .await;
-        self.append(sid, history.split_off(turn_start));
+        self.rec(
+            sid,
+            persona,
+            AuditKind::AssistantReply,
+            json!({ "text": reply, "provider": provider.name(), "tool_calls": summaries.len() }),
+        )
+        .await;
+        for &i in injected.iter().rev() {
+            history.remove(i);
+        }
+        self.append(sid, &persona.id, history.split_off(turn_start));
         Ok(ChatOutcome {
             session_id: sid,
+            persona: persona.id.clone(),
             reply,
             tool_calls: summaries,
             preview,
         })
+    }
+
+    async fn rec(&self, sid: Uuid, persona: &PersonaPack, kind: AuditKind, payload: Value) {
+        self.audit
+            .record_as(Some(sid), Some(&persona.id), kind, payload)
+            .await;
     }
 
     fn snapshot(&self, sid: Uuid) -> Vec<Message> {
@@ -257,7 +332,7 @@ impl Agent {
     }
 
     /// Append this turn's messages to the stored session, then enforce the cap.
-    fn append(&self, sid: Uuid, new_messages: Vec<Message>) {
+    fn append(&self, sid: Uuid, persona: &str, new_messages: Vec<Message>) {
         let mut sessions = self.lock();
         if !sessions.contains_key(&sid)
             && sessions.len() >= MAX_SESSIONS
@@ -270,8 +345,10 @@ impl Agent {
         }
         let session = sessions.entry(sid).or_insert_with(|| Session {
             messages: Vec::new(),
+            persona: persona.to_owned(),
             last_used: Instant::now(),
         });
+        persona.clone_into(&mut session.persona);
         session.messages.extend(new_messages);
         session.last_used = Instant::now();
         trim_history(&mut session.messages);
@@ -282,20 +359,40 @@ impl Agent {
         self.lock().get(&sid).map_or(0, |s| s.messages.len())
     }
 
+    /// The persona that answered the latest turn of a session.
+    pub fn session_persona(&self, sid: Uuid) -> Option<String> {
+        self.lock().get(&sid).map(|s| s.persona.clone())
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Session>> {
         // A poisoned lock only means another request panicked; the data is still usable.
         self.sessions.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    pub fn system_prompt(&self) -> String {
-        build_system_prompt(
-            Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-            self.clock
-                .now_server()
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string(),
-            &self.aliases,
-        )
+    /// The system prompt for one turn: the persona's personality inside the fixed frame, with
+    /// the shared rules (identical for every persona) after it.
+    pub fn system_prompt_for(&self, persona: &PersonaPack, resolver: &SymbolResolver) -> String {
+        self.prompt_and_clock(persona, resolver).0
+    }
+
+    /// The system prompt and, separately, the two time strings in it (UTC and broker server
+    /// time). Figures from the clock are grounded, so the grounding check needs them.
+    fn prompt_and_clock(
+        &self,
+        persona: &PersonaPack,
+        resolver: &SymbolResolver,
+    ) -> (String, String) {
+        let now_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let server_time = self
+            .clock
+            .now_server()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let prompt = compose_system_prompt(
+            persona,
+            &build_shared_rules(now_utc.clone(), server_time.clone(), &resolver.alias_list()),
+        );
+        (prompt, format!("{now_utc} {server_time}"))
     }
 }
 
@@ -327,7 +424,10 @@ fn truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn build_system_prompt(
+/// The rules every persona shares, verbatim: what the model may do, the trading rules and
+/// how to behave. The persona's identity line and personality are added around this by
+/// [`compose_system_prompt`]; nothing in this block depends on the persona.
+pub fn build_shared_rules(
     now_utc: String,
     server_time: String,
     aliases: &[(String, String)],
@@ -342,8 +442,7 @@ fn build_system_prompt(
             .join(", ")
     };
     format!(
-        "You are Jarvis, a trading assistant for a single trader using MetaTrader 5 (MT5).
-         Current time: {now_utc} UTC. MT5 broker server time: {server_time} (deal times and            history dates use server time).
+        "Current time: {now_utc} UTC. MT5 broker server time: {server_time} (deal times and            history dates use server time).
          
          What you can do:
          - Read live data with your tools: prices (get_price), the account summary            (get_account), open positions (get_positions), pending orders (get_orders) and            trade history (get_history).
@@ -359,7 +458,7 @@ fn build_system_prompt(
          - If the user says confirm, yes, cancel or no about a pending preview, do not propose            again: the app handles it. Remind them to press Confirm or Cancel, or say \"confirm\"            or \"cancel\".
          
          How to behave:
-         - If a request is ambiguous (which symbol? which position? which dates?), ask one short            clarifying question instead of guessing.
+         - If a request is ambiguous (which symbol? which position? which dates?), ask one short            clarifying question instead of guessing. Relative dates are not ambiguous: work out            \"today\", \"yesterday\", \"this week\" (Monday to now), \"last week\" and \"this month\" from            the broker server time above and use them directly.
          - Symbol aliases (the user's words -> broker symbol): {alias_text}. You may pass the            user's own word to a tool; it resolves aliases itself. Speech-to-text can mishear            names (for example \"cold\" for \"gold\").
          - Be concise and easy to read aloud: 1 to 3 sentences unless you are listing items.            No markdown tables, no emojis. Say numbers plainly with their symbol or currency.
          - You are not a financial adviser; do not give investment recommendations."
@@ -412,7 +511,7 @@ mod tests {
 
     #[test]
     fn prompt_covers_the_core_rules() {
-        let p = build_system_prompt(
+        let p = build_shared_rules(
             "2026-10-30T10:00:00Z".into(),
             "2026-10-30 13:00:00".into(),
             &[
@@ -430,6 +529,15 @@ mod tests {
         assert!(p.contains("Never invent a volume"));
         assert!(p.contains("name the limit"));
         assert!(p.contains("clarifying question"));
+    }
+
+    #[test]
+    fn shared_rules_do_not_name_a_persona() {
+        let p = build_shared_rules("t".into(), "s".into(), &[]);
+        assert!(!p.contains("You are Jarvis"), "{p}");
+        assert!(!p.contains("Jarvis"), "{p}");
+        assert!(p.starts_with("Current time: t UTC."));
+        assert!(p.contains("none configured"));
     }
 
     #[test]

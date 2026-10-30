@@ -22,6 +22,7 @@ use jarvis_api::voice::Voice;
 use jarvis_bridge_client::mock::MockBridge;
 use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeKey};
 use jarvis_llm::{ChatRequest, ChatResponse, LlmError, LlmProvider, StopReason, ToolCall};
+use jarvis_persona::PersonaRegistry;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -210,8 +211,23 @@ session_hours = 12
 
 [voice]
 enabled = false
-"#
+
+[personas]
+dir = '{personas_dir}'
+default = "jarvis"
+"#,
+        personas_dir = personas_dir().display()
     )
+}
+
+/// The repository's `personas/` folder.
+pub fn personas_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../personas")
+}
+
+/// The packs shipped in the repository's `personas/` folder.
+pub fn real_personas() -> PersonaRegistry {
+    PersonaRegistry::load_dir(&personas_dir(), "jarvis").expect("the shipped personas load")
 }
 
 pub fn temp_db_url() -> String {
@@ -255,6 +271,10 @@ pub struct Options<'a> {
     pub voice: Option<Voice>,
     /// Use this audit database instead of a fresh one (a "restart" over the same file).
     pub audit: Option<Audit>,
+    /// Persona packs; the real `personas/` folder when unset.
+    pub personas: Option<PersonaRegistry>,
+    /// Makes the `claude` provider available, answered by this model.
+    pub claude_llm: Option<Arc<ScriptedLlm>>,
 }
 
 impl Default for Options<'_> {
@@ -271,6 +291,8 @@ impl Default for Options<'_> {
             server: "",
             voice: None,
             audit: None,
+            personas: None,
+            claude_llm: None,
         }
     }
 }
@@ -339,7 +361,10 @@ pub async fn build_app(
     slots.insert("fake".to_owned(), ProviderSlot::Available(llm.clone()));
     slots.insert(
         "claude".to_owned(),
-        ProviderSlot::Unavailable("ANTHROPIC key missing".into()),
+        match opts.claude_llm {
+            Some(claude) => ProviderSlot::Available(claude),
+            None => ProviderSlot::Unavailable("ANTHROPIC key missing".into()),
+        },
     );
     // Login needs a clock the tests can move (TOTP steps, lockouts, expiry).
     let clock = match (opts.clock, opts.auth) {
@@ -367,6 +392,7 @@ pub async fn build_app(
         write_sink: opts.sink,
         auth: auth.clone(),
         voice: opts.voice,
+        personas: Some(opts.personas.unwrap_or_else(real_personas)),
     };
     let state = AppState::new_with(config, bridge, audit.clone(), slots, overrides);
     TestApp {

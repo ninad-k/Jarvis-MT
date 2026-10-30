@@ -37,6 +37,19 @@ impl SymbolResolver {
         }
     }
 
+    /// A copy of this resolver with a user's own aliases merged over the configured ones (a
+    /// user entry wins). Values are broker symbols before the suffix.
+    pub fn with_user_aliases(&self, user: &BTreeMap<String, String>) -> SymbolResolver {
+        let mut merged = self.clone();
+        for (k, v) in user {
+            let key = alias_key(k);
+            if !key.is_empty() {
+                merged.aliases.insert(key, clean(v));
+            }
+        }
+        merged
+    }
+
     /// Resolve user text to the broker symbol, or `None` if nothing usable is left.
     ///
     /// 1. trim + case-insensitive alias lookup (multi-word aliases work);
@@ -150,6 +163,25 @@ mod tests {
         let r = resolver("#");
         assert_eq!(r.resolve("nasdaq").as_deref(), Some("US100#"));
         assert_eq!(r.resolve("US100#").as_deref(), Some("US100#"));
+    }
+
+    #[test]
+    fn user_aliases_win_over_configured_ones() {
+        let user: BTreeMap<String, String> = [("Yellow  Metal", "xauusd"), ("gold", "XAGUSD")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        let base = resolver(".m");
+        let merged = base.with_user_aliases(&user);
+        assert_eq!(merged.resolve("yellow metal").as_deref(), Some("XAUUSD.m"));
+        assert_eq!(merged.resolve("GOLD").as_deref(), Some("XAGUSD.m"));
+        assert_eq!(merged.resolve("cold").as_deref(), Some("XAUUSD.m"));
+        // The base resolver is untouched.
+        assert_eq!(base.resolve("gold").as_deref(), Some("XAUUSD.m"));
+        assert_eq!(
+            base.resolve("yellow metal").as_deref(),
+            Some("YELLOWMETAL.m")
+        );
     }
 
     #[test]

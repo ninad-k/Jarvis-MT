@@ -206,6 +206,7 @@ async fn executing_every_tool_never_sends_a_write() {
         session_id: uuid::Uuid::new_v4(),
         intent,
         voice: false,
+        persona: None,
     };
     let calls = [
         ("get_price", json!({ "symbol": "gold" })),
@@ -293,6 +294,7 @@ async fn free_text_comments_from_mt5_never_reach_the_model() {
         session_id: uuid::Uuid::new_v4(),
         intent: Intent::Other,
         voice: false,
+        persona: None,
     };
     for (name, args) in [
         ("get_positions", json!({})),
@@ -1868,6 +1870,7 @@ async fn propose_arguments_are_validated_before_any_bridge_call() {
         session_id: uuid::Uuid::new_v4(),
         intent: Intent::Other,
         voice: false,
+        persona: None,
     };
     let before = mock.request_count();
     for (args, needle) in [
@@ -1927,6 +1930,7 @@ async fn small_models_may_send_numbers_as_strings() {
         session_id: uuid::Uuid::new_v4(),
         intent: said_buy(),
         voice: false,
+        persona: None,
     };
     let out = tools
         .execute_in(
@@ -1942,6 +1946,7 @@ async fn small_models_may_send_numbers_as_strings() {
         session_id: uuid::Uuid::new_v4(),
         intent: Intent::Other,
         voice: false,
+        persona: None,
     };
     let out = tools
         .execute_in(

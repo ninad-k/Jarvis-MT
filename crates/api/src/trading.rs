@@ -33,7 +33,7 @@
 //! request that was sent cannot be taken back.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use jarvis_bridge_client::protocol::{
@@ -55,6 +55,7 @@ use crate::audit::{Audit, AuditKind};
 use crate::clock::{ServerClock, TimeSource};
 use crate::config::TradingConfig;
 use crate::events::{Event, EventBus};
+use crate::limit_overrides::{self, PartialLimits};
 use crate::ratelimit::RateLimiter;
 use crate::state::ModeMonitor;
 
@@ -231,6 +232,24 @@ pub struct ProposeRequest {
     /// The turn came from voice: the confirm window starts after read-back (ADR-0007).
     pub voice: bool,
     pub source: ProposeSource,
+    /// The persona that was active for the request (audit only; it changes no decision).
+    pub persona: Option<String>,
+}
+
+/// Who an audit row is about: the chat session and the persona that was active.
+#[derive(Debug, Clone, Default)]
+struct Actor {
+    session: Option<Uuid>,
+    persona: Option<String>,
+}
+
+impl Actor {
+    fn of(req: &ProposeRequest) -> Self {
+        Self {
+            session: req.session,
+            persona: req.persona.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +299,8 @@ pub struct TradingParts {
 #[derive(Debug, Clone)]
 struct TokenMeta {
     session: Option<Uuid>,
+    /// The persona that created the preview; confirm rows are attributed to it.
+    persona: Option<String>,
     preview_id: Uuid,
     /// What was proposed: confirmation checks it again against the market of that moment.
     action: Option<ProposedAction>,
@@ -304,7 +325,11 @@ pub struct Trading {
     clock: ServerClock,
     mode: Arc<ModeMonitor>,
     audit: Audit,
-    limits: Limits,
+    /// The limits in the config file.
+    config_limits: Limits,
+    /// What the gate enforces: the config limits intersected with the stored overrides.
+    limits: RwLock<Limits>,
+    overrides: RwLock<Option<PartialLimits>>,
     config: TradingConfig,
     kill_switch: KillSwitch,
     tokens: TokenStore,
@@ -334,7 +359,9 @@ impl Trading {
             clock: parts.clock,
             mode: parts.mode,
             audit: parts.audit,
-            limits: parts.limits,
+            limits: RwLock::new(parts.limits.clone()),
+            config_limits: parts.limits,
+            overrides: RwLock::new(None),
             config: parts.config,
             kill_switch: parts.kill_switch,
             time: parts.time,
@@ -345,8 +372,38 @@ impl Trading {
         })
     }
 
-    pub fn limits(&self) -> &Limits {
-        &self.limits
+    /// The limits the gate enforces right now (config limits with the overrides applied).
+    pub fn limits(&self) -> Limits {
+        self.limits
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// The limits from the config file.
+    pub fn config_limits(&self) -> &Limits {
+        &self.config_limits
+    }
+
+    /// The stored tighten-only overrides, if any.
+    pub fn limit_overrides(&self) -> Option<PartialLimits> {
+        self.overrides
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Replace the overrides and recompute the effective limits. Previews already issued keep
+    /// the limits they were checked against; the confirm-time re-check reads the new ones.
+    pub fn set_limit_overrides(&self, overrides: Option<PartialLimits>) -> Limits {
+        let overrides = overrides.filter(|o| !o.is_empty());
+        let effective = limit_overrides::effective(&self.config_limits, overrides.as_ref());
+        // Take both locks in the same order everywhere.
+        let mut stored = self.overrides.write().unwrap_or_else(|p| p.into_inner());
+        let mut limits = self.limits.write().unwrap_or_else(|p| p.into_inner());
+        *stored = overrides;
+        *limits = effective.clone();
+        effective
     }
 
     pub fn now_ms(&self) -> i64 {
@@ -357,12 +414,29 @@ impl Trading {
         &self.events
     }
 
+    /// True while any confirmation token (first or second stage, from chat or the UI) is
+    /// unresolved and not yet expired, i.e. a confirmation is open somewhere.
+    pub fn has_pending_confirmation(&self) -> bool {
+        let now = self.now_ms();
+        self.reg()
+            .tokens
+            .values()
+            .any(|m| !m.resolved && m.expires_at_ms > now)
+    }
+
     fn reg(&self) -> std::sync::MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    async fn record(&self, session: Option<Uuid>, kind: AuditKind, payload: Value) {
-        self.audit.record(session, kind, payload).await;
+    async fn record(&self, who: &Actor, kind: AuditKind, payload: Value) {
+        self.audit
+            .record_as(who.session, who.persona.as_deref(), kind, payload)
+            .await;
+    }
+
+    /// A row that belongs to no conversation (kill switch, housekeeping).
+    async fn record_global(&self, kind: AuditKind, payload: Value) {
+        self.audit.record(None, kind, payload).await;
     }
 
     // ------------------------------------------------------------- propose
@@ -391,7 +465,7 @@ impl Trading {
             _ => (AuditKind::Error, "propose".into()),
         };
         self.record(
-            req.session,
+            &Actor::of(req),
             kind,
             json!({
                 "reason": reason,
@@ -421,7 +495,7 @@ impl Trading {
         let preview = evaluate(
             &req.action,
             &snapshot,
-            &self.limits,
+            &self.limits(),
             self.kill_switch.is_engaged(),
         )?;
 
@@ -440,6 +514,7 @@ impl Trading {
                 issued.token.clone(),
                 TokenMeta {
                     session: req.session,
+                    persona: req.persona.clone(),
                     preview_id: preview.id,
                     action: Some(req.action.clone()),
                     stage: issued.stage,
@@ -461,7 +536,7 @@ impl Trading {
             // Cancels the previous token and its batch sibling; "already used" is fine.
             let _ = self.tokens.cancel(&prev, now);
             self.record(
-                req.session,
+                &Actor::of(req),
                 AuditKind::Cancel,
                 json!({ "token": token_prefix(&prev), "reason": "replaced by a newer preview" }),
             )
@@ -469,7 +544,7 @@ impl Trading {
         }
 
         self.record(
-            req.session,
+            &Actor::of(req),
             AuditKind::Preview,
             json!({
                 "preview_id": preview.id,
@@ -603,6 +678,10 @@ impl Trading {
         }
         let meta = self.reg().tokens.get(token).cloned();
         let session = meta.as_ref().and_then(|m| m.session);
+        let who = Actor {
+            session,
+            persona: meta.as_ref().and_then(|m| m.persona.clone()),
+        };
         let blocked = if self.mode.mismatch() {
             Some((TradingError::ModeMismatch, "mode_mismatch"))
         } else if self.kill_switch.is_engaged() {
@@ -612,7 +691,7 @@ impl Trading {
         };
         if let Some((error, reason)) = blocked {
             self.record(
-                session,
+                &who,
                 AuditKind::Confirm,
                 json!({ "token": token_prefix(token), "accepted": false, "reason": reason }),
             )
@@ -623,7 +702,7 @@ impl Trading {
             Ok(o) => o,
             Err(e) => {
                 self.record(
-                    session,
+                    &who,
                     AuditKind::Confirm,
                     json!({ "token": token_prefix(token), "accepted": false, "reason": e.to_string() }),
                 )
@@ -639,7 +718,7 @@ impl Trading {
                 message,
             } => {
                 self.record(
-                    session,
+                    &who,
                     AuditKind::Confirm,
                     json!({
                         "token": token_prefix(token),
@@ -662,6 +741,7 @@ impl Trading {
                         second.token.clone(),
                         TokenMeta {
                             session,
+                            persona: who.persona.clone(),
                             preview_id: second.preview_id,
                             action: meta.as_ref().and_then(|m| m.action.clone()),
                             stage: second.stage,
@@ -696,7 +776,7 @@ impl Trading {
                     }
                 }
                 self.record(
-                    session,
+                    &who,
                     if stage == TokenStage::Second {
                         AuditKind::ConfirmSecond
                     } else {
@@ -715,7 +795,7 @@ impl Trading {
                 // half-finished batch must still run to the end and be audited.
                 let this = Arc::clone(self);
                 let action = meta.and_then(|m| m.action);
-                tokio::spawn(async move { this.execute(preview, session, action).await })
+                tokio::spawn(async move { this.execute(preview, who, action).await })
                     .await
                     .map_err(|e| TradingError::Internal(format!("execution task failed: {e}")))?
             }
@@ -729,7 +809,7 @@ impl Trading {
     async fn execute(
         &self,
         preview: ActionPreview,
-        session: Option<Uuid>,
+        who: Actor,
         action: Option<ProposedAction>,
     ) -> Result<ConfirmResponse, TradingError> {
         if let Some(bad) = preview.commands.iter().find(|c| !c.is_write()) {
@@ -745,7 +825,7 @@ impl Trading {
         let _turn = self.write_lock.lock().await;
         if self.kill_switch.is_engaged() {
             self.record(
-                session,
+                &who,
                 AuditKind::KillSwitch,
                 json!({ "blocked_preview": preview.id, "sent": 0 }),
             )
@@ -763,7 +843,7 @@ impl Trading {
             }
             Err(e) => {
                 self.record(
-                    session,
+                    &who,
                     AuditKind::Error,
                     json!({ "where": "confirm", "preview_id": preview.id, "message": e.to_string(), "sent": 0 }),
                 )
@@ -776,7 +856,7 @@ impl Trading {
         }
 
         // TRD-2: the limits and the market are looked at again, right before the write.
-        let gone = self.recheck(&preview, session, action.as_ref()).await?;
+        let gone = self.recheck(&preview, &who, action.as_ref()).await?;
 
         let total = preview.commands.len();
         let mut results: Vec<TradeResultDto> = Vec::with_capacity(total);
@@ -789,7 +869,7 @@ impl Trading {
             // Rule 6: the kill switch is re-checked immediately before every single write.
             if self.kill_switch.is_engaged() {
                 aborted = Some(
-                    self.abort_for_kill_switch(session, &preview, index, attempted, &mut results)
+                    self.abort_for_kill_switch(&who, &preview, index, attempted, &mut results)
                         .await?,
                 );
                 break;
@@ -798,7 +878,7 @@ impl Trading {
                 && gone.contains(&ticket)
             {
                 self.record(
-                    session,
+                    &who,
                     AuditKind::TradeResult,
                     json!({
                         "preview_id": preview.id,
@@ -819,7 +899,7 @@ impl Trading {
             }
 
             self.record(
-                session,
+                &who,
                 AuditKind::BridgeRequest,
                 json!({
                     "preview_id": preview.id,
@@ -832,7 +912,7 @@ impl Trading {
             // call itself between this check and the bridge (TRD-1).
             if self.kill_switch.is_engaged() {
                 aborted = Some(
-                    self.abort_for_kill_switch(session, &preview, index, attempted, &mut results)
+                    self.abort_for_kill_switch(&who, &preview, index, attempted, &mut results)
                         .await?,
                 );
                 break;
@@ -841,25 +921,25 @@ impl Trading {
             match self.send_write(command).await {
                 Ok(tr) => {
                     self.record(
-                        session,
+                        &who,
                         AuditKind::BridgeReply,
                         json!({ "preview_id": preview.id, "index": index, "reply": tr }),
                     )
                     .await;
                     let dto = ok_result(command, &tr);
-                    self.record_trade_result(session, preview.id, index, command, &dto)
+                    self.record_trade_result(&who, preview.id, index, command, &dto)
                         .await;
                     results.push(dto);
                 }
                 Err(e) if outcome_unknown(&e) => {
                     self.record(
-                        session,
+                        &who,
                         AuditKind::BridgeReply,
                         json!({ "preview_id": preview.id, "index": index, "error": e.to_string() }),
                     )
                     .await;
                     self.record(
-                        session,
+                        &who,
                         AuditKind::TradeResult,
                         json!({
                             "preview_id": preview.id,
@@ -875,13 +955,13 @@ impl Trading {
                 }
                 Err(e) => {
                     self.record(
-                        session,
+                        &who,
                         AuditKind::BridgeReply,
                         json!({ "preview_id": preview.id, "index": index, "error": e.to_string() }),
                     )
                     .await;
                     let dto = error_result(command, &e);
-                    self.record_trade_result(session, preview.id, index, command, &dto)
+                    self.record_trade_result(&who, preview.id, index, command, &dto)
                         .await;
                     results.push(dto);
                 }
@@ -928,7 +1008,7 @@ impl Trading {
     /// not sent and returns the reason for `aborted`.
     async fn abort_for_kill_switch(
         &self,
-        session: Option<Uuid>,
+        who: &Actor,
         preview: &ActionPreview,
         index: usize,
         attempted: usize,
@@ -936,7 +1016,7 @@ impl Trading {
     ) -> Result<String, TradingError> {
         let total = preview.commands.len();
         self.record(
-            session,
+            who,
             AuditKind::KillSwitch,
             json!({
                 "blocked_preview": preview.id,
@@ -972,7 +1052,7 @@ impl Trading {
     async fn recheck(
         &self,
         preview: &ActionPreview,
-        session: Option<Uuid>,
+        who: &Actor,
         action: Option<&ProposedAction>,
     ) -> Result<HashSet<u64>, TradingError> {
         let opens = preview
@@ -980,23 +1060,23 @@ impl Trading {
             .iter()
             .any(|c| matches!(c, Command::OrderSend(_)));
         if opens {
-            self.recheck_order(preview, session, action).await?;
+            self.recheck_order(preview, who, action).await?;
             return Ok(HashSet::new());
         }
-        self.recheck_tickets(preview, session).await
+        self.recheck_tickets(preview, who).await
     }
 
     async fn recheck_order(
         &self,
         preview: &ActionPreview,
-        session: Option<Uuid>,
+        who: &Actor,
         action: Option<&ProposedAction>,
     ) -> Result<(), TradingError> {
         let Some(action @ ProposedAction::Order(_)) = action else {
             // An order whose proposal is not on record cannot be checked, so it is not sent.
             let message = "The proposal behind this order is no longer on record, so the limits \
                            cannot be checked again. Nothing was sent; ask for the order again.";
-            self.reject_at_confirm(session, preview, "no_proposal", message)
+            self.reject_at_confirm(who, preview, "no_proposal", message)
                 .await;
             return Err(TradingError::RecheckRejected(message.to_owned()));
         };
@@ -1004,7 +1084,7 @@ impl Trading {
             Ok(s) => s,
             Err(e) => {
                 self.record(
-                    session,
+                    who,
                     AuditKind::Error,
                     json!({
                         "where": "confirm",
@@ -1021,7 +1101,7 @@ impl Trading {
         let fresh = match evaluate(
             action,
             &snapshot,
-            &self.limits,
+            &self.limits(),
             self.kill_switch.is_engaged(),
         ) {
             Ok(fresh) => fresh,
@@ -1035,8 +1115,7 @@ impl Trading {
                     "The checks were run again at confirmation and now refuse this order: {e}. \
                      Nothing was sent; ask for the order again if you still want it."
                 );
-                self.reject_at_confirm(session, preview, &rule, &message)
-                    .await;
+                self.reject_at_confirm(who, preview, &rule, &message).await;
                 return Err(TradingError::RecheckRejected(message));
             }
         };
@@ -1045,7 +1124,7 @@ impl Trading {
                 "The order the checks would build now is not the one you confirmed ({what}). \
                  Nothing was sent; ask for the order again."
             );
-            self.reject_at_confirm(session, preview, "order_changed", &message)
+            self.reject_at_confirm(who, preview, "order_changed", &message)
                 .await;
             return Err(TradingError::RecheckRejected(message));
         }
@@ -1055,7 +1134,7 @@ impl Trading {
     async fn recheck_tickets(
         &self,
         preview: &ActionPreview,
-        session: Option<Uuid>,
+        who: &Actor,
     ) -> Result<HashSet<u64>, TradingError> {
         let wants_positions = preview.commands.iter().any(|c| {
             matches!(
@@ -1095,7 +1174,7 @@ impl Trading {
         };
         if let Err(e) = read.await {
             self.record(
-                session,
+                who,
                 AuditKind::Error,
                 json!({
                     "where": "confirm",
@@ -1124,7 +1203,7 @@ impl Trading {
                 Some(noun) if wanted == 1 => format!("{noun} no longer exists"),
                 _ => format!("none of the {wanted} tickets exist any more"),
             };
-            self.reject_at_confirm(session, preview, "ticket_gone", &message)
+            self.reject_at_confirm(who, preview, "ticket_gone", &message)
                 .await;
             return Err(TradingError::RecheckRejected(format!(
                 "The checks were run again at confirmation: {message}. Nothing was sent."
@@ -1134,7 +1213,7 @@ impl Trading {
             let mut list: Vec<u64> = gone.iter().copied().collect();
             list.sort_unstable();
             self.record(
-                session,
+                who,
                 AuditKind::GateRejected,
                 json!({
                     "reason": RECHECK_REASON,
@@ -1151,13 +1230,13 @@ impl Trading {
 
     async fn reject_at_confirm(
         &self,
-        session: Option<Uuid>,
+        who: &Actor,
         preview: &ActionPreview,
         rule: &str,
         message: &str,
     ) {
         self.record(
-            session,
+            who,
             AuditKind::GateRejected,
             json!({
                 "reason": RECHECK_REASON,
@@ -1172,14 +1251,14 @@ impl Trading {
 
     async fn record_trade_result(
         &self,
-        session: Option<Uuid>,
+        who: &Actor,
         preview_id: Uuid,
         index: usize,
         command: &Command,
         dto: &TradeResultDto,
     ) {
         self.record(
-            session,
+            who,
             AuditKind::TradeResult,
             json!({
                 "preview_id": preview_id,
@@ -1230,6 +1309,10 @@ impl Trading {
         let now = self.time.now_ms();
         let meta = self.reg().tokens.get(token).cloned();
         let session = meta.as_ref().and_then(|m| m.session);
+        let who = Actor {
+            session,
+            persona: meta.as_ref().and_then(|m| m.persona.clone()),
+        };
         self.tokens.cancel(token, now)?;
         {
             let mut reg = self.reg();
@@ -1241,7 +1324,7 @@ impl Trading {
             }
         }
         self.record(
-            session,
+            &who,
             AuditKind::Cancel,
             json!({
                 "token": token_prefix(token),
@@ -1287,8 +1370,7 @@ impl Trading {
         }
         let state = self.kill_switch.state();
         self.persist_kill_switch(&state).await;
-        self.record(
-            None,
+        self.record_global(
             AuditKind::KillSwitch,
             json!({ "engaged": true, "reason": reason }),
         )
@@ -1305,7 +1387,7 @@ impl Trading {
         self.kill_switch.release(self.time.now_ms());
         let state = self.kill_switch.state();
         self.persist_kill_switch(&state).await;
-        self.record(None, AuditKind::KillSwitch, json!({ "engaged": false }))
+        self.record_global(AuditKind::KillSwitch, json!({ "engaged": false }))
             .await;
         self.events.emit(Event::KillSwitch {
             engaged: false,
@@ -1347,8 +1429,7 @@ impl Trading {
         tracing::warn!(
             "the kill switch was engaged when the server last stopped and stays engaged ({reason}); release it in the app with a fresh authenticator code"
         );
-        self.record(
-            None,
+        self.record_global(
             AuditKind::KillSwitch,
             json!({ "engaged": true, "reason": reason, "restored_after_restart": true }),
         )

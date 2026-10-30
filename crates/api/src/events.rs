@@ -26,6 +26,9 @@ pub enum Event {
         results: Vec<TradeResultDto>,
     },
     PositionsChanged,
+    /// A user changed their settings, or the trading limits were tightened or reset.
+    /// Clients re-read `/api/settings` (and `/api/status`).
+    SettingsChanged,
 }
 
 const CAPACITY: usize = 64;
@@ -77,6 +80,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Event::PositionsChanged).unwrap(),
             json!({"type":"positions_changed"})
+        );
+        assert_eq!(
+            serde_json::to_value(Event::SettingsChanged).unwrap(),
+            json!({"type":"settings_changed"})
         );
         assert_eq!(
             serde_json::to_value(Event::PreviewExpired { token: "t".into() }).unwrap(),

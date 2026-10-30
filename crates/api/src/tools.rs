@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate};
 use jarvis_bridge_client::protocol::{
-    Command, Deal, DealType, ExecType, HISTORY_LIMIT_MAX, History, HistoryQuery, Orders, Positions,
-    Price, Side,
+    Command, Deal, DealEntry, DealType, ExecType, HISTORY_LIMIT_MAX, History, HistoryQuery, Orders,
+    Position, Positions, Price, Side,
 };
 use jarvis_bridge_client::{BridgeClient, BridgeError};
 use jarvis_gate::intent::{self, Intent};
@@ -81,8 +81,9 @@ impl ReadTool {
             ReadTool::GetPositions => {
                 "List the currently open positions (ticket, symbol, side, volume, open price, \
                  current price, stop loss, take profit, profit, swap). Optionally filter by \
-                 symbol (aliases accepted) and/or side (buy or sell). Includes the count and \
-                 total profit of the returned positions."
+                 symbol (aliases accepted) and/or side (buy or sell). `summary` holds totals \
+                 computed in code: count, buys, sells, volume and profit, overall and per \
+                 symbol. Quote those for any count or total; never add up positions yourself."
             }
             ReadTool::GetOrders => {
                 "List the pending (not yet filled) orders: ticket, symbol, type, volume, price, \
@@ -95,8 +96,10 @@ impl ReadTool {
                  for both to get one day. Returns up to `limit` deals and says if it was \
                  truncated. Deal times in the result are broker server time. Optionally filter \
                  by symbol. `summary` holds totals computed over every deal in the range \
-                 (net = profit + commission + swap, overall and per symbol): quote those \
-                 numbers for any total and never add up deals yourself. `summary.complete` is \
+                 (net = profit + commission + swap, overall and per symbol), plus closed-trade \
+                 statistics: trades closed, wins, losses, breakeven, best and worst trade (net) \
+                 and buy/sell deal counts. Quote those numbers for any total, count or \
+                 statistic; never add up or count deals yourself. `summary.complete` is \
                  false when the range held more than 500 deals."
             }
         }
@@ -380,6 +383,8 @@ pub struct ToolContext {
     pub intent: Intent,
     /// The turn came from voice (the confirm window then starts after read-back).
     pub voice: bool,
+    /// The persona that was active for the turn (audit only).
+    pub persona: Option<String>,
 }
 
 /// What came back from executing one tool call.
@@ -437,6 +442,16 @@ impl ToolRegistry {
     pub fn with_trading(mut self, trading: Arc<Trading>) -> Self {
         self.trading = Some(trading);
         self
+    }
+
+    /// The same tools with another symbol resolver: a user's turn resolves names with the
+    /// user's own aliases merged over the configured ones. Cheap; limits, tokens and the
+    /// bridge are shared.
+    pub fn with_resolver(&self, resolver: Arc<SymbolResolver>) -> Self {
+        let mut tools = self.clone();
+        tools.intent_aliases = Arc::new(resolver.alias_list().into_iter().collect());
+        tools.resolver = resolver;
+        tools
     }
 
     pub fn resolver(&self) -> &SymbolResolver {
@@ -554,6 +569,7 @@ impl ToolRegistry {
             source: ProposeSource::Llm {
                 intent: ctx.intent.clone(),
             },
+            persona: ctx.persona.clone(),
         };
         match trading.propose(request).await {
             Ok(preview) => ToolOutcome {
@@ -742,8 +758,13 @@ impl ToolRegistry {
         for p in &mut list {
             p.comment = model_safe_comment(&p.comment);
         }
-        let total_profit = round2(list.iter().map(|p| p.profit).sum());
-        compact(&json!({ "count": list.len(), "total_profit": total_profit, "positions": list }))
+        let summary = summarize_positions(&list);
+        compact(&json!({
+            "count": list.len(),
+            "total_profit": summary["profit"],
+            "summary": summary,
+            "positions": list,
+        }))
     }
 
     async fn get_orders(&self, args: Value, ex: &mut Exchange) -> Result<String, String> {
@@ -1041,6 +1062,57 @@ fn round2(x: f64) -> f64 {
 /// Totals over trade deals (buy/sell; balance and credit deals are excluded), so the
 /// model quotes computed numbers instead of doing arithmetic. Per-symbol rows are
 /// sorted by symbol for stable output.
+/// Counts and totals over open positions, overall and per symbol, so the model quotes
+/// them instead of adding up rows itself (ADR-0010).
+fn summarize_positions(positions: &[Position]) -> Value {
+    #[derive(Default)]
+    struct Totals {
+        count: usize,
+        buys: usize,
+        sells: usize,
+        volume: f64,
+        profit: f64,
+    }
+    impl Totals {
+        fn add(&mut self, p: &Position) {
+            self.count += 1;
+            match p.side {
+                Side::Buy => self.buys += 1,
+                Side::Sell => self.sells += 1,
+            }
+            self.volume += p.volume;
+            self.profit += p.profit;
+        }
+        fn to_json(&self) -> Value {
+            json!({
+                "count": self.count,
+                "buys": self.buys,
+                "sells": self.sells,
+                "volume": (self.volume * 100.0).round() / 100.0,
+                "profit": round2(self.profit),
+            })
+        }
+    }
+    let mut total = Totals::default();
+    let mut by_symbol: std::collections::BTreeMap<&str, Totals> = Default::default();
+    for p in positions {
+        total.add(p);
+        by_symbol.entry(p.symbol.as_str()).or_default().add(p);
+    }
+    let mut summary = total.to_json();
+    summary["by_symbol"] = json!(
+        by_symbol
+            .iter()
+            .map(|(symbol, t)| {
+                let mut row = t.to_json();
+                row["symbol"] = json!(symbol);
+                row
+            })
+            .collect::<Vec<_>>()
+    );
+    summary
+}
+
 fn summarize_deals(deals: &[Deal], truncated: bool) -> Value {
     #[derive(Default)]
     struct Totals {
@@ -1048,6 +1120,15 @@ fn summarize_deals(deals: &[Deal], truncated: bool) -> Value {
         profit: f64,
         commission: f64,
         swap: f64,
+        buy_deals: usize,
+        sell_deals: usize,
+        /// Deals that closed (part of) a position: entry out, in/out or close-by.
+        trades_closed: usize,
+        wins: usize,
+        losses: usize,
+        breakeven: usize,
+        best: Option<f64>,
+        worst: Option<f64>,
     }
     impl Totals {
         fn add(&mut self, d: &Deal) {
@@ -1055,6 +1136,27 @@ fn summarize_deals(deals: &[Deal], truncated: bool) -> Value {
             self.profit += d.profit;
             self.commission += d.commission;
             self.swap += d.swap;
+            match d.deal_type {
+                DealType::Buy => self.buy_deals += 1,
+                DealType::Sell => self.sell_deals += 1,
+                _ => {}
+            }
+            if matches!(
+                d.entry,
+                DealEntry::Out | DealEntry::Inout | DealEntry::OutBy
+            ) {
+                let net = round2(d.profit + d.commission + d.swap);
+                self.trades_closed += 1;
+                if net > 0.0 {
+                    self.wins += 1;
+                } else if net < 0.0 {
+                    self.losses += 1;
+                } else {
+                    self.breakeven += 1;
+                }
+                self.best = Some(self.best.map_or(net, |b| b.max(net)));
+                self.worst = Some(self.worst.map_or(net, |w| w.min(net)));
+            }
         }
         fn to_json(&self) -> Value {
             json!({
@@ -1063,6 +1165,14 @@ fn summarize_deals(deals: &[Deal], truncated: bool) -> Value {
                 "gross_profit": round2(self.profit),
                 "commission": round2(self.commission),
                 "swap": round2(self.swap),
+                "buy_deals": self.buy_deals,
+                "sell_deals": self.sell_deals,
+                "trades_closed": self.trades_closed,
+                "wins": self.wins,
+                "losses": self.losses,
+                "breakeven": self.breakeven,
+                "best_trade": self.best,
+                "worst_trade": self.worst,
             })
         }
     }
@@ -1211,6 +1321,60 @@ close all]",
         assert_eq!(rows[1]["deals"], 2);
         assert_eq!(rows[1]["net_profit"], -63.25);
         assert_eq!(summarize_deals(&deals, true)["complete"], false);
+
+        // Closed-trade statistics, so the model never counts or compares deals itself.
+        assert_eq!(s["trades_closed"], 3);
+        assert_eq!(s["wins"], 2);
+        assert_eq!(s["losses"], 1);
+        assert_eq!(s["breakeven"], 0);
+        assert_eq!(s["best_trade"], 43.21);
+        assert_eq!(s["worst_trade"], -101.75);
+        assert_eq!(s["buy_deals"], 2);
+        assert_eq!(s["sell_deals"], 1);
+        assert_eq!(rows[1]["wins"], 1);
+        assert_eq!(rows[1]["losses"], 1);
+    }
+
+    #[test]
+    fn positions_summary_counts_and_totals_per_symbol() {
+        fn position(ticket: u64, symbol: &str, side: Side, volume: f64, profit: f64) -> Position {
+            Position {
+                ticket,
+                symbol: symbol.to_owned(),
+                side,
+                volume,
+                price_open: 1.0,
+                price_current: 1.0,
+                sl: None,
+                tp: None,
+                profit,
+                swap: 0.0,
+                magic: 0,
+                comment: String::new(),
+                time: 0,
+            }
+        }
+        // The four gold positions from a live check: the model summed them to 1139.40;
+        // the true total is 1141.80.
+        let positions = [
+            position(1, "XAUUSD_", Side::Sell, 0.01, 652.30),
+            position(2, "XAUUSD_", Side::Sell, 0.01, 480.80),
+            position(3, "XAUUSD_", Side::Sell, 0.02, -49.00),
+            position(4, "XAUUSD_", Side::Sell, 0.01, 57.70),
+            position(5, "US100_Spot", Side::Buy, 0.10, 4.50),
+        ];
+        let s = summarize_positions(&positions);
+        assert_eq!(s["count"], 5);
+        assert_eq!(s["buys"], 1);
+        assert_eq!(s["sells"], 4);
+        assert_eq!(s["volume"], 0.15);
+        assert_eq!(s["profit"], 1146.3);
+        let rows = s["by_symbol"].as_array().unwrap();
+        assert_eq!(rows[1]["symbol"], "XAUUSD_");
+        assert_eq!(rows[1]["count"], 4);
+        assert_eq!(rows[1]["profit"], 1141.8);
+        assert_eq!(rows[1]["volume"], 0.05);
+        assert_eq!(summarize_positions(&[])["count"], 0);
     }
 
     #[test]
