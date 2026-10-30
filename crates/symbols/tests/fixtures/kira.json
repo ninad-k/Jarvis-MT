@@ -1,0 +1,166 @@
+{
+ "broker": "Kira Financial Brokers L.L.C",
+ "server": "KiraFinancialBrokers-Live",
+ "symbols": [
+  {
+   "name": "AUDUSD",
+   "description": "Australian Dollar vs United States Dollar",
+   "path": "Forex Majors\\AUDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BRENTcash",
+   "description": "Brent Crude Oil Cash",
+   "path": "CFD OIL 1\\BRENTcash",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BTCUSD",
+   "description": "Bitcoin vs US Dollar",
+   "path": "Cryptocurrency\\BTCUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "ETHUSD",
+   "description": "Ethereum vs US Dollar",
+   "path": "Cryptocurrency\\ETHUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "ETH",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EURUSD",
+   "description": "Euro vs United States Dollar",
+   "path": "Forex Majors\\EURUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GBPUSD",
+   "description": "Sterling Pound vs United States Dollar",
+   "path": "Forex Majors\\GBPUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GOLD_CASH",
+   "description": "Gold vs US Dollar ",
+   "path": "Metals\\GOLD_CASH",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NDXcash",
+   "description": "US NASDAQ 100",
+   "path": "CFD INDEX 1\\NDXcash",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NZDUSD",
+   "description": "New Zealand Dollar vs United States Dollar",
+   "path": "Forex Majors\\NZDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "NZD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30cash",
+   "description": "US30 CASH",
+   "path": "CFD INDEX 1\\US30cash",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USDCAD",
+   "description": "US Dollar vs Canadian Dollar",
+   "path": "Forex Majors\\USDCAD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CAD"
+  },
+  {
+   "name": "USDCHF",
+   "description": "US Dollar vs Swiss Franc",
+   "path": "Forex Majors\\USDCHF",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "USDCNH",
+   "description": "United States Dollar vs Chinese Yuan Renimbi",
+   "path": "Forex Exotics\\USDCNH",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CNH"
+  },
+  {
+   "name": "USDJPY",
+   "description": "US Dollar vs Japense Yen",
+   "path": "Forex Majors\\USDJPY",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 3,
+   "currency_base": "USD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "USDSEK",
+   "description": "United States Dollar vs Swedish Krona",
+   "path": "Forex Exotics\\USDSEK",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "SEK"
+  },
+  {
+   "name": "XAGUSD",
+   "description": "Silver vs US Dollar ",
+   "path": "Metals\\XAGUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  }
+ ]
+}

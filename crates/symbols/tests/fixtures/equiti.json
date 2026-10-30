@@ -1,0 +1,186 @@
+{
+ "broker": "Equiti Securities Currencies Brokers L.L.C",
+ "server": "EquitiSecurities-Live",
+ "symbols": [
+  {
+   "name": "AMD",
+   "description": "Advanced Micro Devices, Inc.",
+   "path": "Equities - US\\Top Traded\\AMD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AUDCHF.pr",
+   "description": "Australian Dollar vs Swiss Franc",
+   "path": "Pro\\FX Group 1 - PR\\AUDCHF.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "AUDUSD.pr",
+   "description": "Australian Dollar vs US Dollar",
+   "path": "Pro\\FX Group 1 - PR\\AUDUSD.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BTCUSD.lv",
+   "description": "Bitcoin Leverage",
+   "path": "Crypto - LV\\BTCUSD.lv",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "CADCHF.pr",
+   "description": "Canadian Dollar vs Swiss Franc",
+   "path": "Pro\\FX Group 1 - PR\\CADCHF.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "CAD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "EURCHF.pr",
+   "description": "Euro vs Swiss Franc",
+   "path": "Pro\\FX Group 1 - PR\\EURCHF.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "EURGBP.pr",
+   "description": "Euro vs Great British Pound ",
+   "path": "Pro\\FX Group 1 - PR\\EURGBP.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "GBP"
+  },
+  {
+   "name": "EURUSD.pr",
+   "description": "Euro vs US Dollar",
+   "path": "Pro\\FX Group 1 - PR\\EURUSD.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GBPCHF.pr",
+   "description": "Great British Pound vs Swiss Franc",
+   "path": "Pro\\FX Group 1 - PR\\GBPCHF.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "GBPUSD.pr",
+   "description": "Great British Pound vs US Dollar",
+   "path": "Pro\\FX Group 1 - PR\\GBPUSD.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NZDCHF.pr",
+   "description": "New Zealand Dollar vs Swiss Franc",
+   "path": "Pro\\FX Group 1 - PR\\NZDCHF.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "NZD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "NZDUSD.pr",
+   "description": "New Zealand Dollar vs US Dollar",
+   "path": "Pro\\FX Group 1 - PR\\NZDUSD.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "NZD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "UKOILRoll",
+   "description": "Brent Crude Oil Cash",
+   "path": "CFD Oil - 1\\UKOILRoll",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30Roll",
+   "description": "US Wall Street 30 Cash Index",
+   "path": "CFD Indices - 4\\US30Roll",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30Z6",
+   "description": "US Wall Street 30 Index Futures - Expiry: December 2026",
+   "path": "CFD Indices - 2\\US30Z6",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "UT100Roll",
+   "description": "US Tech 100 Cash Index",
+   "path": "CFD Indices - 4\\UT100Roll",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "UT100U6",
+   "description": "US Tech 100 Index Futures - Expiry: September 2026",
+   "path": "CFD Indices - 2\\UT100U6",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAUUSD.pr",
+   "description": "Gold vs US Dollar",
+   "path": "Pro\\METALS XAU - PR\\XAUUSD.pr",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  }
+ ]
+}

@@ -1,0 +1,69 @@
+# Curated per-broker symbol maps (checked into the repo). Brokers are keyed by their
+# exact MT5 company name (ACCOUNT_COMPANY, as reported by the EA's get_broker).
+#
+# Resolution order for a broker: user overrides (data/broker_symbols.user.toml, set in
+# Settings) > this file > auto-detected (data/broker_symbols.generated.toml, written
+# when Arc MT first sees a broker) > the name unchanged. Within one layer, explicit
+# entries win over patterns; patterns are tried in order and the first full match wins.
+#
+#   explicit  canonical name (or a generic alias from config/instruments.toml) -> broker
+#             symbol. "GOLD" also answers "XAUUSD", "NAS100" also answers "US100".
+#   patterns  { match = regex on the canonical name, replace = with $1/\1 groups }
+#
+# Seeded from verified trade history (2026-10-12) of the maintainer's accounts. Entries
+# marked unverified have not been checked against a real account.
+
+[brokers."CFI Financial Markets L.L.C"]
+note = "CFI3-Real / CFI3-Demo. Verified from trade history 2026-10-12; dated futures (GC0826, NAS0926, ...) are deliberately not mapped."
+patterns = [{ match = "^(.+)$", replace = "${1}_" }]
+[brokers."CFI Financial Markets L.L.C".explicit]
+XAUUSD = "XAUUSD_"
+XAGUSD = "XAGUSD_"
+US30 = "US30_SPOT"
+US100 = "US100_Spot"
+US500 = "US500_SPOT"
+GER40 = "GER30_SPOT"
+BTCUSD = "BTCUSD"
+ETHUSD = "ETHUSD"
+WTI = "WTI"
+BRENT = "BRENT"
+NATGAS = "NatGas_SPOT"
+
+[brokers."Raw Trading Ltd"]
+note = "IC Markets (ICMarketsSC-MT5-4, ICMarketsSC-Demo). Verified from trade history 2026-10-12; indices use the .cash names (USTEC is also listed on some servers)."
+patterns = []
+[brokers."Raw Trading Ltd".explicit]
+XAUUSD = "XAUUSD"
+XAGUSD = "XAGUSD"
+
+[brokers."Equiti Securities Currencies Brokers L.L.C"]
+note = "EquitiSecurities-Live. Verified from trade history 2026-10-12; US30Roll/UT100Roll are rolling contracts chosen over dated ones."
+patterns = [{ match = "^([A-Z]{6})$", replace = "${1}.pr" }]
+[brokers."Equiti Securities Currencies Brokers L.L.C".explicit]
+XAUUSD = "XAUUSD.pr"
+XAGUSD = "XAGUSD.pr"
+BTCUSD = "BTCUSD.lv"
+US30 = "US30Roll"
+US100 = "UT100Roll"
+
+[brokers."Kira Financial Brokers L.L.C"]
+note = "KiraFinancialBrokers-Live. Verified from trade history 2026-10-12. No blanket pattern: EURUSD, XAGUSD, BTCUSD, ETHUSD trade under their own names."
+patterns = []
+[brokers."Kira Financial Brokers L.L.C".explicit]
+XAUUSD = "GOLD_CASH"
+US30 = "US30cash"
+US100 = "NDXcash"
+BRENT = "BRENTcash"
+
+[brokers."Exness"]
+note = "UNVERIFIED: not checked against a real account. These curated entries outrank auto-detection, so if they are wrong, fix them here or override them in Settings."
+patterns = [{ match = "^([A-Z]{6})$", replace = "${1}m" }]
+[brokers."Exness".explicit]
+XAUUSD = "XAUUSDm"
+US30 = "US30m"
+BTCUSD = "BTCUSDm"
+
+[brokers."MetaQuotes Ltd."]
+note = "MetaQuotes-Demo: plain names; auto-detection fills the indices."
+patterns = []
+[brokers."MetaQuotes Ltd.".explicit]

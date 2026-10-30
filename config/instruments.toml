@@ -1,0 +1,221 @@
+# Canonical instruments. Arc MT speaks in these names everywhere (limits, watchlist,
+# chat, the gate); each broker's own names are mapped to them per broker (see
+# config/broker_symbols.toml and docs/symbol-mapping.md).
+#
+#   canonical  the one name used inside Arc MT (upper case)
+#   class      fx | metal | index | energy | crypto | other
+#   aliases    generic names that mean the same instrument (upper case). A broker symbol
+#              built from an alias core ("NAS100.cash", "USTEC") is recognised too.
+#   keywords   lower-case phrases that identify it in a broker's symbol description
+#
+# Spoken words ("gold", "sona", "nasdaq") are set in [symbols.aliases] in
+# config/jarvis.toml and point at these canonical names.
+
+# ---- Metals ----------------------------------------------------------------
+[[instrument]]
+canonical = "XAUUSD"
+class = "metal"
+aliases = ["GOLD", "XAU"]
+keywords = ["gold", "xau/usd"]
+
+[[instrument]]
+canonical = "XAGUSD"
+class = "metal"
+aliases = ["SILVER", "XAG"]
+keywords = ["silver", "xag/usd"]
+
+[[instrument]]
+canonical = "XPTUSD"
+class = "metal"
+aliases = ["PLATINUM"]
+keywords = ["platinum"]
+
+[[instrument]]
+canonical = "XPDUSD"
+class = "metal"
+aliases = ["PALLADIUM"]
+keywords = ["palladium"]
+
+# ---- Indices ---------------------------------------------------------------
+[[instrument]]
+canonical = "US100"
+class = "index"
+aliases = ["NASDAQ", "NAS100", "NASDAQ100", "USTEC", "USTECH", "NDX", "NDQ", "NQ100", "UT100"]
+keywords = ["nasdaq 100", "nasdaq100", "us tech 100", "ustech 100", "nasdaq"]
+
+[[instrument]]
+canonical = "US30"
+class = "index"
+aliases = ["DOW", "DOWJONES", "DJ30", "DJI", "WS30", "WALLSTREET30", "US30USD"]
+keywords = ["dow jones", "wall street 30", "us 30", "dow 30"]
+
+[[instrument]]
+canonical = "US500"
+class = "index"
+aliases = ["SPX500", "SP500", "SPX", "SPY500", "US500USD", "USA500"]
+keywords = ["s&p 500", "s&p500", "sp 500", "us 500", "standard & poor"]
+
+[[instrument]]
+canonical = "US2000"
+class = "index"
+aliases = ["RUSSELL2000", "RUT", "US2K"]
+keywords = ["russell 2000", "us small cap 2000"]
+
+[[instrument]]
+canonical = "GER40"
+class = "index"
+aliases = ["DE40", "GER30", "DE30", "DAX", "DAX40", "GERMANY40"]
+keywords = ["dax", "germany 40", "ger 40", "germany 30"]
+
+[[instrument]]
+canonical = "UK100"
+class = "index"
+aliases = ["FTSE100", "FTSE", "UKX"]
+keywords = ["ftse 100", "uk 100"]
+
+[[instrument]]
+canonical = "JP225"
+class = "index"
+aliases = ["JPN225", "NIKKEI", "NIKKEI225", "N225", "JAPAN225"]
+keywords = ["nikkei", "japan 225"]
+
+[[instrument]]
+canonical = "EU50"
+class = "index"
+aliases = ["STOXX50", "EUSTX50", "EURO50", "SX5E"]
+keywords = ["euro stoxx 50", "eurostoxx 50", "eu stocks 50"]
+
+[[instrument]]
+canonical = "FRA40"
+class = "index"
+aliases = ["CAC40", "FR40", "CAC"]
+keywords = ["cac 40", "france 40"]
+
+[[instrument]]
+canonical = "AUS200"
+class = "index"
+aliases = ["ASX200", "AU200"]
+keywords = ["asx 200", "australia 200"]
+
+[[instrument]]
+canonical = "HK50"
+class = "index"
+aliases = ["HSI", "HANGSENG", "HK33"]
+keywords = ["hang seng", "hong kong 50"]
+
+# ---- Energy ----------------------------------------------------------------
+[[instrument]]
+canonical = "WTI"
+class = "energy"
+aliases = ["USOIL", "XTIUSD", "CRUDE", "CL", "OILUSD", "USCRUDE"]
+keywords = ["wti", "us crude", "us oil", "west texas"]
+
+[[instrument]]
+canonical = "BRENT"
+class = "energy"
+aliases = ["UKOIL", "XBRUSD", "BRN"]
+keywords = ["brent", "uk crude", "uk oil"]
+
+[[instrument]]
+canonical = "NATGAS"
+class = "energy"
+aliases = ["NGAS", "XNGUSD", "NG"]
+keywords = ["natural gas"]
+
+# ---- Crypto ----------------------------------------------------------------
+[[instrument]]
+canonical = "BTCUSD"
+class = "crypto"
+aliases = ["BITCOIN", "BTC", "XBTUSD"]
+keywords = ["bitcoin"]
+
+[[instrument]]
+canonical = "ETHUSD"
+class = "crypto"
+aliases = ["ETHEREUM", "ETH"]
+keywords = ["ethereum"]
+
+[[instrument]]
+canonical = "LTCUSD"
+class = "crypto"
+aliases = ["LITECOIN", "LTC"]
+keywords = ["litecoin"]
+
+[[instrument]]
+canonical = "XRPUSD"
+class = "crypto"
+aliases = ["RIPPLE", "XRP"]
+keywords = ["ripple", "xrp"]
+
+# ---- FX majors (drive suffix/prefix detection) and common crosses -----------
+[[instrument]]
+canonical = "EURUSD"
+class = "fx"
+aliases = ["EURO", "FIBER"]
+keywords = ["euro vs us dollar", "eur/usd"]
+
+[[instrument]]
+canonical = "GBPUSD"
+class = "fx"
+aliases = ["CABLE", "POUND"]
+keywords = ["pound sterling vs us dollar", "great british pound vs us dollar", "gbp/usd"]
+
+[[instrument]]
+canonical = "USDJPY"
+class = "fx"
+aliases = ["YEN"]
+keywords = ["us dollar vs yen", "us dollar vs japanese yen", "usd/jpy"]
+
+[[instrument]]
+canonical = "AUDUSD"
+class = "fx"
+aliases = ["AUSSIE"]
+keywords = ["australian dollar vs us dollar", "aud/usd"]
+
+[[instrument]]
+canonical = "USDCAD"
+class = "fx"
+aliases = ["LOONIE"]
+keywords = ["us dollar vs canadian dollar", "usd/cad"]
+
+[[instrument]]
+canonical = "USDCHF"
+class = "fx"
+aliases = ["SWISSY"]
+keywords = ["us dollar vs swiss franc", "usd/chf"]
+
+[[instrument]]
+canonical = "NZDUSD"
+class = "fx"
+aliases = ["KIWI"]
+keywords = ["new zealand dollar vs us dollar", "nzd/usd"]
+
+[[instrument]]
+canonical = "EURGBP"
+class = "fx"
+keywords = ["euro vs pound", "euro vs great british pound", "eur/gbp"]
+
+[[instrument]]
+canonical = "EURJPY"
+class = "fx"
+keywords = ["euro vs yen", "euro vs japanese yen", "eur/jpy"]
+
+[[instrument]]
+canonical = "GBPJPY"
+class = "fx"
+keywords = ["pound sterling vs yen", "great british pound vs japanese yen", "gbp/jpy"]
+
+[[instrument]]
+canonical = "EURCHF"
+class = "fx"
+keywords = ["euro vs swiss franc", "eur/chf"]
+
+[[instrument]]
+canonical = "AUDJPY"
+class = "fx"
+keywords = ["australian dollar vs yen", "australian dollar vs japanese yen", "aud/jpy"]
+
+[[instrument]]
+canonical = "USDCNH"
+class = "fx"
+keywords = ["us dollar vs chinese yuan", "usd/cnh"]

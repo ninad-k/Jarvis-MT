@@ -1,0 +1,216 @@
+{
+ "broker": "MetaQuotes Ltd.",
+ "server": "MetaQuotes-Demo",
+ "symbols": [
+  {
+   "name": "AAPL",
+   "description": "Apple Inc",
+   "path": "Stocks\\US\\AAPL",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AUDUSD",
+   "description": "Australian Dollar vs US Dollar",
+   "path": "Forex\\AUDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BTCUSD",
+   "description": "Bitcoin vs US Dollar",
+   "path": "Crypto\\BTCUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "ETHUSD",
+   "description": "Ethereum vs US Dollar",
+   "path": "Crypto\\ETHUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "ETH",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EURGBP",
+   "description": "Euro vs Pound Sterling",
+   "path": "Forex\\EURGBP",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "GBP"
+  },
+  {
+   "name": "EURUSD",
+   "description": "Euro vs US Dollar",
+   "path": "Forex\\EURUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GBPUSD",
+   "description": "Pound Sterling vs US Dollar",
+   "path": "Forex\\GBPUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GER40",
+   "description": "DAX Index",
+   "path": "Indexes\\GER40",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "MSFT",
+   "description": "Microsoft Corporation",
+   "path": "Stocks\\US\\MSFT",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NAS100",
+   "description": "Nasdaq 100 Index",
+   "path": "Indexes\\NAS100",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NZDUSD",
+   "description": "New Zealand Dollar vs US Dollar",
+   "path": "Forex\\NZDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "NZD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "SPX500",
+   "description": "S&P 500 Index",
+   "path": "Indexes\\SPX500",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "UK100",
+   "description": "FTSE 100 Index",
+   "path": "Indexes\\UK100",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "UKOIL",
+   "description": "UK Brent Oil",
+   "path": "Commodities\\UKOIL",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30",
+   "description": "Dow Jones Industrial Average",
+   "path": "Indexes\\US30",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USDCAD",
+   "description": "US Dollar vs Canadian Dollar",
+   "path": "Forex\\USDCAD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CAD"
+  },
+  {
+   "name": "USDCHF",
+   "description": "US Dollar vs Swiss Franc",
+   "path": "Forex\\USDCHF",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "USDJPY",
+   "description": "US Dollar vs Yen",
+   "path": "Forex\\USDJPY",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 3,
+   "currency_base": "USD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "USOIL",
+   "description": "US Crude Oil",
+   "path": "Commodities\\USOIL",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAGUSD",
+   "description": "Silver vs US Dollar",
+   "path": "Metals\\XAGUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAUUSD",
+   "description": "Gold vs US Dollar",
+   "path": "Metals\\XAUUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  }
+ ]
+}

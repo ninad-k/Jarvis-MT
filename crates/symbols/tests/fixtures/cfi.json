@@ -1,0 +1,506 @@
+{
+ "broker": "CFI Financial Markets L.L.C",
+ "server": "CFI3-Real",
+ "symbols": [
+  {
+   "name": "AAPL.OQ",
+   "description": "Apple Inc",
+   "path": "Equities\\US.Equities\\US.Technology\\AAPL.OQ",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AMD",
+   "description": "Advanced Micro Devices Inc",
+   "path": "Nasdaq\\Stock\\AMD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AUDCAD_",
+   "description": "Australian Dollar vs Canadian Dollar",
+   "path": "FX Crosses Elite\\AUDCAD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "CAD"
+  },
+  {
+   "name": "AUDCHF_",
+   "description": "Australian Dollar vs Swiss Franc",
+   "path": "FX Crosses Elite\\AUDCHF_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "AUDJPY_",
+   "description": "Australian Dollar vs Japanese Yen",
+   "path": "FX Crosses Elite\\AUDJPY_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 3,
+   "currency_base": "AUD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "AUDUSD",
+   "description": "Australian Dollar vs US Dollar",
+   "path": "Forex\\AUDUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AUDUSD_",
+   "description": "Australian Dollar vs US Dollar",
+   "path": "FX Majors Elite\\AUDUSD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AXP.N",
+   "description": "American Express Company",
+   "path": "Equities\\US.Equities\\US.Financial\\AXP.N",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BRENT",
+   "description": "UK Crude Oil - Cash",
+   "path": "CFD1.SPOT\\BRENT",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BTCUSD",
+   "description": "Bitcoin USD",
+   "path": "Crypto Currency\\BTCUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "DOWS1226",
+   "description": "Dow Jones 30 Futures - December 2026",
+   "path": "Dow Future\\DOWS1226",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "ETHUSD",
+   "description": "Ethereum USD",
+   "path": "Crypto Currency\\ETHUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "ETH",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EURUSD",
+   "description": "Euro vs US Dollar",
+   "path": "Forex\\EURUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EURUSD_",
+   "description": "Euro vs US Dollar",
+   "path": "FX EUR/JPY Elite\\EURUSD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GBPUSD",
+   "description": "Pound Sterling vs US Dollar",
+   "path": "Forex\\GBPUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GBPUSD_",
+   "description": "Great British Pound vs US Dollar",
+   "path": "FX Majors Elite\\GBPUSD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GC1226",
+   "description": "Gold Futures - December 2026",
+   "path": "Future\\GC1226",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GER30_SPOT",
+   "description": "Germany 30 - Cash",
+   "path": "CFD1.SPOT\\GER30_SPOT",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "INTC",
+   "description": "Intel Corporation",
+   "path": "Nasdaq\\Stock\\INTC",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "MSFT",
+   "description": "Microsoft Corporation",
+   "path": "Nasdaq\\Stock\\MSFT",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NAS0926",
+   "description": "Nasdaq 100 Futures - September 2026",
+   "path": "Nas Future\\NAS0926",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NAS1226",
+   "description": "Nasdaq 100 Futures - December 2026",
+   "path": "Nas Future\\NAS1226",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NVDA",
+   "description": "NVIDIA Corporation",
+   "path": "Nasdaq\\Stock\\NVDA",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NVDA.OQ",
+   "description": "NVIDIA Corporation",
+   "path": "Equities\\US.Equities\\US.Technology\\NVDA.OQ",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NZDUSD",
+   "description": "New Zealand Dollar vs US Dollar",
+   "path": "Forex\\NZDUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "NZD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NZDUSD_",
+   "description": "New Zeland Dollar vs US Dollar",
+   "path": "FX Majors Elite\\NZDUSD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "NZD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NatGas_SPOT",
+   "description": "Natural Gas - Cash",
+   "path": "CFD1.NGAS\\NatGas_SPOT",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NatGas_U6",
+   "description": "Natural Gas Futures - September 2026 EX:24/08/2026",
+   "path": "CFD1.NGAS\\NatGas_U6",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NatGas_X5",
+   "description": "Natural Gas Futures - November 2025",
+   "path": "CFD1.NGAS\\NatGas_X5",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NatGas_X6",
+   "description": "Natural Gas Futures - November 2026 EX:23/10/2026",
+   "path": "CFD1.NGAS\\NatGas_X6",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "SI0926",
+   "description": "Silver Futures - September 2026 EX:26/08/2026",
+   "path": "Future\\SI0926",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "SI1226",
+   "description": "Silver Futures - December 2026",
+   "path": "Future\\SI1226",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "SP0926",
+   "description": "S&P 500 Futures - September 2026",
+   "path": "S&P Future\\SP0926",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "SP1226",
+   "description": "S&P 500 Futures - December 2026",
+   "path": "S&P Future\\SP1226",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "SP500m",
+   "description": "Standard & Poor's 500",
+   "path": "Indexes\\SP500m",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US100_Spot",
+   "description": "Nasdaq 100 - Cash",
+   "path": "CFD1.SPOT\\US100_Spot",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30_SPOT",
+   "description": "Dow Jones 30 - Cash",
+   "path": "CFD1.SPOT\\US30_SPOT",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US500_SPOT",
+   "description": "S&P 500 - Cash",
+   "path": "CFD1.SPOT\\US500_SPOT",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USDCAD",
+   "description": "US Dollar vs Canadian Dollar",
+   "path": "Forex\\USDCAD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CAD"
+  },
+  {
+   "name": "USDCAD_",
+   "description": "US Dollar vs Canadian Dollar",
+   "path": "FX Majors Elite\\USDCAD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CAD"
+  },
+  {
+   "name": "USDCHF",
+   "description": "US Dollar vs Swiss Franc",
+   "path": "Forex\\USDCHF",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "USDCHF_",
+   "description": "US Dollar vs Swiss Franc",
+   "path": "FX Majors Elite\\USDCHF_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "USDCNH",
+   "description": "US Dollar vs Chinese Yuan",
+   "path": "Forex\\USDCNH",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CNH"
+  },
+  {
+   "name": "USDJPY",
+   "description": "US Dollar vs Yen",
+   "path": "Forex\\USDJPY",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 3,
+   "currency_base": "USD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "USDJPY_",
+   "description": "US Dollar vs Japanese Yen",
+   "path": "FX Majors Elite\\USDJPY_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 3,
+   "currency_base": "USD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "USDSEK",
+   "description": "US Dollar vs Swedish Krona",
+   "path": "Forex\\USDSEK",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "SEK"
+  },
+  {
+   "name": "VRTX.OQ",
+   "description": "Vertex Pharmaceuticals Incorporated",
+   "path": "Equities\\US.Equities\\US.Healthcare\\VRTX.OQ",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "WTI",
+   "description": "US Crude Oil - Cash",
+   "path": "CFD1.SPOT\\WTI",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAGUSD_",
+   "description": "Silver",
+   "path": "FX Silver Elite\\XAGUSD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAUUSD_",
+   "description": "Gold",
+   "path": "FX Gold Elite\\XAUUSD_",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  }
+ ]
+}

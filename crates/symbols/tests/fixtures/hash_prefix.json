@@ -1,0 +1,116 @@
+{
+ "broker": "Hash Prefix Markets Ltd",
+ "server": "HashPrefix-Live",
+ "symbols": [
+  {
+   "name": "#AAPL",
+   "description": "Apple Inc",
+   "path": "Shares\\#AAPL",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#AUDUSD",
+   "description": "Australian Dollar vs US Dollar",
+   "path": "Forex\\#AUDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#BTCUSD",
+   "description": "Bitcoin vs US Dollar",
+   "path": "Crypto\\#BTCUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#EURUSD",
+   "description": "Euro vs US Dollar",
+   "path": "Forex\\#EURUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#GBPUSD",
+   "description": "Pound Sterling vs US Dollar",
+   "path": "Forex\\#GBPUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#US30",
+   "description": "Wall Street 30",
+   "path": "Indices\\#US30",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#USDCAD",
+   "description": "US Dollar vs Canadian Dollar",
+   "path": "Forex\\#USDCAD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CAD"
+  },
+  {
+   "name": "#USDJPY",
+   "description": "US Dollar vs Yen",
+   "path": "Forex\\#USDJPY",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 3,
+   "currency_base": "USD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "#USTEC",
+   "description": "US Tech 100",
+   "path": "Indices\\#USTEC",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#XAGUSD",
+   "description": "Silver vs US Dollar",
+   "path": "Metals\\#XAGUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "#XAUUSD",
+   "description": "Gold vs US Dollar",
+   "path": "Metals\\#XAUUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  }
+ ]
+}

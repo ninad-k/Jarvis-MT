@@ -1,0 +1,356 @@
+{
+ "broker": "Raw Trading Ltd",
+ "server": "ICMarketsSC-Demo",
+ "symbols": [
+  {
+   "name": "AAPL",
+   "description": "Apple Inc",
+   "path": "Shares\\US\\AAPL",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AUDUSD",
+   "description": "Australian Dollar vs US Dollar",
+   "path": "Forex\\Majors\\AUDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "AUS200",
+   "description": "Australia 200 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\AUS200",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BTCUSD",
+   "description": "Bitcoin (USD)",
+   "path": "Crypto\\BTCUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "CHINAH",
+   "description": "Hong Kong China H-shares Index",
+   "path": "Indices\\Indices Spot\\Minor Spot Indices\\CHINAH",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "DE40",
+   "description": "Germany 40 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\DE40",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "ETHUSD",
+   "description": "Ethereum (USD)",
+   "path": "Crypto\\ETHUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "ETH",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EU50",
+   "description": "Europe 50 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\EU50",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EURGBP",
+   "description": "Euro vs Great Britain Pound",
+   "path": "Forex\\Minors\\EURGBP",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "GBP"
+  },
+  {
+   "name": "EURJPY",
+   "description": "Euro vs Japanese Yen",
+   "path": "Forex\\Minors\\EURJPY",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 3,
+   "currency_base": "EUR",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "EURUSD",
+   "description": "Euro vs US Dollar",
+   "path": "Forex\\Majors\\EURUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "F40",
+   "description": "France 40 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\F40",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GBPJPY",
+   "description": "Great Britain Pound vs Japanese Yen",
+   "path": "Forex\\Minors\\GBPJPY",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 3,
+   "currency_base": "GBP",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "GBPUSD",
+   "description": "Great Britain Pound vs US Dollar",
+   "path": "Forex\\Majors\\GBPUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "HK50",
+   "description": "Hong Kong 50 Index",
+   "path": "Indices\\Indices Spot\\Minor Spot Indices\\HK50",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "JP225",
+   "description": "Japan 225 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\JP225",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "LTCUSD",
+   "description": "Litecoin (USD)",
+   "path": "Crypto\\LTCUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "LTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NZDUSD",
+   "description": "New Zealand Dollar vs US Dollar",
+   "path": "Forex\\Majors\\NZDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "NZD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "TSLA",
+   "description": "Tesla Inc",
+   "path": "Shares\\US\\TSLA",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "UK100",
+   "description": "UK 100 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\UK100",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US2000",
+   "description": "US Russell 2000 Index",
+   "path": "Indices\\Indices Spot\\Minor Spot Indices\\US2000",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30",
+   "description": "Wall Street 30 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\US30",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US500",
+   "description": "US SPX 500 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\US500",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USDCAD",
+   "description": "US Dollar vs Canadian Dollar",
+   "path": "Forex\\Majors\\USDCAD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CAD"
+  },
+  {
+   "name": "USDCHF",
+   "description": "US Dollar vs Swiss Franc",
+   "path": "Forex\\Majors\\USDCHF",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "USD",
+   "currency_profit": "CHF"
+  },
+  {
+   "name": "USDJPY",
+   "description": "US Dollar vs Japanese Yen",
+   "path": "Forex\\Majors\\USDJPY",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 3,
+   "currency_base": "USD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "USTEC",
+   "description": "US Tech 100 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\USTEC",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAGUSD",
+   "description": "Silver vs US Dollar",
+   "path": "Commodities\\Metals\\XAGUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAUUSD",
+   "description": "Gold vs US Dollar",
+   "path": "Commodities\\Metals\\XAUUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XBRUSD",
+   "description": "Brent Crude Oil",
+   "path": "Commodities\\Energies\\XBRUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XNGUSD",
+   "description": "Natural Gas",
+   "path": "Commodities\\Energies\\XNGUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XPDUSD",
+   "description": "Palladium vs US Dollar",
+   "path": "Commodities\\Metals\\XPDUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "XPD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XPTUSD",
+   "description": "Platinum vs US Dollar",
+   "path": "Commodities\\Metals\\XPTUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "XPT",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XRPUSD",
+   "description": "Ripple (USD)",
+   "path": "Crypto\\XRPUSD",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "XRP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XTIUSD",
+   "description": "Crude Oil WTI",
+   "path": "Commodities\\Energies\\XTIUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  }
+ ]
+}

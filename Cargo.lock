@@ -1550,6 +1550,7 @@ dependencies = [
  "jarvis-gate",
  "jarvis-llm",
  "jarvis-persona",
+ "jarvis-symbols",
  "jarvis-voice",
  "jsonwebtoken",
  "qrcode",
@@ -1626,6 +1627,20 @@ name = "jarvis-persona"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "jarvis-symbols"
+version = "0.1.0"
+dependencies = [
+ "jarvis-bridge-client",
+ "regex",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "toml",

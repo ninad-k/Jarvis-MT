@@ -1,0 +1,126 @@
+{
+ "broker": "Raw Trading Ltd",
+ "server": "ICMarketsSC-MT5-4",
+ "symbols": [
+  {
+   "name": "AUDUSD",
+   "description": "Australian Dollar vs US Dollar",
+   "path": "Forex\\Majors\\AUDUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "AUD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "BTCUSD",
+   "description": "Bitcoin (USD)",
+   "path": "Crypto\\BTCUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "CHINAH",
+   "description": "Hong Kong China H-shares Index",
+   "path": "Indices\\Indices Spot\\Minor Spot Indices\\CHINAH",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "ETHUSD",
+   "description": "Ethereum (USD)",
+   "path": "Crypto\\ETHUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "ETH",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EURUSD",
+   "description": "Euro vs US Dollar",
+   "path": "Forex\\Majors\\EURUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GBPUSD",
+   "description": "Great Britain Pound vs US Dollar",
+   "path": "Forex\\Majors\\GBPUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "GBP",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "HK50",
+   "description": "Hong Kong 50 Index",
+   "path": "Indices\\Indices Spot\\Minor Spot Indices\\HK50",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30",
+   "description": "US Wall Street 30 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\US30",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US500",
+   "description": "US SPX 500 Index",
+   "path": "Indices\\Indices Spot\\Major Spot Indices\\US500",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USDJPY",
+   "description": "US Dollar vs Japanese Yen",
+   "path": "Forex\\Majors\\USDJPY",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 3,
+   "currency_base": "USD",
+   "currency_profit": "JPY"
+  },
+  {
+   "name": "XAGUSD",
+   "description": "Silver vs US Dollar",
+   "path": "Commodities\\Metals\\XAGUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAUUSD",
+   "description": "Gold vs US Dollar",
+   "path": "Commodities\\Metals\\XAUUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  }
+ ]
+}

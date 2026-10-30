@@ -1,0 +1,226 @@
+{
+ "broker": "Adversarial Test Broker",
+ "server": "Adversarial-Demo",
+ "symbols": [
+  {
+   "name": "BTCEUR",
+   "description": "Bitcoin vs Euro",
+   "path": "Crypto\\BTCEUR",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "BTC",
+   "currency_profit": "EUR"
+  },
+  {
+   "name": "EURUSD",
+   "description": "Euro vs US Dollar",
+   "path": "Forex\\EURUSD",
+   "trade_mode": "disabled",
+   "visible": false,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "EURUSD.a",
+   "description": "Euro vs US Dollar",
+   "path": "Forex\\EURUSD.a",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 5,
+   "currency_base": "EUR",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GC0826",
+   "description": "Gold Futures - August 2026",
+   "path": "Future\\GC0826",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "GOLD.N",
+   "description": "Barrick Gold Corporation",
+   "path": "Equities\\US.Equities\\US.Materials\\GOLD.N",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NAS1226",
+   "description": "Nasdaq 100 Futures - December 2026",
+   "path": "Nas Future\\NAS1226",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NDXX",
+   "description": "NDXX Holdings Inc",
+   "path": "Stocks\\US\\NDXX",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NatGas_U6",
+   "description": "Natural Gas Futures - September 2026 EX:24/08/2026",
+   "path": "CFD1.NGAS\\NatGas_U6",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "NatGas_X6",
+   "description": "Natural Gas Futures - November 2026 EX:23/10/2026",
+   "path": "CFD1.NGAS\\NatGas_X6",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "UKOIL",
+   "description": "UK Brent Crude Oil",
+   "path": "Energies\\UKOIL",
+   "trade_mode": "close_only",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US30.cash",
+   "description": "Wall Street 30 Cash Index",
+   "path": "Indices\\US30.cash",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "US300",
+   "description": "US 300 Mid Cap Index",
+   "path": "Indices\\US300",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USOIL",
+   "description": "US Crude Oil",
+   "path": "Energies\\USOIL",
+   "trade_mode": "disabled",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USOIL.a",
+   "description": "US Crude Oil Cash",
+   "path": "Energies\\USOIL.a",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "USTEC",
+   "description": "US Tech 100 Index",
+   "path": "Indices\\USTEC",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "USD",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAGUSD",
+   "description": "Silver vs US Dollar",
+   "path": "Metals\\XAGUSD",
+   "trade_mode": "close_only",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAGUSD.x",
+   "description": "Silver vs US Dollar",
+   "path": "Metals\\XAGUSD.x",
+   "trade_mode": "full",
+   "visible": false,
+   "digits": 2,
+   "currency_base": "XAG",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAUEUR",
+   "description": "Gold vs Euro",
+   "path": "Metals\\XAUEUR",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "EUR"
+  },
+  {
+   "name": "XAUUSD",
+   "description": "Gold vs US Dollar",
+   "path": "Metals\\XAUUSD",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XAUUSDINDEX2",
+   "description": "XAUUSD Index Basket 2",
+   "path": "Indices\\XAUUSDINDEX2",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XAU",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XPTUSD.m",
+   "description": "Platinum Micro vs US Dollar",
+   "path": "Metals\\XPTUSD.m",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XPT",
+   "currency_profit": "USD"
+  },
+  {
+   "name": "XPTUSD.s",
+   "description": "Platinum vs US Dollar",
+   "path": "Metals\\XPTUSD.s",
+   "trade_mode": "full",
+   "visible": true,
+   "digits": 2,
+   "currency_base": "XPT",
+   "currency_profit": "USD"
+  }
+ ]
+}
