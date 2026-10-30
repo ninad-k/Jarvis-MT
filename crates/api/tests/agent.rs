@@ -309,10 +309,14 @@ async fn price_of_gold_scenario_end_to_end_through_the_agent() {
     );
     assert!(calls.iter().all(|c| c["ok"] == true));
     assert_eq!(llm.request_count(), 3);
-    // Every request offered only read tools.
+    // Every request offered only read tools and propose tools.
     for r in llm.requests.lock().unwrap().iter() {
         for t in &r.tools {
-            assert!(t.name.starts_with("get_"), "{}", t.name);
+            assert!(
+                t.name.starts_with("get_") || t.name.starts_with("propose_"),
+                "{}",
+                t.name
+            );
         }
     }
 }

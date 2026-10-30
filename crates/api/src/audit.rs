@@ -7,6 +7,7 @@ use std::str::FromStr;
 
 use anyhow::Context;
 use chrono::{SecondsFormat, Utc};
+use jarvis_gate::KillSwitchState;
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -21,6 +22,22 @@ pub enum AuditKind {
     BridgeReply,
     AssistantReply,
     Error,
+    /// What the deterministic parser understood from the utterance.
+    Intent,
+    /// A preview was issued (token issued, never stored in full).
+    Preview,
+    /// The gate, the intent cross-check or the kill switch refused a proposal.
+    GateRejected,
+    Confirm,
+    ConfirmSecond,
+    Cancel,
+    /// Outcome of one bridge write.
+    TradeResult,
+    KillSwitch,
+    Login,
+    LoginFailed,
+    VoiceStt,
+    VoiceTts,
 }
 
 impl AuditKind {
@@ -32,6 +49,18 @@ impl AuditKind {
             AuditKind::BridgeReply => "bridge_reply",
             AuditKind::AssistantReply => "assistant_reply",
             AuditKind::Error => "error",
+            AuditKind::Intent => "intent",
+            AuditKind::Preview => "preview",
+            AuditKind::GateRejected => "gate_rejected",
+            AuditKind::Confirm => "confirm",
+            AuditKind::ConfirmSecond => "confirm_second",
+            AuditKind::Cancel => "cancel",
+            AuditKind::TradeResult => "trade_result",
+            AuditKind::KillSwitch => "kill_switch",
+            AuditKind::Login => "login",
+            AuditKind::LoginFailed => "login_failed",
+            AuditKind::VoiceStt => "voice_stt",
+            AuditKind::VoiceTts => "voice_tts",
         }
     }
 }
@@ -60,11 +89,11 @@ impl Audit {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal);
         let path = options.get_filename();
-        if path != std::path::Path::new(":memory:") {
-            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir)
-                    .with_context(|| format!("creating database directory {}", dir.display()))?;
-            }
+        if path != std::path::Path::new(":memory:")
+            && let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating database directory {}", dir.display()))?;
         }
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
@@ -118,24 +147,78 @@ impl Audit {
                     .await?
             }
         };
-        rows.into_iter()
-            .map(|r| {
-                let payload: String = r.try_get("payload")?;
-                Ok(AuditRow {
-                    id: r.try_get("id")?,
-                    ts: r.try_get("ts")?,
-                    session_id: r.try_get("session_id")?,
-                    kind: r.try_get("kind")?,
-                    payload: serde_json::from_str(&payload)?,
-                })
+        rows.into_iter().map(row_from).collect()
+    }
+
+    /// Newest first, at most `limit` rows with `id < before_id` (all rows when `None`).
+    /// Backs `GET /api/audit`.
+    pub async fn recent(
+        &self,
+        limit: u32,
+        before_id: Option<i64>,
+    ) -> anyhow::Result<Vec<AuditRow>> {
+        let rows = sqlx::query(
+            "SELECT id, ts, session_id, kind, payload FROM audit              WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
+        )
+        .bind(before_id)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_from).collect()
+    }
+
+    /// Remember the kill switch so it survives a restart. One row, replaced on every change.
+    pub async fn save_kill_switch(&self, state: &KillSwitchState) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO kill_switch (id, engaged, reason, changed_at_ms) VALUES (1, ?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET engaged = excluded.engaged, reason = excluded.reason, changed_at_ms = excluded.changed_at_ms",
+        )
+        .bind(state.engaged)
+        .bind(state.reason.as_deref())
+        .bind(state.changed_at_ms)
+        .execute(&self.pool)
+        .await
+        .context("saving the kill switch state")?;
+        Ok(())
+    }
+
+    /// The last saved kill switch state; `None` if it was never changed.
+    pub async fn load_kill_switch(&self) -> anyhow::Result<Option<KillSwitchState>> {
+        let row =
+            sqlx::query("SELECT engaged, reason, changed_at_ms FROM kill_switch WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await
+                .context("reading the kill switch state")?;
+        row.map(|r| {
+            Ok(KillSwitchState {
+                engaged: r.try_get::<bool, _>("engaged")?,
+                reason: r.try_get("reason")?,
+                changed_at_ms: r.try_get("changed_at_ms")?,
             })
-            .collect()
+        })
+        .transpose()
+    }
+
+    /// The shared SQLite pool (the auth tables live in the same database).
+    #[doc(hidden)]
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Close the pool (tests that then reopen the file).
     pub async fn close(&self) {
         self.pool.close().await;
     }
+}
+
+fn row_from(r: sqlx::sqlite::SqliteRow) -> anyhow::Result<AuditRow> {
+    let payload: String = r.try_get("payload")?;
+    Ok(AuditRow {
+        id: r.try_get("id")?,
+        ts: r.try_get("ts")?,
+        session_id: r.try_get("session_id")?,
+        kind: r.try_get("kind")?,
+        payload: serde_json::from_str(&payload)?,
+    })
 }
 
 #[cfg(test)]
@@ -176,6 +259,34 @@ mod tests {
         assert_eq!(rows[0].payload["text"], "hi");
         assert_eq!(rows[1].session_id, None);
         assert_eq!(audit.rows(Some(sid)).await.unwrap().len(), 1);
+        audit.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn recent_pages_newest_first() {
+        let (dir, url) = temp_db_url("recent");
+        let audit = Audit::connect(&url).await.unwrap();
+        for i in 0..5 {
+            audit
+                .record(None, AuditKind::Utterance, json!({ "n": i }))
+                .await;
+        }
+        let first = audit.recent(2, None).await.unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|r| r.payload["n"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [4, 3]
+        );
+        let next = audit.recent(10, Some(first[1].id)).await.unwrap();
+        assert_eq!(
+            next.iter()
+                .map(|r| r.payload["n"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [2, 1, 0]
+        );
         audit.close().await;
         let _ = std::fs::remove_dir_all(dir);
     }

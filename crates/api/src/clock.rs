@@ -9,6 +9,51 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use chrono::{DateTime, Utc};
 
+/// Wall-clock source (Unix milliseconds) for token windows, rate limits and event
+/// timestamps. Injected so tests can move time without sleeping.
+pub trait TimeSource: Send + Sync {
+    fn now_ms(&self) -> i64;
+}
+
+/// The real clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WallClock;
+
+impl TimeSource for WallClock {
+    fn now_ms(&self) -> i64 {
+        Utc::now().timestamp_millis()
+    }
+}
+
+/// A clock that only moves when told to. Cheap to clone; clones share the same time.
+#[derive(Debug, Clone)]
+pub struct ManualClock(Arc<AtomicI64>);
+
+impl ManualClock {
+    pub fn new(start_ms: i64) -> Self {
+        Self(Arc::new(AtomicI64::new(start_ms)))
+    }
+
+    /// A manual clock starting at the real current time.
+    pub fn starting_now() -> Self {
+        Self::new(Utc::now().timestamp_millis())
+    }
+
+    pub fn advance_ms(&self, ms: i64) {
+        self.0.fetch_add(ms, Ordering::SeqCst);
+    }
+
+    pub fn set_ms(&self, ms: i64) {
+        self.0.store(ms, Ordering::SeqCst);
+    }
+}
+
+impl TimeSource for ManualClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// Offsets are rounded to quarter hours (the finest real-world timezone granularity).
 const OFFSET_STEP_SECS: i64 = 15 * 60;
 

@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
+use jarvis_gate::Limits;
 use jarvis_llm::ProviderConfig;
 use serde::Deserialize;
 
@@ -47,18 +48,178 @@ pub struct Config {
     #[serde(default)]
     pub symbols: SymbolsConfig,
     pub llm: LlmConfig,
+    /// `[limits]`. When the section is absent the limits fail closed (see
+    /// [`Config::effective_limits`]).
+    #[serde(default)]
+    pub limits: Option<Limits>,
+    #[serde(default)]
+    pub trading: TradingConfig,
+    /// `[auth]`. Login is on unless the section says otherwise.
+    #[serde(default)]
+    pub auth: AuthConfig,
+    /// `[voice]`. Absent means voice is off.
+    #[serde(default)]
+    pub voice: Option<VoiceSection>,
+}
+
+/// `[auth]`: password + TOTP login with a JWT session cookie (ADR-0011).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AuthConfig {
+    /// Require a session on every `/api/*` route except login and health. The secret comes
+    /// from the environment variable `JARVIS_JWT_SECRET` (at least 32 bytes).
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Session lifetime in hours (1 to 168).
+    #[serde(default = "default_session_hours")]
+    pub session_hours: u64,
+    /// Force the `Secure` cookie attribute on or off. Unset: `Secure` whenever the server
+    /// itself serves TLS. Set it to `true` behind a TLS-terminating reverse proxy that
+    /// forwards to a plain-HTTP loopback port.
+    #[serde(default)]
+    pub cookie_secure: Option<bool>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            session_hours: default_session_hours(),
+            cookie_secure: None,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+fn default_session_hours() -> u64 {
+    12
+}
+
+/// `[voice]`. Every path is optional in the file so that `enabled = false` alone is valid;
+/// [`VoiceSection::to_voice_config`] checks them when voice is on.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct VoiceSection {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub whisper_model: Option<PathBuf>,
+    #[serde(default = "default_voice_language")]
+    pub language: String,
+    #[serde(default = "default_voice_threads")]
+    pub threads: u32,
+    #[serde(default)]
+    pub piper_exe: Option<PathBuf>,
+    #[serde(default)]
+    pub piper_voice: Option<PathBuf>,
+    #[serde(default = "default_voice_max_seconds")]
+    pub max_seconds: f32,
+}
+
+fn default_voice_language() -> String {
+    "en".to_owned()
+}
+fn default_voice_threads() -> u32 {
+    4
+}
+fn default_voice_max_seconds() -> f32 {
+    30.0
+}
+
+impl VoiceSection {
+    /// The voice crate's config, or `None` when voice is disabled.
+    pub fn to_voice_config(&self) -> anyhow::Result<Option<jarvis_voice::VoiceConfig>> {
+        if !self.enabled {
+            return Ok(None);
+        }
+        let need = |v: &Option<PathBuf>, key: &str| {
+            v.clone().ok_or_else(|| {
+                anyhow!("[voice] enabled = true needs '{key}' (see config/jarvis.example.toml)")
+            })
+        };
+        if !(self.max_seconds.is_finite() && self.max_seconds > 0.0 && self.max_seconds <= 120.0) {
+            bail!("voice.max_seconds must be between 0 and 120");
+        }
+        Ok(Some(jarvis_voice::VoiceConfig {
+            enabled: true,
+            whisper_model: need(&self.whisper_model, "whisper_model")?,
+            language: self.language.clone(),
+            threads: self.threads,
+            piper_exe: need(&self.piper_exe, "piper_exe")?,
+            piper_voice: need(&self.piper_voice, "piper_voice")?,
+            max_seconds: self.max_seconds,
+        }))
+    }
+}
+
+/// `[trading]`: confirmation window and execution settings.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TradingConfig {
+    /// How long a confirmation token is valid.
+    #[serde(default = "default_token_ttl_secs")]
+    pub token_ttl_secs: u64,
+    /// Voice flow: the window starts after the read-back, never later than this after issue.
+    #[serde(default = "default_voice_cap_secs")]
+    pub voice_token_cap_secs: u64,
+    /// Max slippage for market orders and closes, in points.
+    #[serde(default = "default_deviation_points")]
+    pub deviation_points: u32,
+    /// Start with trading disabled.
+    #[serde(default)]
+    pub kill_switch_engaged: bool,
+}
+
+impl Default for TradingConfig {
+    fn default() -> Self {
+        Self {
+            token_ttl_secs: default_token_ttl_secs(),
+            voice_token_cap_secs: default_voice_cap_secs(),
+            deviation_points: default_deviation_points(),
+            kill_switch_engaged: false,
+        }
+    }
+}
+
+fn default_token_ttl_secs() -> u64 {
+    15
+}
+fn default_voice_cap_secs() -> u64 {
+    30
+}
+fn default_deviation_points() -> u32 {
+    20
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// Built web UI served at `/` (with `index.html` fallback for client-side routes).
+    #[serde(default)]
+    pub static_dir: Option<PathBuf>,
+    /// PEM certificate chain. Set together with `tls_key` to serve HTTPS/WSS.
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key.
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
+    /// Extra browser origins allowed to call the API with the session cookie (CORS and the
+    /// WebSocket `Origin` check), for example `["http://localhost:5173"]` for a Vite dev
+    /// server that talks to the API directly. Empty by default: the SPA is served from the
+    /// API's own origin, and the Vite proxy (`pnpm dev`) is same-origin too. Anything listed
+    /// here can drive the whole API, so list only origins you control.
+    #[serde(default)]
+    pub dev_origins: Vec<String>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: default_bind(),
+            static_dir: None,
+            tls_cert: None,
+            tls_key: None,
+            dev_origins: Vec::new(),
         }
     }
 }
@@ -140,9 +301,17 @@ impl Config {
 
     /// Load `.env` (if present), then the config file.
     pub fn load() -> anyhow::Result<Self> {
+        Self::load_with(None)
+    }
+
+    /// Like [`Config::load`] with an explicit config path (the `--config` flag).
+    pub fn load_with(path: Option<&std::path::Path>) -> anyhow::Result<Self> {
         // A missing .env is normal; a broken one shows up later as missing API keys.
         let _ = dotenvy::dotenv();
-        Self::load_from(&Self::path())
+        match path {
+            Some(p) => Self::load_from(p),
+            None => Self::load_from(&Self::path()),
+        }
     }
 
     pub fn load_from(path: &std::path::Path) -> anyhow::Result<Self> {
@@ -174,6 +343,29 @@ impl Config {
             .collect();
         self.symbols.suffix = self.symbols.suffix.trim().to_owned();
         self.symbols.watchlist.retain(|s| !s.trim().is_empty());
+        // Broker symbols in `allowed_symbols` get the same suffix as every resolved symbol,
+        // so `XAUUSD` in the config matches the `XAUUSD.m` the resolver produces.
+        let resolver =
+            crate::symbols::SymbolResolver::new(&self.symbols.aliases, &self.symbols.suffix);
+        if let Some(limits) = &mut self.limits {
+            limits.allowed_symbols = limits
+                .allowed_symbols
+                .iter()
+                .filter_map(|s| resolver.resolve(s))
+                .collect();
+        }
+    }
+
+    /// The limits the gate enforces. Without a `[limits]` section nothing may be traded:
+    /// `allowed_symbols` is empty and the gate fails closed on that.
+    pub fn effective_limits(&self) -> Limits {
+        self.limits.clone().unwrap_or_else(|| Limits {
+            max_lot: 1.0,
+            max_positions: 5,
+            max_daily_loss: 500.0,
+            allowed_symbols: Vec::new(),
+            trading_hours: None,
+        })
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -183,6 +375,12 @@ impl Config {
             bail!("bridge.timeout_ms must be greater than 0");
         }
         self.bind_addr()?;
+        for origin in &self.server.dev_origins {
+            validate_origin(origin)?;
+        }
+        if !(1..=168).contains(&self.auth.session_hours) {
+            bail!("auth.session_hours must be between 1 and 168");
+        }
         if self.llm.providers.is_empty() {
             bail!("at least one [[llm.providers]] entry is required");
         }
@@ -212,10 +410,46 @@ impl Config {
                     .join(", ")
             );
         }
+        self.validate_trading()?;
         Ok(())
     }
 
-    /// Parsed `server.bind`. Sprint 1 has no auth, so only loopback is allowed.
+    fn validate_trading(&self) -> anyhow::Result<()> {
+        let t = &self.trading;
+        if t.token_ttl_secs == 0 || t.token_ttl_secs > 120 {
+            bail!("trading.token_ttl_secs must be between 1 and 120");
+        }
+        if t.voice_token_cap_secs < t.token_ttl_secs {
+            bail!("trading.voice_token_cap_secs must be at least trading.token_ttl_secs");
+        }
+        if t.deviation_points > 1000 {
+            bail!("trading.deviation_points must be at most 1000");
+        }
+        if let Some(limits) = &self.limits {
+            limits
+                .validate()
+                .map_err(|e| anyhow!("invalid [limits]: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// True when the server terminates TLS itself (`tls_cert` and `tls_key` are set).
+    pub fn tls_enabled(&self) -> bool {
+        self.server.tls_cert.is_some() && self.server.tls_key.is_some()
+    }
+
+    /// Whether the session cookie gets the `Secure` attribute: the explicit
+    /// `auth.cookie_secure`, otherwise whenever the server serves TLS. Plain HTTP on
+    /// loopback (development) is the only case without it.
+    pub fn cookie_secure(&self) -> bool {
+        self.auth
+            .cookie_secure
+            .unwrap_or_else(|| self.tls_enabled())
+    }
+
+    /// Parsed `server.bind`. Anything other than loopback is refused unless the server
+    /// serves TLS **and** login is enabled (ADR-0011): without both, whoever can reach the
+    /// port could confirm trades.
     pub fn bind_addr(&self) -> anyhow::Result<SocketAddr> {
         let addr: SocketAddr = self.server.bind.parse().map_err(|e| {
             anyhow!(
@@ -223,14 +457,38 @@ impl Config {
                 self.server.bind
             )
         })?;
-        if !addr.ip().is_loopback() {
+        if self.server.tls_cert.is_some() != self.server.tls_key.is_some() {
+            bail!("server.tls_cert and server.tls_key must be set together");
+        }
+        let protected = self.tls_enabled() && self.auth.enabled;
+        if !addr.ip().is_loopback() && !protected {
             bail!(
-                "refusing to bind {addr}: the API has no authentication yet (arrives in Sprint 4), \
-                 so server.bind must be a loopback address such as 127.0.0.1:8787"
+                "refusing to bind {addr}: a non-loopback address needs HTTPS and login. Set \
+                 server.tls_cert and server.tls_key, and keep [auth] enabled = true, or use a \
+                 loopback address such as 127.0.0.1:8787"
             );
         }
         Ok(addr)
     }
+}
+
+/// `server.dev_origins` entries are exactly `scheme://host[:port]` (what a browser sends as
+/// `Origin`): no path, no wildcard, no credentials.
+fn validate_origin(origin: &str) -> anyhow::Result<()> {
+    let bad = || {
+        anyhow!(
+            "server.dev_origins entry '{origin}' must look like http://localhost:5173 (scheme, host and optional port only)"
+        )
+    };
+    let rest = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .ok_or_else(bad)?;
+    let ok = !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    if ok { Ok(()) } else { Err(bad()) }
 }
 
 /// `tcp://127.0.0.1:5555` style endpoint on a loopback host.
@@ -356,17 +614,75 @@ mod tests {
         );
     }
 
+    fn bind_config(server: &str, auth: &str) -> anyhow::Result<Config> {
+        Config::from_toml_str(&format!(
+            "[server]\n{server}\n[auth]\n{auth}\n[llm]\ndefault = \"l\"\n\
+             [[llm.providers]]\nname = \"l\"\nkind = \"ollama\"\nmodel = \"m\""
+        ))
+    }
+
     #[test]
-    fn bind_must_be_loopback() {
-        let with = |bind: &str| {
-            Config::from_toml_str(&format!(
-                "[server]\nbind = \"{bind}\"\n[llm]\ndefault = \"l\"\n\
-                 [[llm.providers]]\nname = \"l\"\nkind = \"ollama\"\nmodel = \"m\""
-            ))
-        };
-        let err = with("0.0.0.0:8787").unwrap_err();
-        assert!(err.to_string().contains("loopback"), "{err}");
-        assert!(with("127.0.0.1:0").is_ok());
+    fn non_loopback_bind_needs_tls_and_auth() {
+        let tls = "tls_cert = \"c.pem\"\ntls_key = \"k.pem\"";
+        // Loopback is always fine, with or without auth or TLS.
+        assert!(bind_config("bind = \"127.0.0.1:0\"", "enabled = false").is_ok());
+        assert!(bind_config("bind = \"[::1]:8787\"", "enabled = true").is_ok());
+        // Off loopback: neither, TLS only, auth only are all refused.
+        for (server, auth) in [
+            ("bind = \"0.0.0.0:8787\"".to_owned(), "enabled = true"),
+            (format!("bind = \"0.0.0.0:8787\"\n{tls}"), "enabled = false"),
+            ("bind = \"192.168.1.5:8787\"".to_owned(), "enabled = true"),
+        ] {
+            let err = bind_config(&server, auth).unwrap_err();
+            assert!(err.to_string().contains("HTTPS and login"), "{err}");
+        }
+        // TLS and auth: allowed.
+        assert!(bind_config(&format!("bind = \"0.0.0.0:8787\"\n{tls}"), "enabled = true").is_ok());
+    }
+
+    #[test]
+    fn tls_files_must_come_as_a_pair() {
+        let err = bind_config("tls_cert = \"c.pem\"", "enabled = true").unwrap_err();
+        assert!(err.to_string().contains("together"), "{err}");
+    }
+
+    #[test]
+    fn auth_defaults_and_cookie_secure_rules() {
+        let c = Config::from_toml_str(&minimal("")).unwrap();
+        assert!(c.auth.enabled);
+        assert_eq!(c.auth.session_hours, 12);
+        assert!(!c.cookie_secure(), "plain HTTP on loopback: no Secure");
+        let tls = "[server]\ntls_cert = \"c\"\ntls_key = \"k\"";
+        assert!(
+            Config::from_toml_str(&minimal(tls))
+                .unwrap()
+                .cookie_secure()
+        );
+        let proxy = "[auth]\ncookie_secure = true";
+        assert!(
+            Config::from_toml_str(&minimal(proxy))
+                .unwrap()
+                .cookie_secure()
+        );
+        assert!(Config::from_toml_str(&minimal("[auth]\nsession_hours = 0")).is_err());
+    }
+
+    #[test]
+    fn voice_section_needs_paths_only_when_enabled() {
+        let off = Config::from_toml_str(&minimal("[voice]\nenabled = false")).unwrap();
+        assert!(off.voice.unwrap().to_voice_config().unwrap().is_none());
+        // Enabled without paths is not a config error (the server starts with voice off and
+        // says why); asking for the engine config is.
+        let c = Config::from_toml_str(&minimal("[voice]\nenabled = true")).unwrap();
+        let err = c.voice.unwrap().to_voice_config().unwrap_err();
+        assert!(format!("{err:#}").contains("whisper_model"), "{err:#}");
+        let c = Config::from_toml_str(&minimal(
+            "[voice]\nwhisper_model = \"w.bin\"\npiper_exe = \"p.exe\"\npiper_voice = \"v.onnx\"",
+        ))
+        .unwrap();
+        let v = c.voice.unwrap().to_voice_config().unwrap().unwrap();
+        assert_eq!(v.language, "en");
+        assert!((v.max_seconds - 30.0).abs() < f32::EPSILON);
     }
 
     #[test]

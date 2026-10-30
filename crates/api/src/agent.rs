@@ -10,9 +10,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use jarvis_gate::intent::Intent;
+
 use crate::audit::{Audit, AuditKind};
 use crate::clock::ServerClock;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolContext, ToolRegistry};
+use crate::trading::PreviewDto;
 
 /// Messages kept per session (oldest are dropped first).
 pub const MAX_HISTORY_MESSAGES: usize = 40;
@@ -39,6 +42,8 @@ pub struct ChatOutcome {
     pub session_id: Uuid,
     pub reply: String,
     pub tool_calls: Vec<ToolCallSummary>,
+    /// The last preview created during this turn, if any.
+    pub preview: Option<PreviewDto>,
 }
 
 struct Session {
@@ -56,12 +61,8 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(
-        tools: ToolRegistry,
-        audit: Audit,
-        aliases: Vec<(String, String)>,
-        clock: ServerClock,
-    ) -> Self {
+    pub fn new(tools: ToolRegistry, audit: Audit, clock: ServerClock) -> Self {
+        let aliases = tools.resolver().alias_list();
         Self {
             tools,
             audit,
@@ -78,12 +79,14 @@ impl Agent {
     /// Run one user message to completion with `provider`.
     ///
     /// `session_id`: `None` starts a new session; an unknown id starts a fresh session
-    /// under that id (history is lost on restart).
+    /// under that id (history is lost on restart). `voice` marks a spoken turn: previews
+    /// created in it get the after-read-back confirm window.
     pub async fn run_turn(
         &self,
         provider: &dyn LlmProvider,
         session_id: Option<Uuid>,
         message: &str,
+        voice: bool,
     ) -> Result<ChatOutcome, LlmError> {
         let sid = session_id.unwrap_or_else(Uuid::new_v4);
         let mut history = self.snapshot(sid);
@@ -99,9 +102,28 @@ impl Agent {
             )
             .await;
 
+        // What the user actually said, as far as the deterministic parser can tell. Every
+        // propose_* call is cross-checked against it (SPEC rule 9).
+        let intent = self.tools.parse_intent(message);
+        if intent != Intent::Other {
+            self.audit
+                .record(
+                    Some(sid),
+                    AuditKind::Intent,
+                    json!({ "text": message, "intent": &intent, "voice": voice }),
+                )
+                .await;
+        }
+        let ctx = ToolContext {
+            session_id: sid,
+            intent,
+            voice,
+        };
+
         let system = self.system_prompt();
         let tools = self.tools.specs();
         let mut summaries = Vec::new();
+        let mut preview: Option<PreviewDto> = None;
         let reply;
 
         let mut round = 0;
@@ -159,7 +181,13 @@ impl Agent {
             });
             for call in &response.tool_calls {
                 let started = Instant::now();
-                let outcome = self.tools.execute(&call.name, &call.arguments).await;
+                let outcome = self
+                    .tools
+                    .execute_in(&ctx, &call.name, &call.arguments)
+                    .await;
+                if let Some(p) = &outcome.preview {
+                    preview = Some(p.clone());
+                }
                 let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
                 if let Some(req) = &outcome.bridge_request {
@@ -213,6 +241,7 @@ impl Agent {
             session_id: sid,
             reply,
             tool_calls: summaries,
+            preview,
         })
     }
 
@@ -230,14 +259,14 @@ impl Agent {
     /// Append this turn's messages to the stored session, then enforce the cap.
     fn append(&self, sid: Uuid, new_messages: Vec<Message>) {
         let mut sessions = self.lock();
-        if !sessions.contains_key(&sid) && sessions.len() >= MAX_SESSIONS {
-            if let Some(oldest) = sessions
+        if !sessions.contains_key(&sid)
+            && sessions.len() >= MAX_SESSIONS
+            && let Some(oldest) = sessions
                 .iter()
                 .min_by_key(|(_, s)| s.last_used)
                 .map(|(id, _)| *id)
-            {
-                sessions.remove(&oldest);
-            }
+        {
+            sessions.remove(&oldest);
         }
         let session = sessions.entry(sid).or_insert_with(|| Session {
             messages: Vec::new(),
@@ -313,32 +342,26 @@ fn build_system_prompt(
             .join(", ")
     };
     format!(
-        "You are Jarvis, a trading assistant for a single trader using MetaTrader 5 (MT5).\n\
-         Current time: {now_utc} UTC. MT5 broker server time: {server_time} (deal times and \
-           history dates use server time).\n\
-         \n\
-         What you can do:\n\
-         - Read live data with your tools ONLY: prices (get_price), the account summary \
-           (get_account), open positions (get_positions), pending orders (get_orders) and \
-           trade history (get_history).\n\
-         - Never state a price, balance, profit, position or any other number that you did not \
-           get from a tool in this conversation. Prices move: for any question about a current \
-           value, call the tool again instead of reusing an earlier answer. If a tool fails, say \
-           so plainly; do not guess.\n\
-         \n\
-         What you cannot do yet:\n\
-         - You cannot place, modify, cancel or close trades. If asked, say clearly that you \
-           cannot do that yet and that trading support is coming soon. Do not pretend to have \
-           done it, and do not tell the user to expect it to have happened.\n\
-         \n\
-         How to behave:\n\
-         - If a request is ambiguous (which symbol? which position? which dates?), ask one short \
-           clarifying question instead of guessing.\n\
-         - Symbol aliases (the user's words -> broker symbol): {alias_text}. You may pass the \
-           user's own word to a tool; it resolves aliases itself. Speech-to-text can mishear \
-           names (for example \"cold\" for \"gold\").\n\
-         - Be concise and easy to read aloud: 1 to 3 sentences unless you are listing items. \
-           No markdown tables, no emojis. Say numbers plainly with their symbol or currency.\n\
+        "You are Jarvis, a trading assistant for a single trader using MetaTrader 5 (MT5).
+         Current time: {now_utc} UTC. MT5 broker server time: {server_time} (deal times and            history dates use server time).
+         
+         What you can do:
+         - Read live data with your tools: prices (get_price), the account summary            (get_account), open positions (get_positions), pending orders (get_orders) and            trade history (get_history).
+         - Propose trades with propose_order, propose_modify, propose_close and propose_cancel.            PROPOSING DOES NOT EXECUTE ANYTHING. A proposal only creates a preview. The user must            confirm it in the app (the Confirm button, or by saying \"confirm\") within a few            seconds. You cannot confirm, cancel or execute anything yourself.
+         - Never state a price, balance, profit, position or any other number that you did not            get from a tool in this conversation. Prices move: for any question about a current            value, call the tool again instead of reusing an earlier answer. If a tool fails, say            so plainly; do not guess.
+         
+         Trading rules (strict):
+         - After a propose tool succeeds, tell the user the preview in one or two sentences (use            the tool's description and numbers) and ask them to confirm. Say that nothing has            happened yet. If the result says two confirmations are needed, say so.
+         - NEVER say or imply that a trade was placed, modified, closed or cancelled unless the            user tells you so or a tool result explicitly says it happened. A propose tool result            means \"awaiting confirmation\", never \"done\". If the user asks whether it went            through, check with get_positions or get_orders.
+         - If the side (buy or sell), the symbol or the volume is missing or unclear, ask one            short clarifying question. Never invent a volume or a symbol, and never assume a            default lot size. Use exactly the numbers the user said for volume, price, stop loss            and take profit.
+         - Propose only what the user asked for in their latest message. A new proposal replaces            the pending one.
+         - If a propose tool is refused (a limit such as maximum lot, maximum positions, daily            loss, allowed symbols or trading hours; the kill switch; a mismatch with what the            user said), explain briefly why, name the limit and its value, and do not retry with            different numbers unless the user asks for that.
+         - If the user says confirm, yes, cancel or no about a pending preview, do not propose            again: the app handles it. Remind them to press Confirm or Cancel, or say \"confirm\"            or \"cancel\".
+         
+         How to behave:
+         - If a request is ambiguous (which symbol? which position? which dates?), ask one short            clarifying question instead of guessing.
+         - Symbol aliases (the user's words -> broker symbol): {alias_text}. You may pass the            user's own word to a tool; it resolves aliases itself. Speech-to-text can mishear            names (for example \"cold\" for \"gold\").
+         - Be concise and easy to read aloud: 1 to 3 sentences unless you are listing items.            No markdown tables, no emojis. Say numbers plainly with their symbol or currency.
          - You are not a financial adviser; do not give investment recommendations."
     )
 }
@@ -401,8 +424,11 @@ mod tests {
         assert!(p.contains("2026-10-30 13:00:00"));
         assert!(p.contains("gold = XAUUSD"));
         assert!(p.contains("dow jones = US30"));
-        assert!(p.contains("tools ONLY"));
-        assert!(p.contains("cannot place, modify, cancel or close"));
+        assert!(p.contains("propose_order"));
+        assert!(p.contains("PROPOSING DOES NOT EXECUTE ANYTHING"));
+        assert!(p.contains("NEVER say or imply that a trade was placed"));
+        assert!(p.contains("Never invent a volume"));
+        assert!(p.contains("name the limit"));
         assert!(p.contains("clarifying question"));
     }
 

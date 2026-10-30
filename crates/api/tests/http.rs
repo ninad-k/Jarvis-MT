@@ -2,6 +2,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::*;
+use jarvis_api::config::Config;
 use jarvis_bridge_client::mock::{MockBridge, MockState};
 use jarvis_bridge_client::protocol::TradeMode;
 use serde_json::{Value, json};
@@ -416,7 +417,11 @@ async fn system_prompt_and_tools_are_sent_to_the_model() {
             "get_history",
             "get_orders",
             "get_positions",
-            "get_price"
+            "get_price",
+            "propose_cancel",
+            "propose_close",
+            "propose_modify",
+            "propose_order",
         ]
     );
 }
@@ -501,37 +506,289 @@ async fn startup_with_bridge_down_is_not_fatal() {
 
 // ------------------------------------------------------------------- CORS
 
-#[tokio::test]
-async fn cors_allows_only_the_dev_origins() {
-    let app = build_app(DEAD_ENDPOINT, idle_llm(), Options::default()).await;
-    for origin in ["http://localhost:5173", "http://127.0.0.1:5173"] {
-        let (status, headers, _) = raw_request(
-            &app.router,
-            "OPTIONS",
-            "/api/chat",
-            &[
-                ("origin", origin),
-                ("access-control-request-method", "POST"),
-                ("access-control-request-headers", "content-type"),
-            ],
-            None,
-        )
-        .await;
-        assert!(status.is_success(), "{status}");
-        assert_eq!(headers.get("access-control-allow-origin").unwrap(), origin);
-    }
+async fn preflight(app: &TestApp, origin: &str) -> axum::http::HeaderMap {
     let (_, headers, _) = raw_request(
         &app.router,
         "OPTIONS",
         "/api/chat",
         &[
-            ("origin", "http://evil.example"),
+            ("origin", origin),
             ("access-control-request-method", "POST"),
+            ("access-control-request-headers", "content-type"),
         ],
         None,
     )
     .await;
+    headers
+}
+
+#[tokio::test]
+async fn cors_is_off_by_default() {
+    // Nothing is allowed unless `[server] dev_origins` says so, not even the Vite dev server.
+    let app = build_app(DEAD_ENDPOINT, idle_llm(), Options::default()).await;
+    for origin in [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://evil.example",
+    ] {
+        let headers = preflight(&app, origin).await;
+        assert!(
+            headers.get("access-control-allow-origin").is_none(),
+            "{origin} must not get CORS headers by default"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cors_allows_only_the_configured_dev_origins() {
+    let app = build_app(
+        DEAD_ENDPOINT,
+        idle_llm(),
+        Options {
+            server: r#"dev_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]"#,
+            ..Options::default()
+        },
+    )
+    .await;
+    for origin in ["http://localhost:5173", "http://127.0.0.1:5173"] {
+        let headers = preflight(&app, origin).await;
+        assert_eq!(headers.get("access-control-allow-origin").unwrap(), origin);
+        assert_eq!(
+            headers.get("access-control-allow-credentials").unwrap(),
+            "true"
+        );
+    }
+    let headers = preflight(&app, "http://evil.example").await;
     assert!(headers.get("access-control-allow-origin").is_none());
+    let headers = preflight(&app, "http://localhost:5174").await;
+    assert!(headers.get("access-control-allow-origin").is_none());
+}
+
+#[tokio::test]
+async fn bad_dev_origins_are_refused_at_startup() {
+    for bad in [
+        r#"dev_origins = ["*"]"#,
+        r#"dev_origins = ["localhost:5173"]"#,
+        r#"dev_origins = ["http://localhost:5173/app"]"#,
+        r#"dev_origins = ["http://user:pw@localhost:5173"]"#,
+        r#"dev_origins = [""]"#,
+    ] {
+        let toml = common::config_toml(
+            "demo",
+            DEAD_ENDPOINT,
+            "",
+            &[],
+            common::DEFAULT_LIMITS,
+            "",
+            bad,
+            false,
+        );
+        let err = Config::from_toml_str(&toml).unwrap_err();
+        assert!(format!("{err:#}").contains("dev_origins"), "{bad}: {err:#}");
+    }
+}
+
+// ------------------------------------------- cross-origin writes and DNS rebinding
+
+#[tokio::test]
+async fn state_changing_requests_from_a_foreign_origin_are_refused() {
+    // SameSite=Strict stops other sites; this stops other origins of the *same* site, such as
+    // another port on localhost (SECURITY.md: no web page may drive the trade endpoints).
+    let mock = MockBridge::start().await;
+    let app = build_app(
+        &mock.endpoint,
+        ScriptedLlm::always("fake", text_response("hello")),
+        Options::default(),
+    )
+    .await;
+    let body = json!({ "message": "hi" }).to_string();
+    for origin in [
+        "http://evil.example",
+        "http://localhost:5173", // same site as the API, different origin
+        "http://127.0.0.1:9999",
+        "null",
+    ] {
+        for (method, uri) in [
+            ("POST", "/api/chat"),
+            ("POST", "/api/confirm/abc"),
+            ("POST", "/api/cancel/abc"),
+            ("POST", "/api/killswitch"),
+            ("POST", "/api/positions/close"),
+            ("POST", "/api/auth/logout"),
+        ] {
+            let (status, headers, bytes) = raw_request(
+                &app.router,
+                method,
+                uri,
+                &[("origin", origin), ("host", "127.0.0.1:8787")],
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{method} {uri} from {origin}"
+            );
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v["error"]["code"], "forbidden");
+            assert!(headers.get("access-control-allow-origin").is_none());
+        }
+    }
+    assert_eq!(mock.executed_writes(), 0);
+    // Nothing reached the chat handler: no model call, no audit row.
+    assert_eq!(app.llm.request_count(), 0);
+    assert!(app.audit.rows(None).await.unwrap().is_empty());
+
+    // The server's own origin and a non-browser client (no Origin) pass.
+    let (status, _, _) = raw_request(
+        &app.router,
+        "POST",
+        "/api/chat",
+        &[
+            ("origin", "http://127.0.0.1:8787"),
+            ("host", "127.0.0.1:8787"),
+        ],
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = raw_request(
+        &app.router,
+        "POST",
+        "/api/chat",
+        &[("host", "127.0.0.1:8787")],
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A configured dev origin passes.
+    let dev = build_app(
+        &mock.endpoint,
+        ScriptedLlm::always("fake", text_response("hello")),
+        Options {
+            server: r#"dev_origins = ["http://localhost:5173"]"#,
+            ..Options::default()
+        },
+    )
+    .await;
+    let (status, _, _) = raw_request(
+        &dev.router,
+        "POST",
+        "/api/chat",
+        &[
+            ("origin", "http://localhost:5173"),
+            ("host", "127.0.0.1:8787"),
+        ],
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn reads_from_a_foreign_origin_get_no_cors_headers() {
+    let mock = MockBridge::start().await;
+    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let (status, headers, _) = raw_request(
+        &app.router,
+        "GET",
+        "/api/status",
+        &[
+            ("origin", "http://evil.example"),
+            ("host", "127.0.0.1:8787"),
+        ],
+        None,
+    )
+    .await;
+    // The request is served, but a browser cannot read the answer without these headers.
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("access-control-allow-origin").is_none());
+}
+
+#[tokio::test]
+async fn dns_rebinding_is_refused_while_login_is_off() {
+    // With no session cookie in play, a web page whose DNS name is switched to 127.0.0.1 is
+    // same-origin with the API. The Host header gives it away.
+    let mock = MockBridge::start().await;
+    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    for host in [
+        "evil.example:8787",
+        "evil.example",
+        "127.0.0.1.evil.example:8787",
+        "192.168.1.5:8787",
+    ] {
+        for (method, uri) in [
+            ("GET", "/api/status"),
+            ("GET", "/api/positions"),
+            ("POST", "/api/chat"),
+            ("POST", "/api/killswitch"),
+            ("OPTIONS", "/api/chat"),
+        ] {
+            let origin = format!("http://{host}");
+            let (status, _, bytes) = raw_request(
+                &app.router,
+                method,
+                uri,
+                // Same-origin from the attacker page's point of view: Origin == Host.
+                &[("host", host), ("origin", &origin)],
+                Some("{}".to_owned()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} Host {host}");
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v["error"]["code"], "forbidden");
+        }
+    }
+    // Loopback names work, including with an explicit port.
+    for host in [
+        "localhost:8787",
+        "127.0.0.1:8787",
+        "[::1]:8787",
+        "x.localhost",
+    ] {
+        let (status, _, _) =
+            raw_request(&app.router, "GET", "/api/status", &[("host", host)], None).await;
+        assert_eq!(status, StatusCode::OK, "Host {host}");
+    }
+}
+
+#[tokio::test]
+async fn host_names_are_not_restricted_when_login_is_on() {
+    // With login on, the session cookie is bound to the real host name, so a rebinding page
+    // has no cookie to send; deployments behind a reverse proxy keep working.
+    let mock = MockBridge::start().await;
+    let app = build_app(
+        &mock.endpoint,
+        idle_llm(),
+        Options {
+            auth: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    let (status, _, _) = raw_request(
+        &app.router,
+        "GET",
+        "/api/health",
+        &[("host", "jarvis.example.com")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // ...but a foreign Origin is still refused on a write, logged in or not.
+    let (status, _, _) = raw_request(
+        &app.router,
+        "POST",
+        "/api/auth/login",
+        &[
+            ("host", "jarvis.example.com"),
+            ("origin", "https://evil.example"),
+        ],
+        Some("{}".to_owned()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 // ------------------------------------------------------- server clock

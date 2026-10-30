@@ -1,47 +1,45 @@
-use anyhow::Context;
-use jarvis_api::config::Config;
-use jarvis_api::{AppState, app};
+use clap::Parser;
+use jarvis_api::cli::{Cli, Command, ServiceCommand};
+use jarvis_api::{serve, users};
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let config = Config::load()?;
-    init_tracing();
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Service { command }) => service(command, cli.config),
+        Some(Command::User { command }) => {
+            let _ = dotenvy::dotenv();
+            runtime()?.block_on(users::run(cli.config.as_deref(), command))
+        }
+        Some(Command::Serve) | None => {
+            // `.env` first: it may hold RUST_LOG as well as the secrets.
+            let _ = dotenvy::dotenv();
+            init_tracing();
+            runtime()?.block_on(serve::run(cli.config, serve::ctrl_c()))
+        }
+    }
+}
 
-    let addr = config.bind_addr()?;
-    tracing::info!(
-        mode = config.mode.as_str(),
-        bridge = %config.bridge.endpoint,
-        providers = config.llm.providers.len(),
-        "jarvis-api {} starting",
-        env!("CARGO_PKG_VERSION")
-    );
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?)
+}
 
-    let state = AppState::build(config).await?;
-    state.startup_check().await?;
+#[cfg(windows)]
+fn service(command: ServiceCommand, config: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    jarvis_api::service::execute(command, config)
+}
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr} (is another jarvis-api running?)"))?;
-    tracing::info!("listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
-    tracing::info!("shut down cleanly");
-    Ok(())
+#[cfg(not(windows))]
+fn service(_: ServiceCommand, _: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "the service commands exist on Windows only; use systemd or a container elsewhere"
+    )
 }
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,jarvis_api=debug,jarvis_bridge_client=debug"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
-async fn shutdown_signal() {
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        tracing::error!("could not listen for Ctrl+C: {e}");
-        std::future::pending::<()>().await;
-    }
-    tracing::info!("Ctrl+C received, shutting down");
 }
