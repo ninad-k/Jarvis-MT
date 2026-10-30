@@ -17,6 +17,7 @@
 	import { killSwitch } from '#lib/state/killswitch.svelte.ts';
 	import { preview } from '#lib/state/preview.svelte.ts';
 	import { attachPushToTalk } from '#lib/state/voice.svelte.ts';
+	import { persona } from '#lib/state/persona.svelte.ts';
 
 	type Tab = 'chat' | 'watchlist' | 'positions';
 	let tab = $state<Tab>('chat');
@@ -24,6 +25,7 @@
 	onMount(() => {
 		const stops = [startPolling(), events.start(), attachPushToTalk()];
 		void auth.refresh();
+		void persona.ensureLoaded();
 		return () => stops.forEach((stop) => stop());
 	});
 

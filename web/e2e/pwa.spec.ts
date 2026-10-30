@@ -9,8 +9,8 @@ test('the web manifest is served with the required fields and reachable icons', 
 	expect(res.headers()['content-type']).toMatch(/json/);
 	const m = await res.json();
 	expect(m).toMatchObject({
-		name: 'Jarvis MT',
-		short_name: 'Jarvis',
+		name: 'Arc MT',
+		short_name: 'Arc',
 		display: 'standalone',
 		start_url: '/',
 		theme_color: '#04070d',
@@ -33,5 +33,5 @@ test('iOS meta tags and the offline page are present', async ({ page, request })
 	await expect(page.locator('meta[name="apple-mobile-web-app-capable"]')).toHaveAttribute('content', 'yes');
 	await expect(page.locator('link[rel="apple-touch-icon"]')).toHaveAttribute('href', /apple-touch-icon\.png/);
 	const offline = await request.get('/offline.html');
-	expect(await offline.text()).toContain('Offline — Jarvis needs the backend');
+	expect(await offline.text()).toContain('Offline — Arc MT needs the backend');
 });

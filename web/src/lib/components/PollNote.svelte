@@ -29,7 +29,7 @@
 			</p>
 			<p class="text-xs text-mute">
 				{#if view === 'offline'}
-					Can't reach the Jarvis server. Retrying with back-off{poller.failures > 1
+					Can't reach the Arc MT server. Retrying with back-off{poller.failures > 1
 						? ` (attempt ${poller.failures})`
 						: ''}.
 				{:else}

@@ -1,8 +1,9 @@
 import type { WsEvent } from '#lib/api.ts';
 import { reconnectDelay } from '#lib/backoff.ts';
 import { killSwitch } from './killswitch.svelte';
-import { refreshTrading, status } from './hud.svelte';
+import { refreshTrading, status, watchlist } from './hud.svelte';
 import { preview } from './preview.svelte';
+import { settings } from './settings.svelte';
 
 export type EventsLink = 'idle' | 'connecting' | 'open' | 'retrying';
 
@@ -52,6 +53,11 @@ class EventsStore {
 				break;
 			case 'preview_expired':
 				preview.onExpiredEvent(e.token);
+				break;
+			case 'settings_changed':
+				void settings.refresh();
+				status.refresh();
+				watchlist.refresh();
 				break;
 			case 'trade_executed':
 			case 'positions_changed':

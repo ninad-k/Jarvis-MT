@@ -6,7 +6,7 @@ test('HUD loads with watchlist, positions and demo badge', async ({ page }) => {
 	page.on('pageerror', (e) => errors.push(e.message));
 	await openHud(page);
 
-	await expect(page.getByRole('heading', { name: /JARVIS/ })).toBeVisible();
+	await expect(page.getByRole('heading', { name: /ARC/ })).toBeVisible();
 	await expect(page.getByText('Demo', { exact: true })).toBeVisible();
 	await expect(page.getByRole('region', { name: 'Watchlist' }).getByText('XAUUSD')).toBeVisible();
 	await expect(page.getByTestId('position-row')).toHaveCount(5);

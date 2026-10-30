@@ -75,7 +75,7 @@ export function digitsFor(symbol: string): number | undefined {
 }
 
 class Backend {
-	/** The Jarvis server itself is unreachable. */
+	/** The Arc MT server itself is unreachable. */
 	get offline(): boolean {
 		return status.error?.isOffline === true;
 	}

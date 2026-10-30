@@ -21,6 +21,7 @@ import {
 	symInfo,
 	type BookPosition
 } from './mock-market';
+import { effectiveLimits } from './mock-settings';
 
 // ---- Events --------------------------------------------------------------
 
@@ -34,6 +35,7 @@ export function onMockEvent(fn: Listener): () => void {
 function emit(e: WsEvent): void {
 	for (const fn of listeners) fn(e);
 }
+export const emitMockEvent = emit;
 
 // ---- Settings ------------------------------------------------------------
 
@@ -224,9 +226,13 @@ export function openPreview(
 	voice: boolean
 ): PreviewDto {
 	const s = symInfo(o.symbol);
-	if (!s) throw new ApiError('gate_rejected', `symbol ${o.symbol} is not allowed`, 422);
-	if (o.volume > 1)
-		throw new ApiError('gate_rejected', `volume ${o.volume} exceeds max_lot 1.0`, 422);
+	const limits = effectiveLimits();
+	if (!s || !limits.allowed_symbols.includes(o.symbol))
+		throw new ApiError('gate_rejected', `symbol ${o.symbol} is not allowed`, 422);
+	if (o.volume > limits.max_lot) {
+		const lot = Number.isInteger(limits.max_lot) ? limits.max_lot.toFixed(1) : String(limits.max_lot);
+		throw new ApiError('gate_rejected', `volume ${o.volume} exceeds max_lot ${lot}`, 422);
+	}
 	const entry = fillPrice(o.symbol, o.side);
 	const dir = o.side === 'buy' ? 1 : -1;
 	const pl = (price: number) => {

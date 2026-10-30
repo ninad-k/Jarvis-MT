@@ -10,7 +10,7 @@ import { MAX_SECONDS, chunksToWav16k, rms } from './wav';
 type AudioCtor = typeof AudioContext;
 let shared: AudioContext | null = null;
 
-function audioCtor(): AudioCtor | null {
+export function audioCtor(): AudioCtor | null {
 	if (typeof window === 'undefined') return null;
 	return window.AudioContext ?? (window as unknown as { webkitAudioContext?: AudioCtor }).webkitAudioContext ?? null;
 }

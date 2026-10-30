@@ -55,7 +55,7 @@
 	}
 </script>
 
-<svelte:head><title>Audit log · Jarvis MT</title></svelte:head>
+<svelte:head><title>Audit log · Arc MT</title></svelte:head>
 
 <div class="flex h-dvh flex-col">
 	<header

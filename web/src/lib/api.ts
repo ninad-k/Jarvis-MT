@@ -1,5 +1,5 @@
 /**
- * Typed client for the Jarvis HTTP API. Mirrors docs/api.md exactly.
+ * Typed client for the Arc MT HTTP API. Mirrors docs/api.md exactly.
  * In mock mode (VITE_MOCK=1) every call is answered by ./mock instead of the network.
  */
 import {
@@ -53,13 +53,81 @@ export interface VoiceStatus {
 	tts: boolean;
 }
 
+export type Weekday = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+/** Broker server time, "HH:MM", start inclusive and end exclusive (crates/gate `TradingHours`). */
+export interface TradingHours {
+	days: Weekday[];
+	start: string;
+	end: string;
+}
+
 export interface Limits {
 	max_lot: number;
 	max_positions: number;
 	max_daily_loss: number;
 	allowed_symbols: string[];
-	trading_hours: unknown;
+	trading_hours: TradingHours | null;
 }
+
+/** The fields `PUT /api/settings/limits` accepts (all optional); `config` stays the ceiling. */
+export type LimitsOverrides = Partial<Limits>;
+
+export interface LimitsResponse {
+	config: Limits;
+	overrides: LimitsOverrides | null;
+	effective: Limits;
+}
+
+export interface PersonaTheme {
+	accent: string;
+	accent_soft: string;
+	orb_core: string;
+	orb_glow: string;
+}
+
+export interface Persona {
+	id: string;
+	name: string;
+	description: string;
+	wake_word: string;
+	/** False when this persona's voice model file is missing. */
+	voice_available: boolean;
+	theme: PersonaTheme;
+}
+
+export interface PersonasResponse {
+	default: string;
+	active: string;
+	personas: Persona[];
+}
+
+export type InputMode = 'hold' | 'toggle' | 'wake_word';
+export type VoiceLanguage = 'en' | 'auto';
+
+export interface VoiceSettings {
+	read_aloud: boolean;
+	input_mode: InputMode;
+	language: VoiceLanguage;
+}
+
+export interface Settings {
+	persona: string;
+	/** Provider name from /api/status, or null for the server default. */
+	llm_provider: string | null;
+	voice: VoiceSettings;
+	watchlist: string[];
+	/** The user's own spoken-name -> broker-symbol entries (keys lower-case). */
+	aliases: Record<string, string>;
+	/**
+	 * Aliases from the config file, shown read-only. Not in docs/api.md yet: the UI uses it when the
+	 * server sends it and hides the list otherwise.
+	 */
+	config_aliases?: Record<string, string>;
+}
+
+/** `PUT /api/settings`: send only what changes. Nested objects are sent whole. */
+export type SettingsPatch = Partial<Omit<Settings, 'config_aliases'>>;
 
 export interface Status {
 	version: string;
@@ -71,7 +139,10 @@ export interface Status {
 	kill_switch?: KillSwitchState;
 	auth?: AuthStatus;
 	voice?: VoiceStatus;
+	/** Effective limits (config tightened by the user's overrides). */
 	limits?: Limits;
+	/** The active persona. Absent on a server without personas. */
+	persona?: { id: string; name: string };
 }
 
 export interface Account {
@@ -205,6 +276,8 @@ export interface ChatResponse {
 	provider: string;
 	tool_calls: ToolCall[];
 	preview?: PreviewDto | null;
+	/** Persona that answered (id). Absent on a server without personas. */
+	persona?: string;
 }
 
 export interface TradeResult {
@@ -272,12 +345,21 @@ export interface AuditResponse {
 
 export type VoiceIntent = 'confirm' | 'cancel' | 'other';
 
+/** `POST /api/voice/transcribe?wake=1` adds this. */
+export interface WakeResult {
+	detected: boolean;
+	persona: string | null;
+	/** What was said after the wake phrase; may be empty. */
+	command: string;
+}
+
 export interface TranscribeResponse {
 	text: string;
 	raw: string;
 	audio_ms: number;
 	elapsed_ms: number;
 	intent: VoiceIntent;
+	wake?: WakeResult;
 }
 
 /** Events pushed over `GET /api/ws`. */
@@ -285,14 +367,15 @@ export type WsEvent =
 	| { type: 'kill_switch'; engaged: boolean; reason: string | null }
 	| { type: 'preview_expired'; token: string }
 	| { type: 'trade_executed'; preview_id: string; results: TradeResult[] }
-	| { type: 'positions_changed' };
+	| { type: 'positions_changed' }
+	| { type: 'settings_changed' };
 
 // ---- Transport -----------------------------------------------------------
 
 export const MOCK = import.meta.env.VITE_MOCK === '1';
 
 export interface RequestOptions {
-	method?: 'GET' | 'POST';
+	method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
 	/** JSON body. */
 	body?: unknown;
 	/** Binary body (voice upload); sent with its own content type. */
@@ -339,7 +422,7 @@ async function networkRequest<T>(path: string, opts: RequestOptions): Promise<T>
 	} catch {
 		if (opts.signal?.aborted) throw new ApiError('aborted', 'Request cancelled');
 		if (timeout.aborted) throw new ApiError('timeout', 'The server took too long to respond');
-		throw new ApiError('network', 'Cannot reach the Jarvis server');
+		throw new ApiError('network', 'Cannot reach the Arc MT server');
 	}
 
 	if (!res.ok) {
@@ -379,6 +462,8 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 
 const post = <T>(path: string, body?: unknown, extra: RequestOptions = {}) =>
 	request<T>(path, { method: 'POST', body, ...extra });
+const put = <T>(path: string, body?: unknown, extra: RequestOptions = {}) =>
+	request<T>(path, { method: 'PUT', body, ...extra });
 
 // ---- Endpoints -----------------------------------------------------------
 
@@ -423,19 +508,36 @@ export const api = {
 		return request<AuditResponse>(`/api/audit?${q}`, { signal });
 	},
 
-	transcribe: (wav: Blob, signal?: AbortSignal) =>
-		request<TranscribeResponse>('/api/voice/transcribe', {
+	/** `wake: true` is hands-free mode: the reply carries a `wake` result. */
+	transcribe: (wav: Blob, signal?: AbortSignal, opts: { wake?: boolean } = {}) =>
+		request<TranscribeResponse>(`/api/voice/transcribe${opts.wake ? '?wake=1' : ''}`, {
 			method: 'POST',
 			blob: wav,
 			signal,
 			timeoutMs: 60_000
 		}),
-	speak: (text: string, signal?: AbortSignal) =>
+	/** `persona` previews another persona's voice (settings page). */
+	speak: (text: string, signal?: AbortSignal, persona?: string) =>
 		request<Blob>('/api/voice/speak', {
 			method: 'POST',
-			body: { text },
+			body: persona ? { text, persona } : { text },
 			asBlob: true,
 			signal,
 			timeoutMs: 60_000
+		}),
+
+	personas: (signal?: AbortSignal) => request<PersonasResponse>('/api/personas', { signal }),
+	settings: (signal?: AbortSignal) => request<Settings>('/api/settings', { signal }),
+	updateSettings: (patch: SettingsPatch) => put<Settings>('/api/settings', patch),
+
+	limits: (signal?: AbortSignal) => request<LimitsResponse>('/api/settings/limits', { signal }),
+	/** A wrong TOTP code is a 401 that is an answer, not a lost session. */
+	setLimits: (body: LimitsOverrides & { totp?: string }) =>
+		put<LimitsResponse | Limits>('/api/settings/limits', body, { keepOn401: true }),
+	resetLimits: (totp?: string) =>
+		request<LimitsResponse | void>('/api/settings/limits', {
+			method: 'DELETE',
+			body: totp ? { totp } : {},
+			keepOn401: true
 		})
 };

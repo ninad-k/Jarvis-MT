@@ -1,4 +1,4 @@
-import { api } from '#lib/api.ts';
+import { api, type InputMode, type TranscribeResponse } from '#lib/api.ts';
 import { describeError, toApiError } from '#lib/errors.ts';
 import { Recorder, micErrorMessage, primeAudio } from '#lib/voice/audio.ts';
 import { routeTranscript } from '#lib/voice/intent.ts';
@@ -7,6 +7,7 @@ import { chat } from './chat.svelte';
 import { backend } from './hud.svelte';
 import { orb } from './orb.svelte';
 import { preview } from './preview.svelte';
+import { settings } from './settings.svelte';
 import { speech } from './speech.svelte';
 import { sendTurn } from './turn.svelte';
 
@@ -45,6 +46,15 @@ class VoiceStore {
 		return backend.sttAvailable && !backend.offline;
 	}
 
+	/**
+	 * How the mic button behaves (settings.voice.input_mode). "hold" is push-to-talk (a quick tap
+	 * still toggles, as before), "toggle" is tap to start and tap to stop, and "wake_word" hands the
+	 * microphone to hands-free mode (see handsfree.svelte.ts), so push-to-talk steps aside.
+	 */
+	get mode(): InputMode {
+		return settings.data?.voice.input_mode ?? 'hold';
+	}
+
 	get listening(): boolean {
 		return this.phase === 'listening' || this.phase === 'starting';
 	}
@@ -55,7 +65,7 @@ class VoiceStore {
 
 	/** Pointer/key went down on the mic (or the Space bar). */
 	press(): void {
-		if (!this.enabled || chat.pending || this.phase === 'transcribing') return;
+		if (!this.enabled || this.mode === 'wake_word' || chat.pending || this.phase === 'transcribing') return;
 		primeAudio();
 		speech.stop(); // barge-in: talking over the reply silences it
 		if (this.phase === 'listening') {
@@ -76,7 +86,7 @@ class VoiceStore {
 		if (!this.holding) return;
 		this.holding = false;
 		this.heldMs = performance.now() - this.pressAt;
-		if (this.heldMs >= HOLD_MS) void this.finish();
+		if (this.heldMs >= HOLD_MS && this.mode !== 'toggle') void this.finish();
 	}
 
 	/** Esc, or the page is going away: throw the clip away. */
@@ -118,7 +128,7 @@ class VoiceStore {
 			this.clock = setInterval(() => (this.elapsedMs = rec.elapsedMs), 100);
 			// A long hold that ended while the microphone was still starting (permission prompt)
 			// has no later release to wait for; a short tap stays on until the next tap.
-			if (this.heldMs !== null && this.heldMs >= HOLD_MS) void this.finish();
+			if (this.heldMs !== null && this.heldMs >= HOLD_MS && this.mode !== 'toggle') void this.finish();
 		} catch (e) {
 			this.phase = 'idle';
 			this.message = micErrorMessage(e);
@@ -157,7 +167,8 @@ class VoiceStore {
 		}
 	}
 
-	private async route(res: Awaited<ReturnType<typeof api.transcribe>>): Promise<void> {
+	/** Act on what was said: confirm or cancel the open preview, or send the words to chat. */
+	async route(res: Pick<TranscribeResponse, 'text' | 'intent'>): Promise<void> {
 		const decision = routeTranscript(res, preview.pendingState());
 		switch (decision.kind) {
 			case 'empty':

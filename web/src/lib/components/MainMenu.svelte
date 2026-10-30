@@ -9,7 +9,8 @@
 	const items = $derived.by<MenuItem[]>(() => {
 		const out: MenuItem[] = [];
 		if (auth.username) out.push({ id: 'user', label: `Signed in as ${auth.username}`, disabled: true });
-		out.push({ id: 'audit', label: 'Audit log', divider: out.length > 0 });
+		out.push({ id: 'settings', label: 'Settings', divider: out.length > 0 });
+		out.push({ id: 'audit', label: 'Audit log' });
 		if (backend.ttsAvailable)
 			out.push({ id: 'aloud', label: 'Read replies aloud', checked: speech.readAloud });
 		if (pwa.canInstall) out.push({ id: 'install', label: 'Install app' });
@@ -20,7 +21,8 @@
 	});
 
 	function onselect(id: string) {
-		if (id === 'audit') void goto('/audit');
+		if (id === 'settings') void goto('/settings');
+		else if (id === 'audit') void goto('/audit');
 		else if (id === 'aloud') speech.setReadAloud(!speech.readAloud);
 		else if (id === 'install') void pwa.install();
 		else if (id === 'logout') void auth.logout();

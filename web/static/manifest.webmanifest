@@ -1,8 +1,8 @@
 {
 	"id": "/",
-	"name": "Jarvis MT",
-	"short_name": "Jarvis",
-	"description": "Voice and chat trading for MetaTrader 5. Every trade needs your confirmation.",
+	"name": "Arc MT",
+	"short_name": "Arc",
+	"description": "Arc MT: voice and chat trading for MetaTrader 5. Every trade needs your confirmation.",
 	"start_url": "/",
 	"scope": "/",
 	"display": "standalone",

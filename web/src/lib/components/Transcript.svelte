@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { chat } from '#lib/state/chat.svelte.ts';
+	import { persona } from '#lib/state/persona.svelte.ts';
 	import { backend } from '#lib/state/hud.svelte.ts';
 	import { sendTurn } from '#lib/state/turn.svelte.ts';
 	import { voice } from '#lib/state/voice.svelte.ts';
@@ -50,7 +51,7 @@
 	{#if chat.messages.length === 0 && !voice.busy}
 		<div class="mx-auto flex h-full max-w-md flex-col items-center justify-center gap-4 text-center">
 			<div>
-				<p class="text-sm text-ink">Ask Jarvis about your markets.</p>
+				<p class="text-sm text-ink">Ask {persona.name} about your markets.</p>
 				<p class="mt-1 text-xs text-mute">
 					Prices, your account and positions, or ask for a trade. Nothing executes until you confirm it.
 				</p>
@@ -83,7 +84,7 @@
 						<span class="num px-1 text-2xs text-faint">{time(m.at)}</span>
 					{:else if m.role === 'assistant'}
 						<div class="max-w-[92%] border-l-2 border-accent bg-panel/80 py-2 pr-3 pl-3 text-sm break-words whitespace-pre-wrap">
-							<span class="sr-only">Jarvis: </span>{m.text}
+							<span class="sr-only">{m.persona}: </span>{m.text}
 						</div>
 						{#if m.toolCalls.length}
 							<ul class="flex max-w-[92%] flex-wrap gap-1.5 pl-3" aria-label="Tools used">
@@ -136,7 +137,7 @@
 							></span>
 						{/each}
 					</span>
-					Thinking…
+					{persona.name} is thinking…
 				</li>
 			{/if}
 		</ol>

@@ -1,12 +1,20 @@
 export type OrbState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error';
 
-export const ORB_LABEL: Record<OrbState, string> = {
-	idle: 'Standing by',
-	listening: 'Listening…',
-	thinking: 'Thinking…',
-	speaking: 'Speaking',
-	error: 'Something went wrong'
-};
+/** Status line under the orb. The assistant is named by the active persona. */
+export function orbLabel(state: OrbState, name: string): string {
+	switch (state) {
+		case 'idle':
+			return 'Standing by';
+		case 'listening':
+			return `${name} is listening…`;
+		case 'thinking':
+			return `${name} is thinking…`;
+		case 'speaking':
+			return `${name} is speaking`;
+		case 'error':
+			return 'Something went wrong';
+	}
+}
 
 const reduced = () =>
 	typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -25,10 +33,6 @@ class OrbStore {
 	private level = 0;
 	/** True while `speaking` is driven by a real audio level instead of the synthetic envelope. */
 	private live = false;
-
-	get label(): string {
-		return ORB_LABEL[this.state];
-	}
 
 	set(next: OrbState): void {
 		clearTimeout(this.timer);

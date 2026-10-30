@@ -1,6 +1,7 @@
 import { api, type ChatResponse, type ToolCall } from '#lib/api.ts';
 import { describeError, toApiError } from '#lib/errors.ts';
 import { orb } from './orb.svelte';
+import { persona } from './persona.svelte';
 import { provider } from './provider.svelte';
 
 export const MAX_MESSAGE = 2000;
@@ -14,6 +15,8 @@ export type ChatMessage =
 			at: number;
 			provider: string;
 			toolCalls: ToolCall[];
+			/** Display name of the persona that answered, kept so the label survives a later switch. */
+			persona: string;
 	  }
 	| { id: number; role: 'error'; text: string; at: number; code: string }
 	/** A line from the app itself: trade results, cancellations. */
@@ -53,7 +56,7 @@ class ChatStore {
 			const res = await api.chat({
 				message,
 				...(this.sessionId ? { session_id: this.sessionId } : {}),
-				...(provider.selected ? { provider: provider.selected } : {}),
+				...(provider.explicit ? { provider: provider.selected ?? provider.explicit } : {}),
 				...(opts.voice ? { voice: true } : {})
 			});
 			this.sessionId = res.session_id;
@@ -63,6 +66,7 @@ class ChatStore {
 				text: res.reply,
 				at: Date.now(),
 				provider: res.provider,
+				persona: persona.nameFor(res.persona),
 				toolCalls: res.tool_calls ?? []
 			});
 			orb.set('idle');
@@ -73,7 +77,7 @@ class ChatStore {
 				id: this.nextId++,
 				role: 'error',
 				text: err.isOffline
-					? 'The Jarvis server is offline. Your message was not sent.'
+					? 'The Arc MT server is offline. Your message was not sent.'
 					: describeError(err),
 				at: Date.now(),
 				code: err.code

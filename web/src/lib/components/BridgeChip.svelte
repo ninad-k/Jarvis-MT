@@ -23,7 +23,7 @@
 	);
 	const detail = $derived.by(() => {
 		if (kind === 'offline')
-			return status.error?.message ?? 'Cannot reach the Jarvis server. Retrying with back-off.';
+			return status.error?.message ?? 'Cannot reach the Arc MT server. Retrying with back-off.';
 		if (kind === 'down') return b?.error ?? 'The MT5 bridge is not connected.';
 		if (kind === 'up' && b)
 			return `EA ${b.ea_version ?? '?'} · protocol v${b.protocol_version ?? '?'} · terminal ${b.terminal_connected ? 'connected' : 'disconnected'}`;

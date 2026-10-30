@@ -36,7 +36,7 @@
 				<span class="text-right">Spr</span>
 			</div>
 			<ul class="pb-2">
-				{#each prices as p (p.symbol)}
+				{#each prices as p, i (`${p.symbol}#${i}`)}
 					{@const m = moves.map[p.symbol]}
 					<li class="border-t border-line/60 first:border-t-0">
 						{#key m?.n}
@@ -69,7 +69,7 @@
 						{/key}
 					</li>
 				{/each}
-				{#each errors as e (e.symbol)}
+				{#each errors as e, i (`${e.symbol}#${i}`)}
 					<li class="border-t border-line/60 px-3 py-2">
 						<div class="flex items-baseline justify-between gap-3">
 							<span class="font-medium text-mute">{e.symbol}</span>

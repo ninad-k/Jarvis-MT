@@ -19,7 +19,8 @@ export const SERVER_ERROR_CODES = [
 	'rate_limited',
 	'voice_unavailable',
 	'trade_failed',
-	'outcome_unknown'
+	'outcome_unknown',
+	'limit_not_stricter'
 ] as const;
 
 export type ApiErrorCode = (typeof SERVER_ERROR_CODES)[number];
@@ -50,7 +51,7 @@ export class ApiError extends Error {
 		this.retryAfterMs = retryAfterMs;
 	}
 
-	/** The Jarvis server itself could not be reached (as opposed to the MT5 bridge). */
+	/** The Arc MT server itself could not be reached (as opposed to the MT5 bridge). */
 	get isOffline(): boolean {
 		return this.code === 'network';
 	}
@@ -100,7 +101,7 @@ export function errorFromResponse(
 	}
 	if (status === 401) return new ApiError('unauthorized', 'Sign-in required', status);
 	if (status === 429) return new ApiError('rate_limited', 'Too many requests', status, retryMs);
-	if (status >= 500) return new ApiError('network', 'Cannot reach the Jarvis server', status);
+	if (status >= 500) return new ApiError('network', 'Cannot reach the Arc MT server', status);
 	return new ApiError('unknown', `Unexpected response (HTTP ${status})`, status);
 }
 
@@ -129,10 +130,12 @@ export function describeError(err: ApiError): string {
 		}
 		case 'gate_rejected':
 			return err.message || 'The request was rejected by a safety limit.';
+		case 'limit_not_stricter':
+			return err.message || 'That value is looser than the config file allows.';
 		case 'unauthorized':
 			return 'Your session has ended. Sign in again.';
 		case 'network':
-			return 'Cannot reach the Jarvis server.';
+			return 'Cannot reach the Arc MT server.';
 		case 'timeout':
 			return 'The server took too long to respond.';
 		case 'voice_unavailable':

@@ -4,6 +4,7 @@
 	import { api } from '#lib/api.ts';
 	import { auth } from '#lib/state/auth.svelte.ts';
 	import { resetPollers } from '#lib/state/hud.svelte.ts';
+	import { persona } from '#lib/state/persona.svelte.ts';
 	import { describeError, type ApiError } from '#lib/errors.ts';
 
 	let username = $state('');
@@ -17,6 +18,7 @@
 	onMount(() => {
 		// The HUD's pollers have stopped by now; drop whatever the previous session left in them.
 		resetPollers();
+		persona.reset();
 		userInput?.focus();
 		// Already signed in (or no auth on the server)? Go straight to the HUD.
 		api
@@ -50,17 +52,17 @@
 	}
 </script>
 
-<svelte:head><title>Sign in · Jarvis MT</title></svelte:head>
+<svelte:head><title>Sign in · Arc MT</title></svelte:head>
 
 <main class="grid min-h-dvh place-items-center overflow-y-auto p-4">
 	<form class="hud w-full max-w-sm space-y-4 p-5" onsubmit={submit} aria-labelledby="login-title">
 		<div class="flex items-center gap-3">
 			<span class="grid size-8 place-items-center rounded-full border border-accent/70" aria-hidden="true">
-				<span class="size-3 rounded-full bg-accent shadow-[0_0_10px_3px_rgb(34_211_238/0.7)]"></span>
+				<span class="size-3 rounded-full bg-accent shadow-[0_0_10px_3px_color-mix(in_srgb,var(--color-accent)_70%,transparent)]"></span>
 			</span>
 			<div>
 				<h1 id="login-title" class="font-mono text-sm font-semibold tracking-[0.28em]">
-					JARVIS<span class="text-accent"> MT</span>
+					ARC<span class="text-accent"> MT</span>
 				</h1>
 				<p class="text-xs text-mute">Sign in to continue</p>
 			</div>

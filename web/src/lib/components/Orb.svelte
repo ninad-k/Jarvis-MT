@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import type { OrbScene } from '#lib/orb/OrbScene.ts';
-	import { orb } from '#lib/state/orb.svelte.ts';
+	import { orb, orbLabel } from '#lib/state/orb.svelte.ts';
+	import { persona } from '#lib/state/persona.svelte.ts';
 	import { backend, status } from '#lib/state/hud.svelte.ts';
 	import { provider } from '#lib/state/provider.svelte.ts';
 
@@ -23,6 +24,7 @@
 					onContextLost: () => (fallback = true),
 					onContextRestored: () => (fallback = false)
 				});
+				scene.setTheme(persona.theme);
 				scene.setState(orb.state);
 				scene.start();
 				if (import.meta.env.DEV) (window as unknown as { __scene: OrbScene }).__scene = scene;
@@ -37,6 +39,12 @@
 			scene?.dispose();
 			scene = undefined;
 		};
+	});
+
+	$effect(() => {
+		// The persona's colours: the scene eases to them (or snaps under reduced motion).
+		const theme = persona.theme;
+		scene?.setTheme(theme);
 	});
 
 	$effect(() => {
@@ -55,7 +63,7 @@
 	});
 
 	const label = $derived(
-		backend.offline && orb.state === 'idle' ? 'Backend offline' : orb.label
+		backend.offline && orb.state === 'idle' ? 'Backend offline' : orbLabel(orb.state, persona.name)
 	);
 	const llm = $derived(
 		status.data?.llm.providers.find((p) => p.name === provider.selected) ?? null
@@ -63,12 +71,12 @@
 </script>
 
 <div class="relative flex h-full min-h-0 w-full flex-col items-center justify-center overflow-hidden">
-	<div bind:this={host} class="absolute inset-0" role="img" aria-label="Jarvis status orb: {label}">
+	<div bind:this={host} class="absolute inset-0" role="img" aria-label="{persona.name} status orb: {label}">
 		{#if fallback}
 			<div class="grid h-full place-items-center">
 				<div
 					class="aspect-square h-[46%] rounded-full motion-safe:animate-[fallback-breathe_5s_ease-in-out_infinite]"
-					style="background:radial-gradient(circle at 50% 42%, #c9f8ff 0%, #22d3ee 28%, #0a3f86 62%, transparent 72%);box-shadow:0 0 90px 24px rgb(34 211 238 / .35)"
+					style="background:radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--persona-orb-core) 60%, white) 0%, var(--persona-orb-core) 28%, color-mix(in srgb, var(--persona-orb-glow) 50%, black) 62%, transparent 72%);box-shadow:0 0 90px 24px color-mix(in srgb, var(--persona-orb-glow) 35%, transparent)"
 				></div>
 			</div>
 		{/if}
@@ -76,6 +84,7 @@
 
 	<!-- HUD readouts: real data only. -->
 	<dl class="num pointer-events-none absolute top-2 left-3 hidden text-2xs leading-relaxed tracking-wider text-faint uppercase sm:block">
+		<div class="flex gap-2"><dt>Persona</dt><dd class="text-mute normal-case" data-testid="orb-persona">{persona.name}</dd></div>
 		<div class="flex gap-2"><dt>Core</dt><dd class="text-mute">{orb.state}</dd></div>
 		<div class="flex gap-2"><dt>Link</dt><dd class="text-mute">{backend.offline ? 'down' : status.data ? (status.data.bridge.connected ? 'up' : 'down') : '…'}</dd></div>
 	</dl>

@@ -6,15 +6,20 @@
  *   ?mock=live          LIVE mode + real account (banner, red badge)
  *   ?mock=bridge        API up, MT5 bridge down
  *   ?mock=offline       API unreachable
- *   ?mock=auth          sign-in required (any user + password, TOTP 123456)
+ *   ?mock=auth          sign-in required (any user + password, TOTP 123456; also needed for limits changes)
  *   ?mock=novoice       STT/TTS reported as unavailable
  *   ?mock=unknown       every execute ends in outcome_unknown
+ *   ?mock=settingsfail  saving settings fails (shows the optimistic rollback)
+ *   ?mock=staleconfig   the limits page is told a looser config than the gate enforces (shows server 422s)
  *   ?mock=ttl=4         confirmation window of 4 s instead of 15 s
  *   ?mock=reset         forget the remembered switches
  *
  * Chat: "close gold", "close all", "close buys", "close half of gold", "buy 0.1 gold sl 2300",
  * "cancel my pending orders". Messages containing "fail" return an llm_error.
  * Voice: the mock transcriber returns a scripted phrase; `window.__jarvisMock.say("...")` sets it.
+ * Hands-free (`/api/voice/transcribe?wake=1`): script "hey friday what's gold at" and the reply carries
+ * `wake` (and switches the persona); without a script the segment is ignored background speech.
+ * Settings, personas and limits are remembered for the browser session (tighten-only; TOTP 123456 with `auth`).
  */
 import {
 	ApiError,
@@ -33,7 +38,20 @@ import {
 	type VoiceIntent,
 	type WatchlistResponse
 } from './api';
-import { BAD_SYMBOL, book, pending, positions, round, seedBook, symbolFromText, tick } from './mock-market';
+import { book, pending, positions, round, seedBook, symbolFromText, tick } from './mock-market';
+import {
+	activePersona,
+	deleteLimits,
+	detectWake,
+	effectiveLimits,
+	getLimits,
+	getPersonas,
+	getSettings,
+	putLimits,
+	putSettings,
+	resolveSymbol,
+	setPersona
+} from './mock-settings';
 import {
 	assertWritable,
 	cancelOrdersPreview,
@@ -43,6 +61,7 @@ import {
 	confirm,
 	hasLivePreview,
 	killState,
+	emitMockEvent,
 	onMockEvent,
 	openPreview,
 	readback,
@@ -154,20 +173,34 @@ function status(): Status {
 			default: 'local',
 			providers: [
 				{ name: 'local', kind: 'ollama', model: 'qwen3.5:9b', available: true },
-				{ name: 'claude', kind: 'anthropic', model: 'claude-sonnet-5-5', available: false }
+				{ name: 'cloud', kind: 'openai', model: 'gpt-5', available: false }
 			]
 		},
 		kill_switch: killState(),
 		auth: { enabled: flag('auth'), username: s?.username ?? null },
 		voice: { stt: !flag('novoice'), tts: !flag('novoice') },
-		limits: {
-			max_lot: 1,
-			max_positions: 5,
-			max_daily_loss: 500,
-			allowed_symbols: ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'NAS100', 'BTCUSD'],
-			trading_hours: null
-		}
+		limits: effectiveLimits(),
+		persona: { id: activePersona().id, name: activePersona().name }
 	};
+}
+
+const PROVIDERS = [
+	{ name: 'local', available: true },
+	{ name: 'cloud', available: false }
+];
+
+/** Prices for the user's watchlist (aliases resolved); an entry the market doesn't know is reported, not fatal. */
+function watchlist(): WatchlistResponse {
+	const ticks = tick();
+	const prices: WatchlistResponse['prices'] = [];
+	const errors: WatchlistResponse['errors'] = [];
+	for (const entry of getSettings().watchlist) {
+		const symbol = resolveSymbol(entry);
+		const t = symbol ? ticks.find((p) => p.symbol === symbol) : undefined;
+		if (t) prices.push(t);
+		else errors.push({ symbol: entry, message: `unknown symbol: ${entry}` });
+	}
+	return { prices, errors };
 }
 
 const fmt = (v: number, d: number) =>
@@ -260,7 +293,8 @@ function chat(req: ChatRequest): ChatResponse {
 				reply: `I can't do that: ${e.message}.`,
 				provider: req.provider ?? 'local',
 				tool_calls: [{ name: 'propose_order', arguments: {}, ok: false, duration_ms: 8 }],
-				preview: null
+				preview: null,
+				persona: activePersona().id
 			};
 		}
 		throw e;
@@ -294,11 +328,20 @@ function chat(req: ChatRequest): ChatResponse {
 	}
 	return {
 		session_id: req.session_id ?? crypto.randomUUID(),
-		reply,
+		reply: inVoice(reply),
 		provider: req.provider ?? 'local',
 		tool_calls,
-		preview
+		preview,
+		persona: activePersona().id
 	};
+}
+
+/** Friday sounds friendlier; the content (numbers, previews, refusals) is identical. */
+function inVoice(reply: string): string {
+	if (activePersona().id !== 'friday') return reply;
+	return reply
+		.replace(/^Here is what I'd do:/, "Here's the plan:")
+		.replace(/Please review and confirm within the time shown\./, 'Take a look and confirm when you are ready.');
 }
 
 // ---- Voice -------------------------------------------------------------------
@@ -314,9 +357,17 @@ function classify(text: string): VoiceIntent {
 	return 'other';
 }
 
-async function transcribe(blob: Blob | undefined): Promise<TranscribeResponse> {
+async function transcribe(blob: Blob | undefined, wake: boolean): Promise<TranscribeResponse> {
 	const audio_ms = blob ? wavDurationMs(await blob.arrayBuffer()) : 0;
 	if (audio_ms > 30_500) throw new ApiError('bad_request', 'audio longer than 30 s', 400);
+	if (wake) {
+		// Hands-free: only scripted speech is "heard"; anything else is background noise.
+		const text = nextSpeech ?? 'mm-hm';
+		nextSpeech = null;
+		const w = detectWake(text);
+		if (w.detected && w.persona) setPersona(w.persona);
+		return { text, raw: text.toLowerCase(), audio_ms, elapsed_ms: 180, intent: classify(text), wake: w };
+	}
 	const text = nextSpeech ?? (hasLivePreview() ? 'confirm' : SCRIPT[scriptAt++ % SCRIPT.length]);
 	nextSpeech = null;
 	return { text, raw: text.toLowerCase(), audio_ms, elapsed_ms: 180, intent: classify(text) };
@@ -349,7 +400,7 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 	}
 	applyConfig();
 	await sleep(40 + Math.random() * 120, opts.signal);
-	if (flag('offline')) throw new ApiError('network', 'Cannot reach the Jarvis server');
+	if (flag('offline')) throw new ApiError('network', 'Cannot reach the Arc MT server');
 
 	// Auth: with ?mock=auth every route but login needs the mock session.
 	if (path === '/api/auth/login') return login(opts.body as LoginRequest) as T;
@@ -369,6 +420,34 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 	}
 
 	if (path === '/api/status') return status() as T;
+	if (path === '/api/personas') return getPersonas() as T;
+	if (path === '/api/settings') {
+		if (opts.method !== 'PUT') return getSettings() as T;
+		if (flag('settingsfail')) throw new ApiError('internal', 'settings could not be saved (mock)', 500);
+		const { settings, changed } = putSettings(opts.body, PROVIDERS);
+		if (changed) emitMockEvent({ type: 'settings_changed' });
+		return settings as T;
+	}
+	if (path === '/api/settings/limits') {
+		if (opts.method === 'PUT' || opts.method === 'DELETE') {
+			const b = (opts.body ?? {}) as { totp?: string };
+			// Like the server: a code is required only when login is on.
+			const checkCode = () => {
+				if (flag('auth') && b.totp !== MOCK_TOTP) throw new ApiError('unauthorized', 'code not accepted', 401);
+			};
+			let res;
+			if (opts.method === 'PUT') res = putLimits(opts.body, checkCode);
+			else {
+				checkCode();
+				res = deleteLimits();
+			}
+			emitMockEvent({ type: 'settings_changed' });
+			return res as T;
+		}
+		const res = getLimits();
+		if (flag('staleconfig')) res.config.max_lot = 2;
+		return res as T;
+	}
 	if (path === '/api/killswitch' && opts.method !== 'POST') return killState() as T;
 	if (path === '/api/killswitch') {
 		const b = opts.body as { engaged: boolean; reason?: string; totp?: string };
@@ -382,11 +461,7 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 	if (path === '/api/account') return account() as T;
 	if (path === '/api/positions') return { positions: positions() } satisfies PositionsResponse as T;
 	if (path === '/api/orders') return { orders: pending.map((o) => ({ ...o })) } satisfies OrdersResponse as T;
-	if (path === '/api/watchlist')
-		return {
-			prices: tick(),
-			errors: [{ symbol: BAD_SYMBOL, message: `unknown symbol: ${BAD_SYMBOL}` }]
-		} satisfies WatchlistResponse as T;
+	if (path === '/api/watchlist') return watchlist() as T;
 
 	if (path === '/api/chat') {
 		const req = opts.body as ChatRequest;
@@ -426,14 +501,17 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 
 	if (path === '/api/audit' || path.startsWith('/api/audit?')) return audit(path) as T;
 
-	if (path === '/api/voice/transcribe') {
+	if (path === '/api/voice/transcribe' || path === '/api/voice/transcribe?wake=1') {
 		if (flag('novoice')) throw new ApiError('voice_unavailable', 'voice is disabled', 503);
 		await sleep(350, opts.signal);
-		return (await transcribe(opts.blob)) as T;
+		return (await transcribe(opts.blob, path.endsWith('wake=1'))) as T;
 	}
 	if (path === '/api/voice/speak') {
 		if (flag('novoice')) throw new ApiError('voice_unavailable', 'voice is disabled', 503);
-		const text = (opts.body as { text?: string } | undefined)?.text ?? '';
+		const body = opts.body as { text?: string; persona?: string } | undefined;
+		const text = body?.text ?? '';
+		if (body?.persona && !getPersonas().personas.some((p) => p.id === body.persona))
+			throw new ApiError('bad_request', `unknown persona: ${body.persona}`, 400);
 		if (text.length === 0 || text.length > 600)
 			throw new ApiError('bad_request', 'text must be 1-600 characters', 400);
 		await sleep(200, opts.signal);

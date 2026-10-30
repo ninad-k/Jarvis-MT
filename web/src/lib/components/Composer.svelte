@@ -4,6 +4,8 @@
 	import { sendTurn } from '#lib/state/turn.svelte.ts';
 	import { voice } from '#lib/state/voice.svelte.ts';
 	import { primeAudio } from '#lib/voice/audio.ts';
+	import { persona } from '#lib/state/persona.svelte.ts';
+	import HandsFreeBar from './HandsFreeBar.svelte';
 	import MicButton from './MicButton.svelte';
 
 	let text = $state('');
@@ -53,9 +55,10 @@
 		void submit();
 	}}
 >
+	<HandsFreeBar />
 	<div class="mx-auto flex max-w-3xl items-end gap-2">
 		<div class="relative min-w-0 flex-1">
-			<label for="chat-input" class="sr-only">Message Jarvis</label>
+			<label for="chat-input" class="sr-only">Message {persona.name}</label>
 			<textarea
 				id="chat-input"
 				bind:this={input}
@@ -66,10 +69,10 @@
 				maxlength={MAX_MESSAGE}
 				disabled={chat.pending}
 				placeholder={chat.pending
-					? 'Jarvis is thinking…'
+					? `${persona.name} is thinking…`
 					: backend.offline
 						? 'Backend offline'
-						: 'Message Jarvis…'}
+						: `Message ${persona.name}…`}
 				enterkeyhint="send"
 				autocomplete="off"
 				class="block max-h-32 min-h-10 w-full resize-none border border-line-hi bg-void/70 px-3 py-2 text-base text-ink placeholder:text-faint focus-visible:border-accent focus-visible:outline-none disabled:opacity-60 sm:text-sm"

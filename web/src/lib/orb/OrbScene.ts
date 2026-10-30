@@ -21,7 +21,9 @@ import {
 	SphereGeometry,
 	WebGLRenderer
 } from 'three';
+import type { PersonaTheme } from '#lib/api.ts';
 import type { OrbState } from '#lib/state/orb.svelte.ts';
+import { DEFAULT_THEME, orbPalette, type OrbColors } from '#lib/theme.ts';
 import {
 	CORE_FRAG,
 	CORE_VERT,
@@ -37,8 +39,6 @@ import {
 ColorManagement.enabled = false;
 
 interface Params {
-	a: string;
-	b: string;
 	energy: number;
 	swirl: number;
 	disp: number;
@@ -49,31 +49,31 @@ interface Params {
 	flash: number;
 }
 
-/** Target look per state; the scene eases toward these every frame. */
+/** Target motion per state; the scene eases toward these every frame. Colours come from the persona palette. */
 const PRESETS: Record<OrbState, Params> = {
 	idle: {
-		a: '#22d3ee', b: '#0a3f86', energy: 1.0, swirl: 0.3, disp: 0.045, rim: 1.0,
+		energy: 1.0, swirl: 0.3, disp: 0.045, rim: 1.0,
 		ripple: 0, breathe: 0.035, halo: 0.55, flash: 0
 	},
 	listening: {
-		a: '#67f0ff', b: '#0b7aa6', energy: 1.45, swirl: 0.7, disp: 0.07, rim: 1.35,
+		energy: 1.45, swirl: 0.7, disp: 0.07, rim: 1.35,
 		ripple: 1, breathe: 0.05, halo: 0.85, flash: 0
 	},
 	thinking: {
-		a: '#9b7bff', b: '#f59e0b', energy: 1.25, swirl: 2.1, disp: 0.12, rim: 1.15,
+		energy: 1.25, swirl: 2.1, disp: 0.12, rim: 1.15,
 		ripple: 0, breathe: 0.02, halo: 0.7, flash: 0
 	},
 	speaking: {
-		a: '#3be8ff', b: '#12b8a0', energy: 1.3, swirl: 0.9, disp: 0.08, rim: 1.25,
+		energy: 1.3, swirl: 0.9, disp: 0.08, rim: 1.25,
 		ripple: 0, breathe: 0.02, halo: 0.8, flash: 0
 	},
 	error: {
-		a: '#ff4d5e', b: '#6b0f1e', energy: 1.1, swirl: 0.5, disp: 0.09, rim: 1.2,
+		energy: 1.1, swirl: 0.5, disp: 0.09, rim: 1.2,
 		ripple: 0, breathe: 0.03, halo: 0.75, flash: 1
 	}
 };
 
-type NumKey = Exclude<keyof Params, 'a' | 'b'>;
+type NumKey = keyof Params;
 const NUM_KEYS: NumKey[] = [
 	'energy', 'swirl', 'disp', 'rim', 'ripple', 'breathe', 'halo', 'flash'
 ];
@@ -99,10 +99,12 @@ export class OrbScene {
 	private readonly ringGroup = new Group();
 	private readonly motes: Points;
 
-	private readonly colorA = new Color(PRESETS.idle.a);
-	private readonly colorB = new Color(PRESETS.idle.b);
-	private readonly targetA = new Color(PRESETS.idle.a);
-	private readonly targetB = new Color(PRESETS.idle.b);
+	private palette = orbPalette(DEFAULT_THEME);
+	private state: OrbState = 'idle';
+	private readonly colorA = new Color(this.palette.idle.a);
+	private readonly colorB = new Color(this.palette.idle.b);
+	private readonly targetA = new Color(this.palette.idle.a);
+	private readonly targetB = new Color(this.palette.idle.b);
 	private readonly cur: Record<NumKey, number> = { ...numeric(PRESETS.idle) };
 	private target: Params = PRESETS.idle;
 	private amp = 0;
@@ -304,9 +306,26 @@ export class OrbScene {
 	}
 
 	setState(state: OrbState): void {
+		this.state = state;
 		this.target = PRESETS[state];
-		this.targetA.set(this.target.a);
-		this.targetB.set(this.target.b);
+		this.retarget();
+	}
+
+	/** New persona colours: the orb eases to them like it eases between states. */
+	setTheme(theme: PersonaTheme): void {
+		this.palette = orbPalette(theme);
+		this.retarget();
+	}
+
+	/** The colours the scene is heading for (tests and debugging). */
+	get targetColors(): OrbColors {
+		return { a: `#${this.targetA.getHexString()}`, b: `#${this.targetB.getHexString()}` };
+	}
+
+	private retarget(): void {
+		const c = this.palette[this.state];
+		this.targetA.set(c.a);
+		this.targetB.set(c.b);
 		if (this.reduced) {
 			this.snap();
 			this.renderOnce();

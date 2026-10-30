@@ -1,4 +1,4 @@
-# Jarvis MT web HUD
+# Arc MT web HUD
 
 SvelteKit 2 / Svelte 5 (runes) single-page app, TypeScript strict, Tailwind 4, a Three.js orb.
 The build is static files (`build/`) that the Rust server (`jarvis-api`) serves.
@@ -29,6 +29,9 @@ pnpm icons             # regenerate static/icons/*.png (only when the artwork ch
 | WebSocket events with back-off | `lib/state/events.svelte.ts`, `lib/backoff.ts` |
 | Audit log | `routes/audit` |
 | PWA: manifest, icons, service worker, offline page | `static/manifest.webmanifest`, `static/icons`, `static/offline.html`, `src/service-worker` |
+| Personas: toggle in the top bar, name in the UI, theme as CSS custom properties, orb colours | `lib/components/PersonaToggle.svelte`, `lib/state/persona.svelte.ts`, `lib/theme.ts`, `routes/layout.css`, `lib/orb/OrbScene.ts` |
+| Settings page (`/settings`): persona, voice, model, watchlist, aliases, tighten-only limits, unsaved-changes guard | `routes/settings`, `lib/components/settings/*`, `lib/state/settings.svelte.ts`, `lib/settings-rules.ts` |
+| Hands-free (wake word): in-browser voice detector, segment upload, routing | `lib/voice/vad-core.js` (AudioWorklet), `lib/voice/listener.ts`, `lib/voice/wake.ts`, `lib/state/handsfree.svelte.ts`, `lib/components/HandsFreeBar.svelte` |
 
 ## Safety rules the UI keeps
 
@@ -40,6 +43,23 @@ pnpm icons             # regenerate static/icons/*.png (only when the artwork ch
 - Write controls are disabled while the kill switch is engaged, the bridge is disconnected, or the
   server is unreachable.
 - The service worker caches the app shell only and never touches `/api/*`.
+
+## Personas and settings
+
+- The assistant's name in the UI (transcript, status text, placeholders) is the active persona's name. The persona
+  list comes from `GET /api/personas`, so a new pack in `personas/` shows up without a web change. Two personas
+  render as a segmented toggle, more as a dropdown. The toggle is disabled while a confirmation is open.
+- Colours: `applyTheme()` writes `--persona-accent`, `--persona-accent-soft`, `--persona-orb-core` and
+  `--persona-orb-glow` on `<html>`; `layout.css` registers them as `<color>` so the change animates (400 ms, instant
+  under reduced motion) and maps `--color-accent` / `--color-accent-dim` onto them. Values are validated as
+  `#rrggbb` and the accent is lifted to 4.5:1 contrast if a pack is too dark. The red LIVE banner, the red batch
+  confirmation and the error orb do not follow the persona.
+- Hands-free: set Voice, Input mode to "Hands-free (wake word)", then press Start listening on the main screen. The
+  detector runs in an AudioWorklet (speech starts after 60 ms of voice, ends after 700 ms of quiet, at least 400 ms of
+  speech, at most 8 s). Each segment goes to `POST /api/voice/transcribe?wake=1`; only a segment with a wake phrase is
+  acted on. It pauses while a reply is read aloud. With a confirmation open it honours "cancel" and
+  "<wake phrase>, confirm" only.
+- Settings are saved per section. Limits can only be tightened (the server refuses anything looser).
 
 ## Keyboard
 
@@ -65,11 +85,15 @@ comma-separated list and are remembered for the browser session (`?mock=reset` c
 | `novoice` | speech-to-text and text-to-speech reported as unavailable |
 | `unknown` | every execute ends in `outcome_unknown` |
 | `ttl=4` | confirmation window of 4 s instead of 15 s |
+| `settingsfail` | saving settings fails (shows the optimistic rollback) |
+| `staleconfig` | the limits page is told a looser config than the gate enforces (shows a server 422 inline) |
 
 Things to type: `close gold`, `close all`, `close buys`, `close 884201552`, `buy 0.1 gold sl 2300 tp 2420`,
 `cancel my pending orders`, `buy 5 gold` (rejected by the gate). Closing the NAS100 position fails with
 "Market is closed" to show a partial result. `window.__jarvisMock.say("confirm")` sets what the mock
-transcriber returns for the next recording.
+transcriber returns for the next recording. In hands-free mode (`?wake=1`) only scripted speech counts, for example
+`say("hey friday what's gold at")`; anything else is ignored background speech. Personas, settings and limit overrides
+are remembered for the browser session; the limits code is `123456` when `auth` is on.
 
 ## Server contract assumptions
 

@@ -3,6 +3,7 @@
 	import BridgeChip from './BridgeChip.svelte';
 	import KillSwitch from './KillSwitch.svelte';
 	import MainMenu from './MainMenu.svelte';
+	import PersonaToggle from './PersonaToggle.svelte';
 	import ProviderSelect from './ProviderSelect.svelte';
 	import { killSwitch } from '#lib/state/killswitch.svelte.ts';
 
@@ -31,12 +32,12 @@
 <header
 	class="relative z-20 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b border-line bg-deck/80 px-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-2 backdrop-blur sm:flex sm:gap-x-4"
 >
-	<div class="flex min-w-0 items-center gap-3 max-sm:col-span-2 sm:mr-auto">
+	<div class="flex min-w-0 items-center gap-3 sm:mr-auto">
 		<h1 class="flex items-center gap-2 font-mono text-sm font-semibold tracking-[0.28em] whitespace-nowrap">
 			<span class="grid size-5 place-items-center rounded-full border border-accent/70" aria-hidden="true">
-				<span class="size-2 rounded-full bg-accent shadow-[0_0_8px_2px_rgb(34_211_238/0.7)]"></span>
+				<span class="size-2 rounded-full bg-accent shadow-[0_0_8px_2px_color-mix(in_srgb,var(--color-accent)_70%,transparent)]"></span>
 			</span>
-			JARVIS<span class="text-accent"> MT</span>
+			ARC<span class="text-accent"> MT</span>
 		</h1>
 		{#if mode}
 			<span
@@ -49,9 +50,26 @@
 		{/if}
 	</div>
 
+	<PersonaToggle />
+
 	<div class="flex items-center gap-2 max-sm:order-3">
 		<BridgeChip />
 		<KillSwitch />
+		<a
+			href="/settings"
+			data-testid="settings-link"
+			aria-label="Settings"
+			title="Settings"
+			class="grid size-7 place-items-center border border-line bg-panel/70 text-mute transition-colors hover:border-accent hover:text-ink"
+		>
+			<svg viewBox="0 0 24 24" class="size-3.5" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+				<circle cx="12" cy="12" r="3" />
+				<path
+					d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"
+					stroke-linejoin="round"
+				/>
+			</svg>
+		</a>
 		<MainMenu />
 	</div>
 	<ProviderSelect class="max-sm:order-2" />
