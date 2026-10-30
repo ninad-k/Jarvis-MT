@@ -8,9 +8,6 @@
 //! - [`KillSwitch`] blocks every write instantly (rule 6).
 //! - [`intent`] is a deterministic parser for confirm/cancel and trading phrases
 //!   (English + Hinglish) used to cross-check what the LLM proposed (rule 9).
-//!
-//! CONTRACT STUB: public types and signatures are fixed; bodies are implemented in
-//! the Sprint 2 gate task.
 
 pub mod intent;
 mod killswitch;

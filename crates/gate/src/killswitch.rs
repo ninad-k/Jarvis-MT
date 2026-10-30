@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,21 +37,32 @@ impl KillSwitch {
     pub fn engage(&self, reason: impl Into<String>, now_ms: i64) {
         self.engaged.store(true, Ordering::SeqCst);
         if let Ok(mut d) = self.detail.lock() {
-            *d = KillSwitchState { engaged: true, reason: Some(reason.into()), changed_at_ms: Some(now_ms) };
+            *d = KillSwitchState {
+                engaged: true,
+                reason: Some(reason.into()),
+                changed_at_ms: Some(now_ms),
+            };
         }
     }
 
     pub fn release(&self, now_ms: i64) {
         self.engaged.store(false, Ordering::SeqCst);
         if let Ok(mut d) = self.detail.lock() {
-            *d = KillSwitchState { engaged: false, reason: None, changed_at_ms: Some(now_ms) };
+            *d = KillSwitchState {
+                engaged: false,
+                reason: None,
+                changed_at_ms: Some(now_ms),
+            };
         }
     }
 
     pub fn state(&self) -> KillSwitchState {
-        self.detail.lock().map(|d| d.clone()).unwrap_or_else(|_| KillSwitchState {
-            engaged: self.is_engaged(),
-            ..Default::default()
-        })
+        self.detail
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_else(|_| KillSwitchState {
+                engaged: self.is_engaged(),
+                ..Default::default()
+            })
     }
 }
