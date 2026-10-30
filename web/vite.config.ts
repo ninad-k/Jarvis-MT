@@ -9,7 +9,10 @@ const API_TARGET = 'http://127.0.0.1:8787';
 export default defineConfig({
 	build: {
 		// three.js is lazy-loaded (dynamic import in Orb.svelte), so its ~550 kB chunk is expected.
-		chunkSizeWarningLimit: 700
+		chunkSizeWarningLimit: 700,
+		// Never inline fonts as data: URLs. The server's CSP allows fonts from 'self' only,
+		// so an inlined font would be blocked; emit them as files instead.
+		assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf|eot)$/i.test(file) ? false : undefined)
 	},
 	plugins: [
 		tailwindcss(),
