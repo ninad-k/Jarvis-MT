@@ -1,0 +1,16 @@
+[package]
+name = "jarvis-gate"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+jarvis-bridge-client = { version = "0.1.0", path = "../bridge-client" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+uuid = { version = "1.26.1", features = ["v4", "serde"] }

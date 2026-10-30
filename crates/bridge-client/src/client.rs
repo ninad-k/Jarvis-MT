@@ -18,7 +18,9 @@ use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
 use crate::error::BridgeError;
 use crate::protocol::{
-    Account, Command, History, HistoryQuery, Orders, PingInfo, Positions, Price, Reply, Request,
+    Account, Command, History, HistoryQuery, OrderCancelArgs, OrderSendArgs, Orders, PingInfo,
+    PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs, Positions, Price, Reply,
+    Request, SymbolInfo, TradeResult,
 };
 
 /// Calls that may wait for the actor at the same time before `call` starts to back-pressure.
@@ -124,6 +126,41 @@ impl BridgeClient {
 
     pub async fn get_history(&self, query: HistoryQuery) -> Result<History, BridgeError> {
         self.call(Command::GetHistory(query)).await
+    }
+
+    pub async fn get_symbol(&self, symbol: &str) -> Result<SymbolInfo, BridgeError> {
+        self.call(Command::GetSymbol { symbol: symbol.to_owned() }).await
+    }
+
+    // ---- Write commands. Callers must only use these after a confirmed gate
+    // ---- preview. A failed trade (`ok:false`) comes back as `BridgeError::Remote`
+    // ---- with the MT5 trade retcode; a `Timeout` after sending means the outcome
+    // ---- is UNKNOWN and must be reconciled by reading positions, never retried.
+
+    pub async fn order_send(&self, args: OrderSendArgs) -> Result<TradeResult, BridgeError> {
+        self.call(Command::OrderSend(args)).await
+    }
+
+    pub async fn position_modify(
+        &self,
+        args: PositionModifyArgs,
+    ) -> Result<TradeResult, BridgeError> {
+        self.call(Command::PositionModify(args)).await
+    }
+
+    pub async fn position_close(&self, args: PositionCloseArgs) -> Result<TradeResult, BridgeError> {
+        self.call(Command::PositionClose(args)).await
+    }
+
+    pub async fn position_close_partial(
+        &self,
+        args: PositionClosePartialArgs,
+    ) -> Result<TradeResult, BridgeError> {
+        self.call(Command::PositionClosePartial(args)).await
+    }
+
+    pub async fn order_cancel(&self, args: OrderCancelArgs) -> Result<TradeResult, BridgeError> {
+        self.call(Command::OrderCancel(args)).await
     }
 }
 

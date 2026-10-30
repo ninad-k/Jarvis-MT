@@ -41,3 +41,11 @@ web/playwright-report/
 # MQL5 build output
 *.ex5
 *.log
+
+# local models (voice)
+/models/
+# TLS material
+/certs/
+*.pem
+*.key
+/target-*/

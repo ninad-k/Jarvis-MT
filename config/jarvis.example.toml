@@ -7,6 +7,11 @@ mode = "demo"
 
 [server]
 bind = "127.0.0.1:8787"
+# Serve the built web UI from the API (pnpm -C web build). Comment out for dev.
+# static_dir = "web/build"
+# HTTPS/WSS. Required (with auth) to bind anything other than loopback.
+# tls_cert = "certs/jarvis.crt"
+# tls_key = "certs/jarvis.key"
 
 [bridge]
 # The EA binds here. Must be loopback.
@@ -63,3 +68,38 @@ name = "openai"
 kind = "openai"
 model = "gpt-5"                 # set to the model your key can use
 api_key_env = "OPENAI_API_KEY"
+
+# ---- Trading (Sprint 2). Every limit is checked before a preview is shown. ----
+[limits]
+max_lot = 1.0                 # per order, and per batch total
+max_positions = 5             # open positions + pending orders after a new order
+max_daily_loss = 500.0        # account currency; new orders blocked at -500 today
+allowed_symbols = ["XAUUSD", "XAGUSD", "USTEC", "US30", "US500", "EURUSD", "GBPUSD", "BTCUSD"]
+
+# New orders only inside this window (broker server time). Remove to allow any time.
+[limits.trading_hours]
+days = ["mon", "tue", "wed", "thu", "fri"]
+start = "00:05"
+end = "23:55"
+
+[trading]
+token_ttl_secs = 15           # confirm window
+voice_token_cap_secs = 30     # voice: window starts after read-back, never beyond this
+deviation_points = 20         # max slippage for market orders
+kill_switch_engaged = false   # start with trading disabled
+
+# ---- Login (Sprint 4). Create a user with: cargo run -p jarvis-api -- user add <name>
+# The JWT secret comes from env JARVIS_JWT_SECRET (see .env.example).
+[auth]
+enabled = true
+session_hours = 12
+
+# ---- Voice (Sprint 3). Fetch models with: pwsh scripts/fetch-models.ps1 ----
+[voice]
+enabled = true
+whisper_model = "models/whisper/ggml-base.en.bin"
+language = "en"
+threads = 4
+piper_exe = "models/piper/piper.exe"
+piper_voice = "models/piper/en_US-lessac-medium.onnx"
+max_seconds = 30

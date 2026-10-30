@@ -44,6 +44,20 @@ pub enum Command {
         symbol: Option<String>,
     },
     GetHistory(HistoryQuery),
+    /// Trading specification of one symbol (lot step, tick value, stops level...).
+    GetSymbol {
+        symbol: String,
+    },
+
+    // ---- Write commands (Sprint 2). Only `gate`-approved, user-confirmed requests
+    // ---- may produce these. The EA refuses them on real accounts unless its
+    // ---- `InpAllowReal` input is true, and caches replies by request `id` so a
+    // ---- resent id never executes twice.
+    OrderSend(OrderSendArgs),
+    PositionModify(PositionModifyArgs),
+    PositionClose(PositionCloseArgs),
+    PositionClosePartial(PositionClosePartialArgs),
+    OrderCancel(OrderCancelArgs),
 }
 
 impl Command {
@@ -56,8 +70,142 @@ impl Command {
             Command::GetPositions { .. } => "get_positions",
             Command::GetOrders { .. } => "get_orders",
             Command::GetHistory(_) => "get_history",
+            Command::GetSymbol { .. } => "get_symbol",
+            Command::OrderSend(_) => "order_send",
+            Command::PositionModify(_) => "position_modify",
+            Command::PositionClose(_) => "position_close",
+            Command::PositionClosePartial(_) => "position_close_partial",
+            Command::OrderCancel(_) => "order_cancel",
         }
     }
+
+    /// True for commands that change account state. These are never retried.
+    pub fn is_write(&self) -> bool {
+        matches!(
+            self,
+            Command::OrderSend(_)
+                | Command::PositionModify(_)
+                | Command::PositionClose(_)
+                | Command::PositionClosePartial(_)
+                | Command::OrderCancel(_)
+        )
+    }
+}
+
+/// Magic number stamped on every order Jarvis sends, so its trades are identifiable.
+pub const JARVIS_MAGIC: i64 = 770_077;
+
+/// MT5 trade retcodes that mean the request succeeded.
+pub const TRADE_RETCODE_PLACED: i64 = 10008;
+pub const TRADE_RETCODE_DONE: i64 = 10009;
+pub const TRADE_RETCODE_DONE_PARTIAL: i64 = 10010;
+/// Retcode the EA uses when it refuses a write (real account without `InpAllowReal`,
+/// trading disabled in the terminal, etc.).
+pub const RETCODE_WRITE_REFUSED: i64 = -3;
+
+/// How a new order is placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecType {
+    /// Market execution at the current price.
+    Market,
+    /// Pending limit order at `price`.
+    Limit,
+    /// Pending stop order at `price`.
+    Stop,
+}
+
+/// `order_send` arguments. Volume must already be rounded to the symbol's
+/// `volume_step` and prices to its `digits` (the EA re-validates and rejects otherwise).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderSendArgs {
+    pub symbol: String,
+    pub side: Side,
+    pub volume: f64,
+    #[serde(rename = "type")]
+    pub exec: ExecType,
+    /// Required for `limit`/`stop`, must be absent for `market`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sl: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tp: Option<f64>,
+    /// Max slippage for market orders, in points. EA default 20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deviation_points: Option<u32>,
+    pub magic: i64,
+    /// Max 31 chars (MT5 limit), e.g. `"jarvis:3f9a2c1d"`.
+    pub comment: String,
+}
+
+/// `position_modify` arguments. A field that is absent keeps the current value;
+/// `0` removes the SL/TP. At least one of `sl`/`tp` must be present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PositionModifyArgs {
+    pub ticket: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sl: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tp: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PositionCloseArgs {
+    pub ticket: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deviation_points: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PositionClosePartialArgs {
+    pub ticket: u64,
+    /// Volume to close; must be less than the position volume and a multiple of `volume_step`.
+    pub volume: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deviation_points: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderCancelArgs {
+    pub ticket: u64,
+}
+
+/// Reply data of every write command. The envelope `retcode` equals `retcode` here;
+/// `ok` is true only for 10008/10009/10010.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TradeResult {
+    pub retcode: i64,
+    /// `TradeResultRetcodeDescription()`-style text, e.g. "done".
+    pub retcode_description: String,
+    /// Order ticket created or affected (0 if none).
+    pub order: u64,
+    /// Deal ticket (0 if none, e.g. pending order placed).
+    pub deal: u64,
+    pub volume: f64,
+    pub price: f64,
+    pub comment: String,
+}
+
+/// `get_symbol` reply data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SymbolInfo {
+    pub symbol: String,
+    pub description: String,
+    pub digits: u32,
+    pub point: f64,
+    pub volume_min: f64,
+    pub volume_max: f64,
+    pub volume_step: f64,
+    pub contract_size: f64,
+    /// Account-currency value of one `tick_size` move for 1.0 lot.
+    pub tick_value: f64,
+    pub tick_size: f64,
+    /// Minimum SL/TP distance from price, in points.
+    pub stops_level: i64,
+    /// False when the symbol is close-only or disabled for trading.
+    pub trade_allowed: bool,
+    pub currency_profit: String,
 }
 
 /// Arguments of `get_history`. Times are Unix seconds (server time as MT5 reports it).

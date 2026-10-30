@@ -437,6 +437,17 @@ fn handle(state: &MockState, payload: &[u8]) -> Reply {
     };
 
     match request.command {
+        // CONTRACT STUB (Sprint 2): implemented by the bridge-writes task.
+        Command::GetSymbol { .. }
+        | Command::OrderSend(_)
+        | Command::PositionModify(_)
+        | Command::PositionClose(_)
+        | Command::PositionClosePartial(_)
+        | Command::OrderCancel(_) => err_reply(
+            id,
+            RETCODE_UNKNOWN_COMMAND,
+            "not implemented in the mock yet",
+        ),
         Command::Ping {} => ok_reply(id, &state.ping),
         Command::GetAccount {} => ok_reply(id, &state.account),
         Command::GetPrice { symbol } => match state.prices.iter().find(|p| p.symbol == symbol) {
