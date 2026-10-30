@@ -941,3 +941,117 @@ async fn mock_answers_malformed_and_unknown_requests_with_error_replies() {
         assert!(reply["error"].as_str().is_some_and(|e| !e.is_empty()));
     }
 }
+
+// ---- write priority (audit finding TRD-1) -----------------------------------------------------
+
+/// A server that answers every authentic request after `delay` and records the command names in
+/// the order it saw them.
+async fn slow_recording_server(
+    key: BridgeKey,
+    delay: Duration,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut socket = RepSocket::new();
+    let endpoint = socket.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+    let log = seen.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok(request) = socket.recv().await else {
+                continue;
+            };
+            let Ok(payload) = auth::open(&key, &request) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_slice::<Value>(payload) else {
+                continue;
+            };
+            log.lock()
+                .unwrap()
+                .push(json["cmd"].as_str().unwrap_or("?").to_owned());
+            tokio::time::sleep(delay).await;
+            let reply = serde_json::json!({
+                "id": json["id"], "ok": true, "data": {}, "retcode": 0
+            });
+            let _ = socket
+                .send(auth::seal(&key, serde_json::to_vec(&reply).unwrap()))
+                .await;
+        }
+    });
+    (endpoint, seen, task)
+}
+
+#[tokio::test]
+async fn a_queued_write_goes_before_the_reads_queued_ahead_of_it() {
+    use jarvis_bridge_client::protocol::{Command, OrderCancelArgs};
+
+    let key = new_key();
+    let (endpoint, seen, server) =
+        slow_recording_server(key.clone(), Duration::from_millis(150)).await;
+    let client = BridgeClient::new(BridgeConfig::new(&endpoint, Duration::from_secs(5), key))
+        .expect("client");
+
+    // One read is in flight (the server is still thinking about it) and two more wait behind
+    // it; then the write arrives.
+    let mut tasks = JoinSet::new();
+    for _ in 0..3 {
+        let c = client.clone();
+        tasks.spawn(async move {
+            c.call::<Value>(Command::GetPositions { symbol: None })
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let writer = client.clone();
+    let write = tokio::spawn(async move {
+        writer
+            .call::<Value>(Command::OrderCancel(OrderCancelArgs { ticket: 1 }))
+            .await
+    });
+    write.await.unwrap().expect("the write is answered");
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap().expect("reads are still answered");
+    }
+    let order = seen.lock().unwrap().clone();
+    assert_eq!(
+        order,
+        [
+            "get_positions",
+            "order_cancel",
+            "get_positions",
+            "get_positions"
+        ],
+        "the write must overtake the two queued reads but not the exchange already in flight"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn reads_still_complete_when_writes_keep_arriving() {
+    use jarvis_bridge_client::protocol::{Command, OrderCancelArgs};
+
+    let (mock, client) = {
+        let mock = MockBridge::start().await;
+        let client = BridgeClient::new(mock.config(Duration::from_secs(5))).unwrap();
+        (mock, client)
+    };
+    let mut tasks = JoinSet::new();
+    for i in 0..6u64 {
+        let c = client.clone();
+        tasks.spawn(async move {
+            // Mixed traffic: every task issues a read, a write, then a read.
+            c.get_positions(None).await.expect("read");
+            let _ = c
+                .call::<Value>(Command::OrderCancel(OrderCancelArgs { ticket: 9_000 + i }))
+                .await;
+            c.get_orders(None).await.expect("read");
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.expect("task");
+    }
+    assert_eq!(mock.request_count(), 6 * 3);
+}

@@ -924,6 +924,12 @@ fn propose_error_message(e: &TradingError) -> String {
              proposed until it is released in the app."
                 .to_owned()
         }
+        TradingError::IntentMismatch(m) if m.explicit_request_needed => format!(
+            "Not proposed: the user's latest message does not ask for this ({m}). Do not try \
+             again with other arguments. Ask the user to state what they want in their own words \
+             (side, symbol and size for a trade; which positions for a close), and propose only \
+             after their next message does."
+        ),
         TradingError::IntentMismatch(m) => format!(
             "Not proposed: this contradicts what the user said ({m}). Ask the user a short \
              question to clarify what they want, and propose again only after they answer."

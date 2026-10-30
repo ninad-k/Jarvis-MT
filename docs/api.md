@@ -22,7 +22,7 @@ Errors use one shape everywhere:
 | `internal` | 500 | anything else (details only in server logs) |
 
 Added later (see below): `unauthorized` 401, `forbidden` 403, `not_found` 404 (also any
-unknown `/api/...` path), `method_not_allowed` 405, `payload_too_large` 413.
+unknown `/api/...` path), `method_not_allowed` 405, `request_timeout` 408, `payload_too_large` 413.
 
 ## GET /api/status
 
@@ -36,7 +36,7 @@ Health of every part. This endpoint never fails because the bridge is down; it r
   "bridge": {
     "connected": true,
     "latency_ms": 4,
-    "ea_version": "0.3.0",
+    "ea_version": "0.3.1",
     "protocol_version": 2,
     "trade_mode": "demo",
     "terminal_connected": true,
@@ -114,6 +114,10 @@ Response:
 ```
 
 - `message` must be 1–2000 characters.
+- At most `[server] chat_rate_limit_per_minute` (20) requests per minute for one login session
+  (per client address when login is off): the next one gets `429 rate_limited` with
+  `Retry-After`, before the body is read and without calling the model. A request that takes
+  longer than `[server] long_request_timeout_secs` (200 s) is stopped with `408 request_timeout`.
 - Session history stays in memory (lost on restart) and is capped at the last 40 messages.
 - Every turn writes audit rows: `utterance`, `tool_call`, `bridge_request`, `bridge_reply`, `assistant_reply`.
 
@@ -129,13 +133,14 @@ Everything above still holds. New error codes:
 | `forbidden` | 403 | WebSocket upgrade from a foreign `Origin` |
 | `not_found` | 404 | unknown `/api/...` path (after the session check, so an unauthenticated client gets 401) |
 | `method_not_allowed` | 405 | wrong HTTP method for the path |
+| `request_timeout` | 408 | the request took longer than `[server] request_timeout_secs` (30 s), or `long_request_timeout_secs` (200 s) for `/api/chat`, `/api/voice/*` and `/api/confirm/*`; the WebSocket has no limit |
 | `payload_too_large` | 413 | body over the limit (64 KB for JSON routes, 5 MB for `/api/voice/transcribe`) |
-| `gate_rejected` | 422 | the gate refused to build a preview (message says which limit or why) |
+| `gate_rejected` | 422 | the gate refused to build a preview (message says which limit or why), **or refused a confirmed order when the checks ran again at confirmation** (see `POST /api/confirm/{token}`) |
 | `token_unknown` | 404 | confirmation token not found |
 | `token_expired` | 410 | confirmation token expired |
 | `token_used` | 409 | confirmation token already used or cancelled |
 | `kill_switch` | 423 | kill switch engaged; all write endpoints refuse |
-| `rate_limited` | 429 | too many requests (`Retry-After` header set) |
+| `rate_limited` | 429 | too many requests (`Retry-After` header set): login, confirm, `POST /api/chat` and `POST /api/voice/transcribe` have limits |
 | `voice_unavailable` | 503 | voice disabled or models missing |
 | `trade_failed` | 502 | MT5 rejected a write (message includes the trade retcode) |
 | `outcome_unknown` | 504 | bridge timed out after a write was sent; positions must be checked |
@@ -147,8 +152,8 @@ When `[auth] enabled = true` (the default), every `/api/*` route except `GET /ap
 The web UI itself (static files) is public: it has to load to show the login page.
 
 The session is a JWT (HS256; claims `sub`, `exp`, `iat`, `jti`; secret from env
-`JARVIS_JWT_SECRET`, at least 32 bytes — the server refuses to start with login enabled and no
-usable secret) in the cookie `jarvis_session`:
+`JARVIS_JWT_SECRET`, at least 32 bytes with at least 16 different byte values and no repeated
+block — the server refuses to start with login enabled and no usable secret) in the cookie `jarvis_session`:
 `Path=/; HttpOnly; SameSite=Strict; Max-Age=<session_hours>`, plus `Secure` when the server
 serves TLS itself (or `[auth] cookie_secure = true`, for a TLS-terminating proxy in front of a
 loopback port). The only case without `Secure` is plain HTTP on loopback during development.
@@ -162,7 +167,7 @@ for it):
 ```text
 jarvis-api user add <name>        # asks for the password twice (no echo), prints the otpauth:// URI and a QR code
 jarvis-api user add <name> --password-stdin   # for scripts: the password is the first line of stdin
-jarvis-api user reset-totp <name> # new authenticator secret; ends the user's sessions, clears a lockout
+jarvis-api user reset-totp <name> # new authenticator secret; ends the user's sessions, clears the kill-switch release lock
 jarvis-api user list
 jarvis-api user remove <name>     # sessions stop working at once
 ```
@@ -181,9 +186,14 @@ like `.env` (readable only by the account that runs Jarvis).
   `invalid username, password or code`; the real reason is only in the audit log
   (`login_failed`). A code is accepted for the current 30 s step and one step either side, and
   **never twice** (the last accepted step is remembered per user). Limits: 5 attempts per minute per
-  client IP (every attempt counts; the sixth gets `429 rate_limited` with `Retry-After`), and
-  an account locks for 15 minutes after 10 failed attempts. The IP is the TCP peer address;
-  `X-Forwarded-For` is not trusted, so behind a proxy every client shares one bucket.
+  client IP (every attempt counts; the sixth gets `429 rate_limited` with `Retry-After`).
+  Lockout is per **(account, client IP)**: 10 failed attempts from one address lock that address
+  out of that account for 15 minutes (answered with the same `401`), and nobody else is
+  affected, so a stranger who knows the name cannot lock the owner out. Failures from all
+  addresses together are counted per account as well; once 50 have been seen within 15 minutes,
+  every attempt on that account waits 2 s before it is looked at (a delay, never a lock). The
+  state is in memory and a restart clears it. The IP is the TCP peer address; `X-Forwarded-For`
+  is not trusted, so behind a proxy every client shares one bucket (and one lockout key).
 - `POST /api/auth/logout` → `204`, clears the cookie, and revokes the session's `jti` (kept in
   the database until the token would have expired, so a restart does not revive it).
 - `GET /api/auth/me` → `200 {username, expires_at}`; `401` when there is no valid session. When
@@ -248,7 +258,28 @@ ever sent to the browser, never to the LLM.
 - `POST /api/confirm/{token}` → one of:
   - `200 {"status":"executed","preview_id","results":[{"ticket","ok","retcode","retcode_description","order","deal","price","volume","error"}]}`
   - `200 {"status":"needs_second_confirmation","preview_id","token","stage":"second","expires_at_ms","count","message":"Confirm again to close 3 positions"}`
-  - errors `token_unknown` / `token_expired` / `token_used` / `kill_switch` / `rate_limited` / `outcome_unknown` / `trade_failed`.
+  - errors `token_unknown` / `token_expired` / `token_used` / `kill_switch` / `rate_limited` / `outcome_unknown` / `trade_failed`
+    / `gate_rejected`.
+  - **The checks run again at confirmation** (a preview is valid for 15 s, and the account and
+    the market move). Confirmed actions are sent one at a time, and each is checked under that
+    turn:
+    - a **new order** goes through the gate again with a fresh snapshot (limits, trading hours,
+      daily loss, `max_positions`, stops distance) and must produce the same order (symbol,
+      side, type, volume, price, SL, TP). If it fails, the answer is `422 gate_rejected` with a
+      message that starts "The checks were run again at confirmation", nothing is sent, the token
+      stays spent (a second confirm is `409 token_used`), and the audit log gets a
+      `gate_rejected` row with `reason: "re-check at confirm"` and the `rule` (for example
+      `limit:max_positions`). Example: two sessions each hold a preview that fits `max_positions`;
+      confirming the first succeeds and the second is refused. The order is never adjusted: if the
+      market moved so that SL or TP no longer fits the broker's minimum distance, it is refused;
+      if it still fits, the order that was confirmed is sent, with its own comment.
+    - a **close, cancel or modify** is not held to the limits (it reduces or keeps risk), only to
+      the kill switch and to its tickets still existing. If no ticket exists any more the answer
+      is `422 gate_rejected` (reason `re-check at confirm`, rule `ticket_gone`). In a batch, the
+      tickets that are gone are skipped and listed in `results` as `ok: false` with `error`
+      "not sent: position 123 no longer exists"; the rest is sent.
+    - If the checks cannot be run (the bridge fails while reading the account), the answer is the
+      bridge error, nothing is sent, and the token is spent.
   Rate limit: 10/min **per login session** (keyed by the token's `jti`, so two sessions of the same
   user have separate allowances; with auth disabled it is per client IP). Batch commands run
   sequentially; one failure does not stop the rest; each result is reported.
@@ -301,7 +332,8 @@ Audit kinds added: `intent`, `preview`, `gate_rejected`, `confirm`, `confirm_sec
   do not get one.
 - `login` rows carry `{username, ip, jti}` (and `event: "logout"` for a logout); `login_failed`
   rows carry `{username, ip, reason, locked_now}` with `reason` one of `unknown_user`,
-  `bad_password`, `bad_code`, `code_reused`, `locked`, `rate_limited`, `malformed`. Passwords and
+  `bad_password`, `bad_code`, `code_reused`, `locked` (this address is locked out of the account),
+  `rate_limited`, `malformed`. Passwords and
   TOTP codes are never written. `username` is the stored spelling of a real account; a name that
   belongs to nobody (and every `rate_limited` and `malformed` row) shows `<not recorded>`, because
   people type passwords into the name field. A flood of refused logins writes one `rate_limited`
@@ -312,6 +344,8 @@ Audit kinds added: `intent`, `preview`, `gate_rejected`, `confirm`, `confirm_sec
 
 ## Voice (Sprint 3)
 
+- `POST /api/voice/transcribe` is limited to `[server] transcribe_rate_limit_per_minute` (20)
+  requests per minute per session (`429` with `Retry-After`, checked before the body is read).
 - `POST /api/voice/transcribe` body `audio/wav` (`Content-Type: audio/wav`, 16-bit PCM, at most
   `voice.max_seconds` (30 s) and 5 MB) →
   `200 {"text","raw","audio_ms","elapsed_ms","intent":"confirm"|"cancel"|"other"}`.
@@ -364,7 +398,7 @@ make it faster.
 - Security headers on **every** response (API, static files, errors):
   - `Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-<inline bootstrap>';
     style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self'
-    blob:; font-src 'self'; connect-src 'self' wss:; worker-src 'self'; manifest-src 'self';
+    blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self';
     object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`.
     - SvelteKit's static build writes one inline `<script>` into `index.html`. At startup the
       server hashes every inline script in the HTML files under `static_dir` and lists the
@@ -372,12 +406,29 @@ make it faster.
       **rebuild the web UI, then restart the server** (the hashes are read once).
     - `style-src-attr 'unsafe-inline'` exists only because the SvelteKit wrapper element has a
       `style="display: contents"` attribute; `<style>` blocks are not allowed.
-    - `connect-src` has `wss:` with TLS and `ws:` without (plain HTTP is loopback only).
+    - `connect-src` is `'self'` and nothing else (CSP-1). In CSP level 3 `'self'` covers a
+      WebSocket to the same host and port (`ws:` from an `http:` page, `wss:` from an `https:`
+      one), which is what the live feed uses, in Chrome, Edge (so the desktop shell's WebView2)
+      and Firefox. The bare `ws:`/`wss:` that used to be listed let a script open a WebSocket to
+      any host; they were only for old Safari, which is not a supported browser. The header is not
+      built from the request's `Host`: it would only repeat what `'self'` already says.
   - `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
     `Permissions-Policy: microphone=(self), camera=(), geolocation=()`,
     `Cross-Origin-Opener-Policy: same-origin`, `X-Frame-Options: DENY`.
 - Request bodies: 64 KB for JSON routes (including login), 5 MB for `/api/voice/transcribe`;
   larger ones get `413 payload_too_large`.
+- Time and connection limits (NET-1, all in `[server]`, see [configuration.md](configuration.md#server)):
+  - `header_read_timeout_secs` (10): a client has this long to send the headers of a request. The
+    same clock closes a keep-alive connection that sits idle, and a TLS handshake has its own 10 s.
+    HTTP/2 (TLS only) is pinged every 20 s and a peer that does not answer within 10 s is dropped,
+    with at most 64 streams per connection.
+  - `request_timeout_secs` (30) for every route, and `long_request_timeout_secs` (200) for
+    `/api/chat`, `/api/voice/*` and `/api/confirm/*`. The limit covers the whole exchange up to the
+    response, a slow body upload included. A request that runs out is answered `408` in the
+    standard error shape (`request_timeout`). `GET /api/ws` has no limit: the upgrade is
+    answered at once, and an open socket is kept by pings (see Events). A confirmed trade keeps
+    running when its request is stopped; read `/api/positions` and the audit log.
+  - `max_connections` (256): another connection is closed before anything is read from it.
 - CORS is off. `[server] dev_origins` (default empty; for example `["http://localhost:5173"]`
   when a dev server calls the API directly) lists browser origins that may call the API with the
   session cookie. Anything listed can drive the whole API, so list only origins you control. The
@@ -404,8 +455,11 @@ make it faster.
   `--config <absolute config path> service run --workdir <current directory>`, so install it
   from the directory that holds `config/`, `data/`, `models/` and `.env`. `service uninstall`,
   `service start` and `service stop` do what they say. The service writes a daily rolling log
-  to `logs/jarvis-api.log.<date>` under the working directory. By default it runs as LocalSystem;
-  to use a dedicated account: `sc.exe config JarvisMT obj= ".\user" password= "..."`.
+  to `logs/jarvis-api.log.<date>` under the working directory. It runs as the virtual account
+  `NT SERVICE\JarvisMT` (SVC-1) and `install` prints the `icacls` commands that give it its
+  files; `service install --account <name>` picks another account (`--password-stdin` reads its
+  password) and `--local-system` restores LocalSystem, with a warning. See
+  [windows-service.md](windows-service.md).
 - Startup refuses: DEMO mode on a real account, login enabled with no usable `JARVIS_JWT_SECRET`,
   a non-loopback bind without TLS and login, and an unreadable TLS certificate or key. A bridge that
   is down, a missing voice model or a missing LLM key only log a warning.

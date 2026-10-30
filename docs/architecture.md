@@ -250,10 +250,16 @@ The rules are the ten core rules of [SPEC.md](../SPEC.md). "Test" names the test
 Other enforced controls:
 
 - **Login:** `crates/api/src/auth/` (Argon2id hashing, TOTP with replay protection, JWT in an HttpOnly, SameSite=Strict cookie, revocation
-  table, lockout after 10 failures for 15 minutes, 5 login attempts per minute per client address).
+  table, lockout after 10 failures from one client address for 15 minutes, a 2 s delay per attempt on an account that sees 50 failures from all
+  addresses within 15 minutes, 5 login attempts per minute per client address, a signing secret that must hold at least 16 different byte values).
 - **Transport and browser hardening:** `crates/api/src/security.rs` (CSP with hashes of the built inline scripts, HSTS when TLS is on,
   `nosniff`, `DENY` framing, `no-referrer`), `crates/api/src/serve.rs` (rustls), `crates/api/src/ws.rs` (Origin must match Host, 16 sockets).
 - **Body size:** 64 KB for JSON routes, 5 MB for voice upload (`crates/api/src/routes.rs`).
+- **Time, connection and request limits:** header read timeout (also the keep-alive idle limit), per-request timeouts (30 s, 200 s for chat, voice and
+  confirm, none on the WebSocket) and a connection cap in `crates/api/src/serve.rs` and `routes.rs`; a per-session request budget for chat and voice
+  transcription in `routes.rs` and `state.rs`.
+- **Between preview and write:** `Trading::execute` takes a write lock, checks the kill switch, and runs the gate again for a new order
+  (`Trading::recheck`) before the first bridge write; the bridge client serves its write lane before its read lane.
 
 ## Data stores
 

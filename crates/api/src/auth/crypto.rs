@@ -32,17 +32,67 @@ pub fn random_bytes<const N: usize>() -> anyhow::Result<[u8; N]> {
     Ok(buf)
 }
 
-/// Check the signing secret: at least 32 bytes.
+/// Different byte values a signing secret must contain at least.
+pub const MIN_DISTINCT_SECRET_BYTES: usize = 16;
+/// A run of one byte this long is a pattern, not randomness.
+const MAX_SECRET_RUN: usize = 8;
+/// How to make a good one (the same command as `.env.example`).
+const SECRET_HELP: &str = "Generate one with: pwsh -c \"$b = [byte[]]::new(48); \
+     [Security.Cryptography.RandomNumberGenerator]::Fill($b); [Convert]::ToBase64String($b)\"";
+
+/// Check the signing secret (AUTH-2): at least 32 bytes, and not something a person typed in
+/// a hurry.
+///
+/// The key material is the secret itself, or, when the secret is clean base64 that decodes to
+/// at least 32 bytes (what the command in `.env.example` prints), the decoded bytes, so a
+/// 64-character hex string or a base64 string counts for the randomness it holds. The material
+/// must hold at least [`MIN_DISTINCT_SECRET_BYTES`] different byte values, no run of
+/// [`MAX_SECRET_RUN`] equal bytes and no block that simply repeats (`abcdabcdabcd...`). The
+/// secret as typed is held to the repetition rule as well.
 pub fn validate_secret(secret: &str) -> anyhow::Result<()> {
     if secret.len() < MIN_SECRET_BYTES {
         bail!(
-            "JARVIS_JWT_SECRET must be at least {MIN_SECRET_BYTES} bytes (got {}). Generate one \
-             with: pwsh -c \"[Convert]::ToBase64String((1..48 | % {{ Get-Random -Max 256 }}) -as \
-             [byte[]])\"",
+            "JARVIS_JWT_SECRET must be at least {MIN_SECRET_BYTES} bytes (got {}). {SECRET_HELP}",
             secret.len()
         );
     }
+    let decoded = B64
+        .decode(secret)
+        .ok()
+        .filter(|bytes| bytes.len() >= MIN_SECRET_BYTES);
+    let material: &[u8] = decoded.as_deref().unwrap_or(secret.as_bytes());
+    let distinct = material
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if distinct < MIN_DISTINCT_SECRET_BYTES {
+        bail!(
+            "JARVIS_JWT_SECRET is too weak: it holds only {distinct} different byte values and \
+             needs at least {MIN_DISTINCT_SECRET_BYTES}. {SECRET_HELP}"
+        );
+    }
+    for bytes in [material, secret.as_bytes()] {
+        if let Some(why) = repeated_pattern(bytes) {
+            bail!("JARVIS_JWT_SECRET is too weak: {why}. {SECRET_HELP}");
+        }
+    }
     Ok(())
+}
+
+/// Why `bytes` looks like a pattern instead of random data, if it does.
+fn repeated_pattern(bytes: &[u8]) -> Option<String> {
+    if bytes
+        .windows(MAX_SECRET_RUN)
+        .any(|w| w.iter().all(|b| *b == w[0]))
+    {
+        return Some(format!(
+            "it contains {MAX_SECRET_RUN} or more equal bytes in a row"
+        ));
+    }
+    // Smallest period p (at most half the length) with bytes[i] == bytes[i + p] throughout.
+    (1..=bytes.len() / 2)
+        .find(|p| (0..bytes.len() - p).all(|i| bytes[i] == bytes[i + p]))
+        .map(|p| format!("it is a block of {p} byte(s) repeated"))
 }
 
 // ---------------------------------------------------------------------------
@@ -299,8 +349,81 @@ mod tests {
         assert!(validate_new_password("twelve chars!").is_ok());
         assert!(validate_new_password(&"x".repeat(257)).is_err());
         assert!(validate_secret("short").is_err());
-        assert!(validate_secret(&"s".repeat(32)).is_ok());
         assert!(looks_like_code("012345"));
         assert!(!looks_like_code("01234a"));
+    }
+
+    // ---- AUTH-2: the signing secret ------------------------------------------------------
+
+    const GOOD_BASE64: &str = "vNERxatXB2lue4f0GwbfV416gXR7t8oIcjeNGJtSdXhePkwHtQb7O8T/ZgIHfLLN";
+
+    fn refusal(secret: &str) -> String {
+        validate_secret(secret)
+            .expect_err("must refuse")
+            .to_string()
+    }
+
+    #[test]
+    fn a_generated_secret_is_accepted_in_every_usual_spelling() {
+        assert!(validate_secret(GOOD_BASE64).is_ok());
+        // 32 random bytes as 64 hex characters: few distinct characters, plenty of randomness.
+        assert!(
+            validate_secret("9f2c4be1a07d3865c1e4f20b7a9d3c6e58b1f0a4d2c7e93b6a5081f4e7d2c9b3")
+                .is_ok()
+        );
+        // A long passphrase of words is not clean base64, and it is judged as typed.
+        assert!(validate_secret("purple-giraffe-quietly-negotiates-with-seven-clocks").is_ok());
+    }
+
+    #[test]
+    fn short_or_empty_secrets_are_refused_with_the_generation_command() {
+        for secret in ["", "short", &"s".repeat(31)] {
+            let err = refusal(secret);
+            assert!(err.contains("at least 32 bytes"), "{err}");
+            assert!(err.contains("RandomNumberGenerator"), "{err}");
+        }
+    }
+
+    #[test]
+    fn long_but_low_entropy_secrets_are_refused() {
+        // One byte value, repeated.
+        assert!(refusal(&"a".repeat(32)).contains("different byte values"));
+        assert!(refusal(&"s".repeat(64)).contains("different byte values"));
+        // Fewer than 16 different characters.
+        assert!(
+            refusal("test-secret-test-secret-test-secret-1234").contains("different byte values")
+        );
+        assert!(
+            refusal("0123456789012345678901234567890123456789").contains("different byte values")
+        );
+        // 15 different bytes in a clean-base64 string that decodes to a few values.
+        assert!(refusal(&"AQIDBAUGBwgJCgsMDQ4P".repeat(3)).contains("different byte values"));
+    }
+
+    #[test]
+    fn repeated_patterns_are_refused_even_with_many_different_bytes() {
+        // 16 different characters, twice over: 32 bytes, but only 16 of information.
+        let block = "abcdefghijklmnop";
+        let err = refusal(&block.repeat(2));
+        assert!(err.contains("repeated"), "{err}");
+        let err = refusal(&"Xk9#mP2$vL7@qR4!".repeat(4));
+        assert!(err.contains("repeated"), "{err}");
+        // A good secret with a long run of equal bytes in it.
+        let err = refusal(&format!("{GOOD_BASE64}{}", "-".repeat(MAX_SECRET_RUN)));
+        assert!(err.contains("equal bytes in a row"), "{err}");
+        // Not a pattern: the same block once, then something else.
+        assert!(validate_secret(&format!("{block}{GOOD_BASE64}")).is_ok());
+    }
+
+    #[test]
+    fn base64_that_hides_a_pattern_is_judged_on_what_it_decodes_to() {
+        // "AAAA" decodes to three zero bytes: 48 characters, no randomness at all.
+        let err = refusal(&"A".repeat(48));
+        assert!(err.contains("JARVIS_JWT_SECRET"), "{err}");
+        // A repeating base64 block decodes to a repeating byte block.
+        let block = B64.encode([
+            7u8, 99, 12, 201, 5, 88, 43, 160, 71, 2, 250, 19, 133, 64, 9, 120, 33, 190,
+        ]);
+        assert!(validate_secret(&block.repeat(2)).is_err());
     }
 }

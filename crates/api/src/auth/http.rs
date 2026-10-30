@@ -31,8 +31,12 @@ impl<S: Send + Sync> FromRequestParts<S> for MaybeSession {
 
 /// Peer IP as text; requests without a peer (in-process tests) share one key.
 pub fn peer_ip(parts: &Parts) -> String {
-    parts
-        .extensions
+    peer_ip_of(&parts.extensions)
+}
+
+/// [`peer_ip`] for a request that is still whole (middleware).
+pub fn peer_ip_of(extensions: &axum::http::Extensions) -> String {
+    extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map_or_else(|| "local".to_owned(), |ci| ci.0.ip().to_string())
 }

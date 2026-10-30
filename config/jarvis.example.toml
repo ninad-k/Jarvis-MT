@@ -17,6 +17,15 @@ bind = "127.0.0.1:8787"
 # the web UI is served by the API itself, and `pnpm -C web dev` goes through the Vite proxy, which
 # is same-origin too. Anything listed here can drive the whole API.
 # dev_origins = ["http://localhost:5173"]
+# Time and size limits of the web edge. These are the defaults; the numbers only matter when the
+# server is reachable by people or programs you do not trust (a slow or greedy client cannot tie
+# the server up). Every one needs a restart.
+# header_read_timeout_secs = 10          # time to send a request's headers; also ends idle keep-alive connections
+# request_timeout_secs = 30              # most routes, body upload included (the WebSocket has no limit)
+# long_request_timeout_secs = 200        # /api/chat, /api/voice/*, /api/confirm/*; keep above your slowest provider's timeout_secs
+# max_connections = 256                  # open connections at once; more are closed at once
+# chat_rate_limit_per_minute = 20        # POST /api/chat per session (each can cost several model calls)
+# transcribe_rate_limit_per_minute = 20  # POST /api/voice/transcribe per session
 
 [bridge]
 # The EA binds here. Must be loopback.

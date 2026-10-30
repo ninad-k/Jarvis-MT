@@ -17,9 +17,10 @@ use jarvis_api::state::ReleaseGuard;
 use jarvis_api::tools::{ProposeTool, ReadTool, ToolContext};
 use jarvis_api::trading::{Trading, WriteSink};
 use jarvis_bridge_client::mock::{MockBridge, MockState};
+use jarvis_bridge_client::protocol::Side;
 use jarvis_bridge_client::protocol::{Command, TradeMode, TradeResult};
 use jarvis_bridge_client::{BridgeClient, BridgeError};
-use jarvis_gate::intent::Intent;
+use jarvis_gate::intent::{CloseFacts, Intent, OrderFacts};
 use jarvis_llm::Message;
 use serde_json::{Value, json};
 
@@ -33,6 +34,14 @@ fn llm_propose(tool: &str, args: Value) -> Arc<ScriptedLlm> {
             text("That is the preview. Please confirm."),
         ],
     )
+}
+
+/// What the parser makes of "buy 0.1 gold": the user asked for a buy.
+fn said_buy() -> Intent {
+    Intent::Order(OrderFacts {
+        side: Some(Side::Buy),
+        ..OrderFacts::default()
+    })
 }
 
 fn buy_gold() -> Value {
@@ -193,9 +202,9 @@ async fn executing_every_tool_never_sends_a_write() {
     let before = mock.state();
     let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let tools = app.state.agent().tools();
-    let ctx = ToolContext {
+    let ctx_saying = |intent: Intent| ToolContext {
         session_id: uuid::Uuid::new_v4(),
-        intent: Intent::Other,
+        intent,
         voice: false,
     };
     let calls = [
@@ -219,6 +228,16 @@ async fn executing_every_tool_never_sends_a_write() {
         ("position_close", json!({ "ticket": 1_001_001 })),
     ];
     for (name, args) in calls {
+        // A new order needs an order in the latest message, and a close of everything needs a
+        // close request (LLM-1); the other proposals may follow any message.
+        let ctx = match name {
+            "propose_order" => ctx_saying(said_buy()),
+            "propose_close" => ctx_saying(Intent::Close(CloseFacts {
+                all: true,
+                ..CloseFacts::default()
+            })),
+            _ => ctx_saying(Intent::Other),
+        };
         let out = tools.execute_in(&ctx, name, &args).await;
         if name.starts_with("propose_") {
             assert!(!out.is_error, "{name}: {}", out.content);
@@ -1230,9 +1249,73 @@ async fn wrong_symbol_or_volume_is_rejected_but_unstated_facts_are_not_checked()
     // The user did not state a volume (a follow-up answer): nothing to contradict.
     let (_, body) = chat_preview(
         &mock,
-        "yes the first one, buy",
+        "buy gold",
         "propose_order",
         buy_gold(),
+        Options::default(),
+    )
+    .await;
+    assert!(body["preview"].is_object(), "{body}");
+}
+
+/// LLM-1: the model cannot open a trade after a message that is not an order.
+#[tokio::test]
+async fn a_new_order_after_a_question_is_refused_and_the_model_is_told_to_ask() {
+    for message in [
+        "what is gold at right now",
+        "how is the market looking",
+        "yes",
+        "yes the first one, buy",
+    ] {
+        let mock = MockBridge::start().await;
+        let (app, body, told) = rejected_chat(&mock, message, buy_gold(), Options::default()).await;
+        assert!(body["preview"].is_null(), "{message}: {body}");
+        assert!(
+            told.contains("does not ask for this") && told.to_lowercase().contains("ask the user"),
+            "{message}: {told}"
+        );
+        let rows = app.audit.rows(None).await.unwrap();
+        let rejected = rows.iter().find(|r| r.kind == "gate_rejected").unwrap();
+        assert_eq!(rejected.payload["reason"], "intent_mismatch", "{message}");
+        assert!(rows.iter().all(|r| r.kind != "preview"), "{message}");
+    }
+}
+
+/// A close or cancel of one named ticket may follow any message ("close it" after talking about
+/// one position), but closing by filter or all needs a close request in the latest message.
+#[tokio::test]
+async fn closing_after_a_question_works_for_one_ticket_but_not_for_everything() {
+    let mock = MockBridge::start().await;
+    let (_, body) = chat_preview(
+        &mock,
+        "get me out of that one",
+        "propose_close",
+        json!({ "tickets": [1_001_001] }),
+        Options::default(),
+    )
+    .await;
+    assert!(body["preview"].is_object(), "{body}");
+
+    let (app, body) = chat_preview(
+        &mock,
+        "get me out of everything",
+        "propose_close",
+        json!({ "all": true }),
+        Options::default(),
+    )
+    .await;
+    assert!(body["preview"].is_null(), "{body}");
+    let rows = app.audit.rows(None).await.unwrap();
+    let rejected = rows.iter().find(|r| r.kind == "gate_rejected").unwrap();
+    assert_eq!(rejected.payload["reason"], "intent_mismatch");
+    assert_eq!(mock.executed_writes(), 0);
+
+    // With a close request in the message the same proposal goes through.
+    let (_, body) = chat_preview(
+        &mock,
+        "close all",
+        "propose_close",
+        json!({ "all": true }),
         Options::default(),
     )
     .await;
@@ -1842,7 +1925,7 @@ async fn small_models_may_send_numbers_as_strings() {
     let tools = app.state.agent().tools();
     let ctx = ToolContext {
         session_id: uuid::Uuid::new_v4(),
-        intent: Intent::Other,
+        intent: said_buy(),
         voice: false,
     };
     let out = tools
@@ -1855,6 +1938,11 @@ async fn small_models_may_send_numbers_as_strings() {
     assert!(!out.is_error, "{}", out.content);
     let preview = out.preview.unwrap();
     assert_eq!(preview.total_volume, 0.1);
+    let ctx = ToolContext {
+        session_id: uuid::Uuid::new_v4(),
+        intent: Intent::Other,
+        voice: false,
+    };
     let out = tools
         .execute_in(
             &ctx,
@@ -2070,4 +2158,430 @@ async fn propose_with_the_bridge_down_is_a_tool_error() {
     let (status, body) = post(&app, "/api/positions/close", Some(json!({ "all": true }))).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"]["code"], "bridge_unavailable");
+}
+
+// ------------------------------------------- the checks run again at confirm (TRD-2)
+
+fn limits_with(max_positions: u32) -> String {
+    format!(
+        "max_lot = 1.0\nmax_positions = {max_positions}\nmax_daily_loss = 500.0\n\
+         allowed_symbols = [\"XAUUSD\", \"US100\", \"EURUSD\"]"
+    )
+}
+
+/// Two chats (two sessions), each proposing the same kind of order.
+fn two_buys() -> Arc<ScriptedLlm> {
+    ScriptedLlm::new(
+        "fake",
+        vec![
+            tool_use("a", "propose_order", buy_gold()),
+            text("First preview."),
+            tool_use("b", "propose_order", buy_gold()),
+            text("Second preview."),
+        ],
+    )
+}
+
+async fn confirm_token(app: &TestApp, token: &str) -> (StatusCode, Value) {
+    post(app, &format!("/api/confirm/{token}"), None).await
+}
+
+fn rows_of_kind<'a>(rows: &'a [AuditRow], kind: &str) -> Vec<&'a AuditRow> {
+    rows.iter().filter(|r| r.kind == kind).collect()
+}
+
+fn message_of(body: &Value) -> &str {
+    body["error"]["message"].as_str().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn two_previews_that_each_fit_max_positions_cannot_both_be_confirmed() {
+    let mock = MockBridge::start().await; // 2 positions + 1 pending order = 3
+    let limits = limits_with(4);
+    let app = build_app(
+        &mock,
+        two_buys(),
+        Options {
+            limits: &limits,
+            ..Options::default()
+        },
+    )
+    .await;
+    // Both sessions get a preview: each one, alone, makes 4 of 4.
+    let (status, first) = chat(&app, "buy 0.1 gold").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, second) = chat(&app, "buy 0.1 gold").await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_ne!(first["session_id"], second["session_id"]);
+    let (t1, t2) = (token_of(&first["preview"]), token_of(&second["preview"]));
+
+    let (status, body) = confirm_token(&app, &t1).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(mock.state().positions.len(), 3);
+
+    // The second would make 5 of 4: refused at confirm, nothing is sent.
+    let (status, body) = confirm_token(&app, &t2).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["code"], "gate_rejected");
+    assert!(message_of(&body).contains("5 open positions"), "{body}");
+    assert!(message_of(&body).contains("confirmation"), "{body}");
+    assert_eq!(mock.executed_writes(), 1);
+    assert_eq!(mock.state().positions.len(), 3);
+
+    // The token is spent either way.
+    let (status, _) = confirm_token(&app, &t2).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let rows = app.audit.rows(None).await.unwrap();
+    let rejected = rows_of_kind(&rows, "gate_rejected");
+    assert_eq!(rejected.len(), 1, "{:?}", kinds(&rows));
+    assert_eq!(rejected[0].payload["reason"], "re-check at confirm");
+    assert_eq!(rejected[0].payload["rule"], "limit:max_positions");
+    assert_eq!(rejected[0].payload["preview_id"], second["preview"]["id"]);
+    // Only the first order reached the bridge.
+    let requests = rows_of_kind(&rows, "bridge_request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].payload["preview_id"], first["preview"]["id"]);
+}
+
+#[tokio::test]
+async fn a_daily_loss_that_arrives_after_the_preview_stops_the_order() {
+    let mock = MockBridge::start().await;
+    let (app, body) = chat_preview(
+        &mock,
+        "buy 0.1 gold",
+        "propose_order",
+        buy_gold(),
+        Options::default(),
+    )
+    .await;
+    mock.update_state(|s| {
+        let mut loss = s.deals[1].clone();
+        loss.ticket = 9_999_001;
+        loss.profit = -600.0;
+        loss.commission = 0.0;
+        loss.time = s.ping.server_time;
+        s.deals.push(loss);
+    });
+    let (status, err) = confirm_token(&app, &token_of(&body["preview"])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert!(message_of(&err).contains("daily loss"), "{err}");
+    assert_eq!(mock.executed_writes(), 0);
+    let rows = app.audit.rows(None).await.unwrap();
+    let rejected = rows_of_kind(&rows, "gate_rejected");
+    assert_eq!(rejected[0].payload["reason"], "re-check at confirm");
+    assert_eq!(rejected[0].payload["rule"], "limit:max_daily_loss");
+}
+
+#[tokio::test]
+async fn trading_hours_that_end_before_the_confirmation_stop_the_order() {
+    let mock = MockBridge::start().await;
+    // Friday 2026-10-30, 12:00 server time, inside a 00:05-23:55 window that covers every day.
+    const MIDNIGHT: i64 = 1_793_318_400;
+    mock.update_state(|s| s.ping.server_time = MIDNIGHT + 12 * 3600);
+    let limits = format!(
+        "{}\n\n[limits.trading_hours]\n\
+         days = [\"mon\", \"tue\", \"wed\", \"thu\", \"fri\", \"sat\", \"sun\"]\n\
+         start = \"00:05\"\nend = \"23:55\"",
+        limits_with(5)
+    );
+    let (app, body) = chat_preview(
+        &mock,
+        "buy 0.1 gold",
+        "propose_order",
+        buy_gold(),
+        Options {
+            limits: &limits,
+            ..Options::default()
+        },
+    )
+    .await;
+    assert!(body["preview"].is_object(), "{body}");
+    // Two minutes to midnight: outside the window now.
+    mock.update_state(|s| s.ping.server_time = MIDNIGHT + 23 * 3600 + 58 * 60);
+    let (status, err) = confirm_token(&app, &token_of(&body["preview"])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert!(message_of(&err).contains("server time"), "{err}");
+    assert_eq!(mock.executed_writes(), 0);
+}
+
+fn move_gold(mock: &MockBridge, bid: f64, ask: f64) {
+    mock.update_state(|s| {
+        let p = s.prices.iter_mut().find(|p| p.symbol == "XAUUSD").unwrap();
+        p.bid = bid;
+        p.ask = ask;
+    });
+}
+
+#[tokio::test]
+async fn a_market_that_moved_onto_the_stop_is_refused_not_adjusted() {
+    let mock = MockBridge::start().await;
+    let (app, body) = chat_preview(
+        &mock,
+        "buy 0.1 gold sl 2380",
+        "propose_order",
+        json!({ "symbol": "gold", "side": "buy", "volume": 0.1, "sl": 2380.0 }),
+        Options::default(),
+    )
+    .await;
+    assert!(body["preview"].is_object(), "{body}");
+    // Gold falls to the stop: the stop is now closer than the broker allows.
+    move_gold(&mock, 2380.05, 2380.33);
+    let (status, err) = confirm_token(&app, &token_of(&body["preview"])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert!(message_of(&err).contains("stop loss"), "{err}");
+    assert_eq!(mock.executed_writes(), 0, "nothing was adjusted and sent");
+    assert_eq!(mock.state().positions.len(), 2);
+}
+
+#[tokio::test]
+async fn a_market_that_moved_but_still_fits_sends_the_confirmed_order_unchanged() {
+    let mock = MockBridge::start().await;
+    let (app, body) = chat_preview(
+        &mock,
+        "buy 0.1 gold sl 2380 tp 2420",
+        "propose_order",
+        json!({ "symbol": "gold", "side": "buy", "volume": 0.1, "sl": 2380.0, "tp": 2420.0 }),
+        Options::default(),
+    )
+    .await;
+    let preview = &body["preview"];
+    move_gold(&mock, 2395.00, 2395.28);
+    let (status, done) = confirm_token(&app, &token_of(preview)).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let state = mock.state();
+    assert_eq!(state.positions.len(), 3);
+    let opened = state
+        .positions
+        .iter()
+        .find(|p| p.ticket != 1_001_001 && p.ticket != 1_001_002)
+        .unwrap();
+    assert_eq!(opened.sl, Some(2380.0));
+    assert_eq!(opened.tp, Some(2420.0));
+    // The comment is the one of the confirmed preview, not of the re-evaluation.
+    let id = preview["id"].as_str().unwrap().replace('-', "");
+    assert_eq!(opened.comment, format!("jarvis:{}", &id[..8]));
+}
+
+#[tokio::test]
+async fn closing_is_not_held_to_the_limits_again_at_confirm() {
+    let mock = MockBridge::start().await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
+    let (status, preview) = post(&app, "/api/positions/1001001/close", None).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    mock.update_state(|s| {
+        let mut loss = s.deals[1].clone();
+        loss.ticket = 9_999_002;
+        loss.profit = -900.0;
+        loss.commission = 0.0;
+        loss.time = s.ping.server_time;
+        s.deals.push(loss);
+    });
+    let (status, done) = confirm_token(&app, &token_of(&preview)).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(mock.executed_writes(), 1);
+}
+
+#[tokio::test]
+async fn a_close_of_a_position_that_is_gone_is_refused_at_confirm() {
+    let mock = MockBridge::start().await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
+    let (_, preview) = post(&app, "/api/positions/1001001/close", None).await;
+    mock.update_state(|s| s.positions.retain(|p| p.ticket != 1_001_001));
+    let (status, err) = confirm_token(&app, &token_of(&preview)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert!(
+        message_of(&err).contains("position 1001001 no longer exists"),
+        "{err}"
+    );
+    assert_eq!(mock.executed_writes(), 0);
+    let rows = app.audit.rows(None).await.unwrap();
+    let rejected = rows_of_kind(&rows, "gate_rejected");
+    assert_eq!(rejected[0].payload["reason"], "re-check at confirm");
+    assert_eq!(rejected[0].payload["rule"], "ticket_gone");
+}
+
+#[tokio::test]
+async fn a_cancel_of_an_order_that_is_gone_is_refused_at_confirm() {
+    let mock = MockBridge::start().await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
+    let (_, preview) = post(&app, "/api/orders/2001001/cancel", None).await;
+    mock.update_state(|s| s.orders.clear());
+    let (status, err) = confirm_token(&app, &token_of(&preview)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert!(
+        message_of(&err).contains("pending order 2001001 no longer exists"),
+        "{err}"
+    );
+    assert_eq!(mock.executed_writes(), 0);
+}
+
+#[tokio::test]
+async fn a_batch_close_skips_the_tickets_that_are_gone_and_says_so() {
+    let mock = MockBridge::start().await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
+    let preview = ui_close_all(&app).await;
+    let (_, step) = confirm_token(&app, &token_of(&preview)).await;
+    let second = step["token"].as_str().unwrap().to_owned();
+    // One of the two positions is closed (a stop was hit) between the two confirmations.
+    mock.update_state(|s| s.positions.retain(|p| p.ticket != 1_001_002));
+    let (status, done) = confirm_token(&app, &second).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let results = done["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "every confirmed command is accounted for");
+    let ok: Vec<_> = results.iter().filter(|r| r["ok"] == true).collect();
+    let skipped: Vec<_> = results.iter().filter(|r| r["ok"] == false).collect();
+    assert_eq!((ok.len(), skipped.len()), (1, 1), "{results:?}");
+    assert_eq!(skipped[0]["ticket"], 1_001_002);
+    assert!(
+        skipped[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no longer exists"),
+        "{results:?}"
+    );
+    assert_eq!(mock.executed_writes(), 1);
+    assert!(mock.state().positions.is_empty());
+}
+
+// ---------------------------------------------- one write at a time (TRD-1)
+
+/// A sink that holds the first write until told to go on, and counts writes as they reach it.
+struct HoldingSink {
+    inner: BridgeClient,
+    entered: AtomicUsize,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl WriteSink for HoldingSink {
+    async fn send_write(&self, command: &Command) -> Result<TradeResult, BridgeError> {
+        let n = self.entered.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == 1 {
+            self.release.notified().await;
+        }
+        self.inner.send_write(command).await
+    }
+}
+
+async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if ready() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn holding_sink(mock: &MockBridge) -> Arc<HoldingSink> {
+    Arc::new(HoldingSink {
+        inner: bridge_for(mock),
+        entered: AtomicUsize::new(0),
+        release: tokio::sync::Notify::new(),
+    })
+}
+
+#[tokio::test]
+async fn confirmed_actions_are_sent_one_at_a_time_and_the_kill_switch_is_seen_in_the_queue() {
+    let mock = MockBridge::start().await;
+    let sink = holding_sink(&mock);
+    let app = build_app(
+        &mock,
+        two_buys(),
+        Options {
+            sink: Some(sink.clone()),
+            ..Options::default()
+        },
+    )
+    .await;
+    let (_, first) = chat(&app, "buy 0.1 gold").await;
+    let (_, second) = chat(&app, "buy 0.1 gold").await;
+    let (t1, t2) = (token_of(&first["preview"]), token_of(&second["preview"]));
+
+    // The first confirmation is on its way to the bridge and stuck there.
+    let router = app.router.clone();
+    let uri = format!("/api/confirm/{t1}");
+    let a = tokio::spawn(async move { request(&router, "POST", &uri, None).await });
+    wait_until("the first write to reach the sink", || {
+        sink.entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+
+    // The second is confirmed meanwhile. Its token is accepted, but its turn has not come.
+    let router = app.router.clone();
+    let uri = format!("/api/confirm/{t2}");
+    let b = tokio::spawn(async move { request(&router, "POST", &uri, None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(
+        sink.entered.load(Ordering::SeqCst),
+        1,
+        "a second write must wait for the first, not run beside it"
+    );
+    assert!(!b.is_finished());
+
+    // The kill switch goes on while the second waits; it must be seen when its turn comes.
+    app.state
+        .trading()
+        .engage_kill_switch("test: in the queue")
+        .await;
+    sink.release.notify_one();
+    let (status_a, body_a) = a.await.unwrap();
+    let (status_b, body_b) = b.await.unwrap();
+    assert_eq!(status_a, StatusCode::OK, "{body_a}");
+    assert_eq!(status_b, StatusCode::LOCKED, "{body_b}");
+    assert_eq!(body_b["error"]["code"], "kill_switch");
+    assert_eq!(sink.entered.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.executed_writes(), 1);
+    let rows = app.audit.rows(None).await.unwrap();
+    assert!(
+        rows.iter().any(|r| r.kind == "kill_switch"
+            && r.payload["blocked_preview"] == second["preview"]["id"]
+            && r.payload["sent"] == 0),
+        "{:?}",
+        kinds(&rows)
+    );
+}
+
+#[tokio::test]
+async fn a_slow_confirmation_does_not_block_the_kill_switch() {
+    // Engaging must never wait for the write lock.
+    let mock = MockBridge::start().await;
+    let sink = holding_sink(&mock);
+    let app = build_app(
+        &mock,
+        ScriptedLlm::new(
+            "fake",
+            vec![tool_use("a", "propose_order", buy_gold()), text("Preview.")],
+        ),
+        Options {
+            sink: Some(sink.clone()),
+            ..Options::default()
+        },
+    )
+    .await;
+    let (_, first) = chat(&app, "buy 0.1 gold").await;
+    let router = app.router.clone();
+    let uri = format!("/api/confirm/{}", token_of(&first["preview"]));
+    let a = tokio::spawn(async move { request(&router, "POST", &uri, None).await });
+    wait_until("the write to reach the sink", || {
+        sink.entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let engaged = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.state
+            .trading()
+            .engage_kill_switch("test: during a write"),
+    )
+    .await;
+    assert!(engaged.is_ok(), "engaging waited for the write lock");
+    assert!(app.state.trading().kill_switch_engaged());
+    sink.release.notify_one();
+    let (status, _) = a.await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the write already on its way completes"
+    );
 }

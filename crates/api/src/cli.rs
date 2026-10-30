@@ -61,8 +61,23 @@ pub enum UserCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ServiceCommand {
-    /// Register Jarvis as a Windows service (needs an elevated prompt).
-    Install,
+    /// Register Jarvis as a Windows service (needs an elevated prompt). By default it runs as
+    /// the virtual account `NT SERVICE\JarvisMT`, which has no rights until you grant them (the
+    /// `icacls` commands are printed).
+    Install {
+        /// Run as this account instead. It must be one that needs no password (for example
+        /// `NT AUTHORITY\LocalService`, or a managed service account), unless you also pass
+        /// `--password-stdin`.
+        #[arg(long, value_name = "ACCOUNT", conflicts_with = "local_system")]
+        account: Option<String>,
+        /// Read the password of `--account` from the first line of stdin.
+        #[arg(long, requires = "account")]
+        password_stdin: bool,
+        /// Run as LocalSystem, the most privileged account on the machine. Not recommended: a
+        /// flaw in the server would then run with full rights.
+        #[arg(long)]
+        local_system: bool,
+    },
     /// Remove the Windows service.
     Uninstall,
     /// Start the installed service.
@@ -143,7 +158,6 @@ mod tests {
     #[test]
     fn service_commands_and_global_config() {
         for (word, expected) in [
-            ("install", ServiceCommand::Install),
             ("uninstall", ServiceCommand::Uninstall),
             ("start", ServiceCommand::Start),
             ("stop", ServiceCommand::Stop),
@@ -153,6 +167,32 @@ mod tests {
                 Some(Command::Service { command: expected })
             );
         }
+        // `install` defaults to the virtual service account (SVC-1) and has two ways out.
+        let install = |args: &[&str]| match parse(&[&["service", "install"], args].concat())
+            .map(|c| c.command)
+        {
+            Ok(Some(Command::Service {
+                command:
+                    ServiceCommand::Install {
+                        account,
+                        password_stdin,
+                        local_system,
+                    },
+            })) => Some((account, password_stdin, local_system)),
+            _ => None,
+        };
+        assert_eq!(install(&[]), Some((None, false, false)));
+        assert_eq!(install(&["--local-system"]), Some((None, false, true)));
+        assert_eq!(
+            install(&["--account", r"NT AUTHORITY\LocalService"]),
+            Some((Some(r"NT AUTHORITY\LocalService".to_owned()), false, false))
+        );
+        assert_eq!(
+            install(&["--account", r".\svc", "--password-stdin"]),
+            Some((Some(r".\svc".to_owned()), true, false))
+        );
+        assert_eq!(install(&["--local-system", "--account", "x"]), None);
+        assert_eq!(install(&["--password-stdin"]), None, "needs --account");
         let cli = parse(&["--config", "c.toml", "service", "run", "--workdir", "D:/J"]).unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("c.toml")));
         assert_eq!(

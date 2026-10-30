@@ -3,16 +3,20 @@
 //! - [`Accounts`] manages users (the `user` CLI uses it on its own).
 //! - [`AuthService`] adds sessions: login with rate limit, lockout and replay protection,
 //!   token checks, logout, and the TOTP check that releases the kill switch.
+//! - [`lockout`] counts failed logins per (account, client address), see AUTH-1.
 //! - [`http`] holds the routes, the middleware and the cookie handling.
 //!
 //! Every login failure produces the same response; the reason goes to the audit log only.
 
 pub mod crypto;
 pub mod http;
+pub mod lockout;
 mod store;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
@@ -33,6 +37,7 @@ use self::crypto::{
     PasswordHasherCfg, SecretBox, TOTP_STEP_SECS, build_totp, looks_like_code, matching_step,
     new_totp_secret, validate_new_password, validate_username,
 };
+use self::lockout::{Lockouts, SLOW_DOWN_DELAY_MS};
 pub use self::store::UserSummary;
 use self::store::{UserRow, UserStore};
 
@@ -43,9 +48,10 @@ pub const LOGIN_RATE_LIMIT: usize = 5;
 const LOGIN_RATE_WINDOW_MS: i64 = 60_000;
 /// Kill-switch release attempts per minute per user.
 pub const RELEASE_RATE_LIMIT: usize = 5;
-/// Failed attempts that lock an account.
+/// Failed attempts that lock out one client address (at login) or the account (kill-switch
+/// release, which already needs a session).
 pub const MAX_FAILURES: i64 = 10;
-/// How long a locked account refuses every login.
+/// How long such a lock lasts.
 pub const LOCKOUT_MS: i64 = 15 * 60_000;
 const MAX_TOKEN_BYTES: usize = 1024;
 const MAX_PASSWORD_BYTES: usize = 1024;
@@ -228,6 +234,11 @@ pub struct AuthService {
     revoked: RwLock<HashMap<String, i64>>,
     /// Hash verified when the user does not exist, so timing does not reveal it.
     dummy_hash: String,
+    /// Failed logins per (account, client address) and per account (AUTH-1).
+    lockouts: Lockouts,
+    /// The delay added to each attempt on an account that is being hammered from many
+    /// addresses, in milliseconds.
+    slow_down_ms: AtomicU64,
 }
 
 /// A successful login: the cookie value and the session it carries.
@@ -272,6 +283,8 @@ impl AuthService {
             rate_audit_limiter: RateLimiter::new(1, LOGIN_RATE_WINDOW_MS),
             revoked: RwLock::new(revoked),
             dummy_hash,
+            lockouts: Lockouts::new(),
+            slow_down_ms: AtomicU64::new(SLOW_DOWN_DELAY_MS),
         }))
     }
 
@@ -286,6 +299,15 @@ impl AuthService {
     }
     fn now_secs(&self) -> i64 {
         self.time.now_ms().div_euclid(1000)
+    }
+
+    /// Change the delay that an attacked account adds to each attempt (default
+    /// [`SLOW_DOWN_DELAY_MS`]). For tests, which cannot wait two seconds per attempt.
+    pub fn set_slow_down_delay(&self, delay: Duration) {
+        self.slow_down_ms.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
     }
 
     async fn audit(&self, kind: AuditKind, payload: serde_json::Value) {
@@ -330,7 +352,18 @@ impl AuthService {
         };
         // From here on the name is a real account's, as stored (not as typed).
         let shown = user.username.clone();
-        if user.locked_until.is_some_and(|until| until > now_ms) {
+        let account = shown.to_ascii_lowercase();
+        // Many addresses are guessing at this account: every attempt, the owner's included,
+        // waits. It is a delay, not a lock, so the owner can always get in (AUTH-1).
+        if self.lockouts.is_under_attack(&account, now_ms) {
+            tokio::time::sleep(Duration::from_millis(
+                self.slow_down_ms.load(Ordering::Relaxed),
+            ))
+            .await;
+        }
+        // Locked is per client address: ten bad attempts from one address shut that address
+        // out, and nobody else.
+        if self.lockouts.is_locked(&account, ip, now_ms) {
             self.verify_dummy(password).await;
             return Err(self.failed(None, &shown, ip, "locked").await);
         }
@@ -366,6 +399,7 @@ impl AuthService {
             tracing::error!("login: recording the login failed: {e:#}");
             return Err(ApiError::Internal);
         }
+        self.lockouts.record_success(&account, ip);
         let outcome = self.issue(&user.username)?;
         self.audit(
             AuditKind::Login,
@@ -409,19 +443,13 @@ impl AuthService {
         ip: &str,
         reason: &str,
     ) -> ApiError {
-        let mut locked_now = false;
-        if let Some(user) = counted_for {
-            let until = self.time.now_ms().saturating_add(LOCKOUT_MS);
-            match self
-                .accounts
-                .store
-                .record_failure(user.id, MAX_FAILURES, until)
-                .await
-            {
-                Ok(locked) => locked_now = locked,
-                Err(e) => tracing::error!("recording a failed login failed: {e:#}"),
-            }
-        }
+        let locked_now = counted_for.is_some_and(|user| {
+            self.lockouts.record_failure(
+                &user.username.to_ascii_lowercase(),
+                ip,
+                self.time.now_ms(),
+            )
+        });
         self.audit(
             AuditKind::LoginFailed,
             json!({ "username": shown, "ip": ip, "reason": reason, "locked_now": locked_now }),
@@ -624,6 +652,7 @@ impl AuthService {
         self.login_limiter.purge(now_ms);
         self.release_limiter.purge(now_ms);
         self.rate_audit_limiter.purge(now_ms);
+        self.lockouts.purge(now_ms);
         let now_secs = now_ms.div_euclid(1000);
         let expired = {
             let mut revoked = self.revoked.write().unwrap_or_else(|p| p.into_inner());

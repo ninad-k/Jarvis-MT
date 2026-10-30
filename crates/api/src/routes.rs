@@ -1,13 +1,14 @@
 //! HTTP routes. The contract is `docs/api.md`.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::handler::Handler;
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::middleware::from_fn_with_state;
+use axum::http::{Extensions, HeaderValue, Method, StatusCode, header};
+use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -19,13 +20,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::agent::ToolCallSummary;
-use crate::auth::http::{self as auth_http, MaybeSession, authenticate_headers, peer_ip};
+use crate::auth::http::{self as auth_http, MaybeSession, authenticate_headers, peer_ip_of};
 use crate::security::{self, Security};
-use crate::state::{AppState, ProviderSlot};
+use crate::state::{AppState, Budget, ProviderSlot};
 use crate::static_site::StaticSite;
 use crate::trading::{ConfirmResponse, PreviewDto, ProposeRequest, ProposeSource, TradingError};
 use crate::{voice, ws};
@@ -62,18 +64,30 @@ pub fn app(state: AppState) -> Router {
         .allow_headers([header::CONTENT_TYPE])
         .allow_credentials(true);
 
+    // Time limits (NET-1). Most routes answer within `request_timeout_secs`; the ones that wait
+    // for a language model, speech or a batch of trades get `long_request_timeout_secs`; the
+    // WebSocket has none (the upgrade is answered at once, and what follows is not a request).
+    // A request that runs out of time gets a 408 in the standard error shape (`security::apply`).
+    let server = &state.config().server;
+    let timeout = |secs: u64| {
+        TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(secs))
+    };
+    let (short, long) = (
+        timeout(server.request_timeout_secs),
+        timeout(server.long_request_timeout_secs),
+    );
+
     let public = Router::new()
         .route("/api/health", get(health))
-        .route("/api/auth/login", post(auth_http::login));
+        .route("/api/auth/login", post(auth_http::login))
+        .layer(short);
 
-    let protected = Router::new()
+    let quick = Router::new()
         .route("/api/status", get(status))
         .route("/api/account", get(account))
         .route("/api/positions", get(positions))
         .route("/api/orders", get(orders))
         .route("/api/watchlist", get(watchlist))
-        .route("/api/chat", post(chat))
-        .route("/api/confirm/{token}", post(confirm))
         .route("/api/cancel/{token}", post(cancel))
         .route("/api/readback/{token}", post(readback))
         .route("/api/positions/{ticket}/close", post(close_position))
@@ -83,12 +97,28 @@ pub fn app(state: AppState) -> Router {
         .route("/api/audit", get(audit_log))
         .route("/api/auth/logout", post(auth_http::logout))
         .route("/api/auth/me", get(auth_http::me))
-        .route("/api/ws", get(ws::handler))
+        .layer(short);
+
+    // Chat and transcription also have a per-session request budget (NET-2), checked before the
+    // body is read.
+    let budget = |which: Budget| from_fn_with_state((state.clone(), which), spend_budget);
+    let slow = Router::new()
+        .route("/api/chat", post(chat).layer(budget(Budget::Chat)))
+        .route("/api/confirm/{token}", post(confirm))
         .route("/api/voice/speak", post(voice::speak))
         .route(
             "/api/voice/transcribe",
-            post(voice::transcribe).layer(DefaultBodyLimit::max(VOICE_BODY_LIMIT)),
+            post(voice::transcribe)
+                .layer(DefaultBodyLimit::max(VOICE_BODY_LIMIT))
+                .layer(budget(Budget::Transcribe)),
         )
+        .layer(long);
+
+    let sockets = Router::new().route("/api/ws", get(ws::handler));
+
+    let protected = quick
+        .merge(slow)
+        .merge(sockets)
         .route_layer(from_fn_with_state(
             state.clone(),
             auth_http::require_session,
@@ -110,14 +140,15 @@ pub fn app(state: AppState) -> Router {
     ));
 
     let fallback_state = state.clone();
+    let fallback_handler = move |req: Request| {
+        let state = fallback_state.clone();
+        let site = site.clone();
+        async move { fallback(state, site, req).await }
+    };
     Router::new()
         .merge(public)
         .merge(protected)
-        .fallback(move |req: Request| {
-            let state = fallback_state.clone();
-            let site = site.clone();
-            async move { fallback(state, site, req).await }
-        })
+        .fallback(fallback_handler.layer(short))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .layer(
             TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<_>| {
@@ -133,6 +164,23 @@ pub fn app(state: AppState) -> Router {
         .layer(from_fn_with_state(guard, security::request_guard))
         .layer(from_fn_with_state(hardening, security::apply))
         .with_state(state)
+}
+
+/// Middleware of the expensive routes (NET-2): one request of the caller's budget, or a 429 with
+/// `Retry-After`. The caller is the login session, or the peer address when login is off.
+async fn spend_budget(
+    State((state, budget)): State<(AppState, Budget)>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let key = client_key_of(req.extensions());
+    match state.spend_budget(budget, &key) {
+        Ok(()) => next.run(req).await,
+        Err(retry_after_secs) => {
+            tracing::warn!(?budget, "request budget used up");
+            ApiError::RateLimited { retry_after_secs }.into_response()
+        }
+    }
 }
 
 /// Unmatched requests: `/api/*` is a JSON 404 (after the session check), anything else is the
@@ -188,6 +236,8 @@ pub enum ApiError {
     NotFound(String),
     /// 405 (normalised from the framework's empty response).
     MethodNotAllowed,
+    /// 408: the request took longer than the server allows (NET-1).
+    RequestTimeout,
     /// 413: body over the route's limit.
     PayloadTooLarge,
     /// 422: the gate refused to build a preview.
@@ -235,6 +285,11 @@ impl ApiError {
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method_not_allowed",
                 "this method is not allowed on that endpoint".to_owned(),
+            ),
+            ApiError::RequestTimeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "request_timeout",
+                "the request took too long and was stopped".to_owned(),
             ),
             ApiError::PayloadTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -316,6 +371,7 @@ impl From<TradingError> for ApiError {
             TradingError::Gate(g) => ApiError::GateRejected(g.to_string()),
             TradingError::IntentMismatch(m) => ApiError::GateRejected(m.to_string()),
             TradingError::UserIsAnswering => ApiError::GateRejected(e.to_string()),
+            TradingError::RecheckRejected(m) => ApiError::GateRejected(m),
             TradingError::Token(TokenError::Unknown) => ApiError::TokenUnknown,
             TradingError::Token(TokenError::Expired) => ApiError::TokenExpired,
             TradingError::Token(TokenError::AlreadyUsed) => ApiError::TokenUsed,
@@ -613,9 +669,13 @@ async fn chat(
 /// is limited per session), otherwise the peer IP. Requests with no peer address
 /// (in-process tests) share one bucket.
 fn client_key(parts: &Parts) -> String {
-    match parts.extensions.get::<crate::auth::Session>() {
+    client_key_of(&parts.extensions)
+}
+
+fn client_key_of(extensions: &Extensions) -> String {
+    match extensions.get::<crate::auth::Session>() {
         Some(session) => format!("session:{}", session.id),
-        None => peer_ip(parts),
+        None => peer_ip_of(extensions),
     }
 }
 

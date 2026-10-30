@@ -95,7 +95,9 @@ async fn https_login_status_and_wss_work_end_to_end() {
         .unwrap()
         .to_owned();
     assert!(
-        csp.contains("connect-src 'self' wss:") && csp.contains("upgrade-insecure-requests"),
+        csp.contains("connect-src 'self';")
+            && !csp.contains("wss:")
+            && csp.contains("upgrade-insecure-requests"),
         "{csp}"
     );
     assert_eq!(health.text().await.unwrap(), r#"{"ok":true}"#);

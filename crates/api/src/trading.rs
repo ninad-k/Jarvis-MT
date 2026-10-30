@@ -6,11 +6,31 @@
 //!        -> Trading::propose   (snapshot -> gate::evaluate -> TokenStore::issue)
 //!        -> PreviewDto         (token goes to the browser, never to the LLM)
 //! POST /api/confirm/{token}
-//!        -> Trading::confirm   (TokenStore::confirm -> sequential bridge writes)
+//!        -> Trading::confirm   (TokenStore::confirm -> write lock -> re-check -> bridge writes)
 //! ```
 //!
 //! SPEC rule 3: [`Trading::confirm`] is the only code that sends a write command, and it
 //! only sends the commands stored in a confirmed [`ActionPreview`].
+//!
+//! # Between preview and write
+//!
+//! A preview is valid for 15 s (30 s by voice), and other things happen in that time: another
+//! session's preview is confirmed, the day's loss grows, the market moves. So the confirmed
+//! action is checked again right before it is sent (TRD-2):
+//!
+//! - a **new order** goes through [`evaluate`] a second time with a fresh [`MarketSnapshot`]; if
+//!   it now fails, or would now produce a different order than the one the user saw, nothing is
+//!   sent (422) and the token stays consumed;
+//! - a **close, cancel or modify** only needs its tickets to still exist (and the kill switch
+//!   off): they reduce or keep risk, so no limit applies to them.
+//!
+//! Always the commands the user confirmed are sent, never the re-evaluated ones.
+//!
+//! Confirmed actions run one at a time (a write lock, TRD-1). The kill switch is checked after
+//! the lock is taken and again immediately before each bridge call. The bridge client serves
+//! its write lane before its read lane, so a write waits for at most the one exchange already
+//! in flight (a read takes at most `bridge.timeout_ms`); that window cannot be closed because a
+//! request that was sent cannot be taken back.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -46,6 +66,8 @@ const META_RETENTION_MS: i64 = 10 * 60_000;
 /// Pages of `get_history` read to total today's realised P/L (500 deals each).
 const HISTORY_PAGES: usize = 5;
 const DAY_SECS: i64 = 86_400;
+/// The `reason` of the `gate_rejected` audit row written when the checks run again at confirm.
+pub const RECHECK_REASON: &str = "re-check at confirm";
 
 // ---------------------------------------------------------------------------
 // Types shared with the HTTP layer
@@ -151,6 +173,10 @@ pub enum TradingError {
     /// that, so a new proposal would be wrong.
     #[error("the user is answering the pending preview")]
     UserIsAnswering,
+    /// The checks made again at confirmation (TRD-2) refused the action. Nothing was sent and
+    /// the token is spent.
+    #[error("{0}")]
+    RecheckRejected(String),
     #[error("too many confirmations; retry in {retry_after_secs} s")]
     RateLimited { retry_after_secs: u64 },
     /// MT5 rejected the (single) write; message includes the retcode.
@@ -255,6 +281,8 @@ pub struct TradingParts {
 struct TokenMeta {
     session: Option<Uuid>,
     preview_id: Uuid,
+    /// What was proposed: confirmation checks it again against the market of that moment.
+    action: Option<ProposedAction>,
     stage: TokenStage,
     source: &'static str,
     issued_ms: i64,
@@ -284,6 +312,9 @@ pub struct Trading {
     events: EventBus,
     registry: Mutex<Registry>,
     confirm_limiter: RateLimiter,
+    /// Held while a confirmed action is re-checked and sent: writes go out one at a time and
+    /// each one sees the effect of the one before (TRD-1, TRD-2). Never held by the kill switch.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl Trading {
@@ -310,6 +341,7 @@ impl Trading {
             events: parts.events,
             registry: Mutex::new(Registry::default()),
             confirm_limiter: RateLimiter::new(CONFIRM_RATE_LIMIT, CONFIRM_RATE_WINDOW_MS),
+            write_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -409,6 +441,7 @@ impl Trading {
                 TokenMeta {
                     session: req.session,
                     preview_id: preview.id,
+                    action: Some(req.action.clone()),
                     stage: issued.stage,
                     source: source_name(&req.source),
                     issued_ms: now,
@@ -630,6 +663,7 @@ impl Trading {
                         TokenMeta {
                             session,
                             preview_id: second.preview_id,
+                            action: meta.as_ref().and_then(|m| m.action.clone()),
                             stage: second.stage,
                             source,
                             issued_ms,
@@ -680,18 +714,23 @@ impl Trading {
                 // Run the writes on their own task: if the HTTP client disconnects, a
                 // half-finished batch must still run to the end and be audited.
                 let this = Arc::clone(self);
-                tokio::spawn(async move { this.execute(preview, session).await })
+                let action = meta.and_then(|m| m.action);
+                tokio::spawn(async move { this.execute(preview, session, action).await })
                     .await
                     .map_err(|e| TradingError::Internal(format!("execution task failed: {e}")))?
             }
         }
     }
 
-    /// Send the preview's commands one by one.
+    /// Check a confirmed preview once more and send its commands one by one.
+    ///
+    /// Runs under the write lock, so a second confirmation waits until this one has finished
+    /// and then sees its effect on the account.
     async fn execute(
         &self,
         preview: ActionPreview,
         session: Option<Uuid>,
+        action: Option<ProposedAction>,
     ) -> Result<ConfirmResponse, TradingError> {
         if let Some(bad) = preview.commands.iter().find(|c| !c.is_write()) {
             // Cannot happen with a correct gate; refuse rather than send a read as a "trade".
@@ -699,6 +738,19 @@ impl Trading {
                 "preview contained a non-write command ({}); nothing was sent",
                 bad.name()
             )));
+        }
+
+        // TRD-1: one confirmed action at a time. The kill switch is looked at again as soon as
+        // this action's turn comes, because the wait can be as long as the one before it.
+        let _turn = self.write_lock.lock().await;
+        if self.kill_switch.is_engaged() {
+            self.record(
+                session,
+                AuditKind::KillSwitch,
+                json!({ "blocked_preview": preview.id, "sent": 0 }),
+            )
+            .await;
+            return Err(TradingError::KillSwitch);
         }
 
         // Is the bridge up, and is it still the account we think it is? Nothing is sent yet,
@@ -723,38 +775,47 @@ impl Trading {
             return Err(TradingError::ModeMismatch);
         }
 
+        // TRD-2: the limits and the market are looked at again, right before the write.
+        let gone = self.recheck(&preview, session, action.as_ref()).await?;
+
         let total = preview.commands.len();
         let mut results: Vec<TradeResultDto> = Vec::with_capacity(total);
         let mut aborted: Option<String> = None;
         let mut unknown: Option<(usize, BridgeError)> = None;
+        // Writes that were handed to the bridge (a skipped ticket does not count).
+        let mut attempted = 0usize;
 
         for (index, command) in preview.commands.iter().enumerate() {
             // Rule 6: the kill switch is re-checked immediately before every single write.
             if self.kill_switch.is_engaged() {
-                if results.is_empty() {
-                    self.record(
-                        session,
-                        AuditKind::KillSwitch,
-                        json!({ "blocked_preview": preview.id, "sent": 0 }),
-                    )
-                    .await;
-                    return Err(TradingError::KillSwitch);
-                }
-                aborted = Some("kill_switch".to_owned());
-                for skipped in &preview.commands[index..] {
-                    results.push(failed_result(
-                        command_ticket(skipped),
-                        None,
-                        "not sent: the kill switch was engaged".to_owned(),
-                    ));
-                }
+                aborted = Some(
+                    self.abort_for_kill_switch(session, &preview, index, attempted, &mut results)
+                        .await?,
+                );
+                break;
+            }
+            if let Some(ticket) = command_ticket(command)
+                && gone.contains(&ticket)
+            {
                 self.record(
                     session,
-                    AuditKind::KillSwitch,
-                    json!({ "blocked_preview": preview.id, "sent": index, "skipped": total - index }),
+                    AuditKind::TradeResult,
+                    json!({
+                        "preview_id": preview.id,
+                        "index": index,
+                        "cmd": command.name(),
+                        "ok": false,
+                        "ticket": ticket,
+                        "error": "not sent: the ticket no longer exists (re-check at confirm)",
+                    }),
                 )
                 .await;
-                break;
+                results.push(failed_result(
+                    Some(ticket),
+                    None,
+                    format!("not sent: {} no longer exists", noun_of(command, ticket)),
+                ));
+                continue;
             }
 
             self.record(
@@ -767,6 +828,16 @@ impl Trading {
                 }),
             )
             .await;
+            // The audit write above awaited: look at the switch once more, with nothing but the
+            // call itself between this check and the bridge (TRD-1).
+            if self.kill_switch.is_engaged() {
+                aborted = Some(
+                    self.abort_for_kill_switch(session, &preview, index, attempted, &mut results)
+                        .await?,
+                );
+                break;
+            }
+            attempted += 1;
             match self.send_write(command).await {
                 Ok(tr) => {
                     self.record(
@@ -850,6 +921,253 @@ impl Trading {
             results,
             aborted,
         })
+    }
+
+    /// The kill switch went on while this action was waiting or running. Nothing more is sent.
+    /// Fails with `KillSwitch` when not a single write went out; otherwise lists the rest as
+    /// not sent and returns the reason for `aborted`.
+    async fn abort_for_kill_switch(
+        &self,
+        session: Option<Uuid>,
+        preview: &ActionPreview,
+        index: usize,
+        attempted: usize,
+        results: &mut Vec<TradeResultDto>,
+    ) -> Result<String, TradingError> {
+        let total = preview.commands.len();
+        self.record(
+            session,
+            AuditKind::KillSwitch,
+            json!({
+                "blocked_preview": preview.id,
+                "sent": attempted,
+                "skipped": total - index,
+            }),
+        )
+        .await;
+        if attempted == 0 {
+            return Err(TradingError::KillSwitch);
+        }
+        for skipped in &preview.commands[index..] {
+            results.push(failed_result(
+                command_ticket(skipped),
+                None,
+                "not sent: the kill switch was engaged".to_owned(),
+            ));
+        }
+        Ok("kill_switch".to_owned())
+    }
+
+    /// TRD-2: look at a confirmed action again, just before it is sent.
+    ///
+    /// - A new order is evaluated against a fresh snapshot, exactly as at preview time. It must
+    ///   pass, and the order it would now produce must be the order the user confirmed (symbol,
+    ///   side, type, volume, price, SL and TP). Nothing is adjusted: a market that moved so
+    ///   that the stops no longer fit means "refused", and the confirmed commands are what gets
+    ///   sent, never the new ones.
+    /// - A close, cancel or modify needs its tickets to exist. The tickets that are gone are
+    ///   returned (the caller skips and reports them); if none is left the action is refused.
+    ///
+    /// Every refusal is audited as `gate_rejected` with the reason `re-check at confirm`.
+    async fn recheck(
+        &self,
+        preview: &ActionPreview,
+        session: Option<Uuid>,
+        action: Option<&ProposedAction>,
+    ) -> Result<HashSet<u64>, TradingError> {
+        let opens = preview
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::OrderSend(_)));
+        if opens {
+            self.recheck_order(preview, session, action).await?;
+            return Ok(HashSet::new());
+        }
+        self.recheck_tickets(preview, session).await
+    }
+
+    async fn recheck_order(
+        &self,
+        preview: &ActionPreview,
+        session: Option<Uuid>,
+        action: Option<&ProposedAction>,
+    ) -> Result<(), TradingError> {
+        let Some(action @ ProposedAction::Order(_)) = action else {
+            // An order whose proposal is not on record cannot be checked, so it is not sent.
+            let message = "The proposal behind this order is no longer on record, so the limits \
+                           cannot be checked again. Nothing was sent; ask for the order again.";
+            self.reject_at_confirm(session, preview, "no_proposal", message)
+                .await;
+            return Err(TradingError::RecheckRejected(message.to_owned()));
+        };
+        let snapshot = match self.snapshot(action).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.record(
+                    session,
+                    AuditKind::Error,
+                    json!({
+                        "where": "confirm",
+                        "reason": RECHECK_REASON,
+                        "preview_id": preview.id,
+                        "message": e.to_string(),
+                        "sent": 0,
+                    }),
+                )
+                .await;
+                return Err(e);
+            }
+        };
+        let fresh = match evaluate(
+            action,
+            &snapshot,
+            &self.limits,
+            self.kill_switch.is_engaged(),
+        ) {
+            Ok(fresh) => fresh,
+            Err(GateError::KillSwitchEngaged) => return Err(TradingError::KillSwitch),
+            Err(e) => {
+                let rule = match &e {
+                    GateError::LimitExceeded { rule, .. } => format!("limit:{rule}"),
+                    _ => "gate".to_owned(),
+                };
+                let message = format!(
+                    "The checks were run again at confirmation and now refuse this order: {e}. \
+                     Nothing was sent; ask for the order again if you still want it."
+                );
+                self.reject_at_confirm(session, preview, &rule, &message)
+                    .await;
+                return Err(TradingError::RecheckRejected(message));
+            }
+        };
+        if let Err(what) = same_order(&preview.commands, &fresh.commands) {
+            let message = format!(
+                "The order the checks would build now is not the one you confirmed ({what}). \
+                 Nothing was sent; ask for the order again."
+            );
+            self.reject_at_confirm(session, preview, "order_changed", &message)
+                .await;
+            return Err(TradingError::RecheckRejected(message));
+        }
+        Ok(())
+    }
+
+    async fn recheck_tickets(
+        &self,
+        preview: &ActionPreview,
+        session: Option<Uuid>,
+    ) -> Result<HashSet<u64>, TradingError> {
+        let wants_positions = preview.commands.iter().any(|c| {
+            matches!(
+                c,
+                Command::PositionClose(_)
+                    | Command::PositionClosePartial(_)
+                    | Command::PositionModify(_)
+            )
+        });
+        let wants_orders = preview
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::OrderCancel(_)));
+        let mut open: HashSet<u64> = HashSet::new();
+        let read = async {
+            if wants_positions {
+                open.extend(
+                    self.bridge
+                        .get_positions(None)
+                        .await?
+                        .positions
+                        .iter()
+                        .map(|p| p.ticket),
+                );
+            }
+            if wants_orders {
+                open.extend(
+                    self.bridge
+                        .get_orders(None)
+                        .await?
+                        .orders
+                        .iter()
+                        .map(|o| o.ticket),
+                );
+            }
+            Ok::<(), BridgeError>(())
+        };
+        if let Err(e) = read.await {
+            self.record(
+                session,
+                AuditKind::Error,
+                json!({
+                    "where": "confirm",
+                    "reason": RECHECK_REASON,
+                    "preview_id": preview.id,
+                    "message": e.to_string(),
+                    "sent": 0,
+                }),
+            )
+            .await;
+            return Err(TradingError::Bridge(e));
+        }
+        let gone: HashSet<u64> = preview
+            .commands
+            .iter()
+            .filter_map(command_ticket)
+            .filter(|t| !open.contains(t))
+            .collect();
+        let wanted = preview.commands.iter().filter_map(command_ticket).count();
+        if wanted > 0 && gone.len() >= wanted {
+            let message = match preview
+                .commands
+                .first()
+                .and_then(|c| command_ticket(c).map(|t| noun_of(c, t)))
+            {
+                Some(noun) if wanted == 1 => format!("{noun} no longer exists"),
+                _ => format!("none of the {wanted} tickets exist any more"),
+            };
+            self.reject_at_confirm(session, preview, "ticket_gone", &message)
+                .await;
+            return Err(TradingError::RecheckRejected(format!(
+                "The checks were run again at confirmation: {message}. Nothing was sent."
+            )));
+        }
+        if !gone.is_empty() {
+            let mut list: Vec<u64> = gone.iter().copied().collect();
+            list.sort_unstable();
+            self.record(
+                session,
+                AuditKind::GateRejected,
+                json!({
+                    "reason": RECHECK_REASON,
+                    "rule": "ticket_gone",
+                    "preview_id": preview.id,
+                    "partial": true,
+                    "tickets_skipped": list,
+                }),
+            )
+            .await;
+        }
+        Ok(gone)
+    }
+
+    async fn reject_at_confirm(
+        &self,
+        session: Option<Uuid>,
+        preview: &ActionPreview,
+        rule: &str,
+        message: &str,
+    ) {
+        self.record(
+            session,
+            AuditKind::GateRejected,
+            json!({
+                "reason": RECHECK_REASON,
+                "rule": rule,
+                "preview_id": preview.id,
+                "message": message,
+                "commands": serde_json::to_value(&preview.commands).unwrap_or(Value::Null),
+            }),
+        )
+        .await;
     }
 
     async fn record_trade_result(
@@ -1151,6 +1469,56 @@ fn command_ticket(command: &Command) -> Option<u64> {
         Command::OrderCancel(a) => Some(a.ticket),
         _ => None,
     }
+}
+
+/// "position 123" / "pending order 456", for messages.
+fn noun_of(command: &Command, ticket: u64) -> String {
+    match command {
+        Command::OrderCancel(_) => format!("pending order {ticket}"),
+        _ => format!("position {ticket}"),
+    }
+}
+
+/// Is the order built now the order that was confirmed? Compared on what the user saw and
+/// agreed to: symbol, side, type, volume, price, SL and TP. (The comment carries the preview id
+/// and always differs.)
+fn same_order(confirmed: &[Command], fresh: &[Command]) -> Result<(), String> {
+    let (Some(Command::OrderSend(a)), Some(Command::OrderSend(b)), 1, 1) = (
+        confirmed.first(),
+        fresh.first(),
+        confirmed.len(),
+        fresh.len(),
+    ) else {
+        return Err("the commands differ".to_owned());
+    };
+    let near = |x: f64, y: f64| (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(1.0);
+    let near_opt = |x: Option<f64>, y: Option<f64>| match (x, y) {
+        (None, None) => true,
+        (Some(x), Some(y)) => near(x, y),
+        _ => false,
+    };
+    if a.symbol != b.symbol {
+        return Err(format!("symbol {} against {}", a.symbol, b.symbol));
+    }
+    if a.side != b.side {
+        return Err("side".to_owned());
+    }
+    if a.exec != b.exec {
+        return Err("order type".to_owned());
+    }
+    if !near(a.volume, b.volume) {
+        return Err(format!("volume {} against {}", a.volume, b.volume));
+    }
+    if !near_opt(a.price, b.price) {
+        return Err("price".to_owned());
+    }
+    if !near_opt(a.sl, b.sl) {
+        return Err("stop loss".to_owned());
+    }
+    if !near_opt(a.tp, b.tp) {
+        return Err("take profit".to_owned());
+    }
+    Ok(())
 }
 
 fn ok_result(command: &Command, tr: &TradeResult) -> TradeResultDto {

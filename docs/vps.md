@@ -118,7 +118,9 @@ Points to get right with a proxy:
 - **WebSocket upgrades.** The proxy must forward them. Caddy does this by default. With nginx, add
   `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";`.
 - **Client IP.** Jarvis ignores `X-Forwarded-For`. It counts login attempts per TCP peer address, so behind a proxy every client shares
-  one bucket of 5 login attempts per minute. Lockouts (10 failed attempts, 15 minutes) apply per account, so they are unaffected.
+  one bucket of 5 login attempts per minute. Lockouts (10 failed attempts, 15 minutes) are kept per account and client address, so behind a proxy they hit every user together:
+  one person's ten failures lock all of you out for 15 minutes, until the server restarts. The same applies to the per-session
+  limits on chat and voice transcription when login is off.
   The audit log records the proxy's address as the client IP.
 - **`cookie_secure`.** Set it to `true` when the proxy serves HTTPS and Jarvis serves plain HTTP. Without it, the session cookie is not
   `Secure` on the plain-HTTP side.

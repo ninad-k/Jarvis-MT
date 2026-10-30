@@ -104,6 +104,8 @@ Limits are set in the `[limits]` section of `config/jarvis.toml`. Jarvis checks 
 
 Closing, changing and cancelling stay allowed when the daily-loss or trading-hours limit is reached, because those actions reduce risk. The kill switch blocks them too.
 
+The limits are checked twice for a new order: when the preview is made and again when you confirm. If something changed in between (for example another preview was confirmed and the position limit is now full), the order is refused with a message that says why, nothing is sent, and you ask for it again.
+
 ## Symbol names and aliases
 
 You can say "gold", "nasdaq", "dow", "dow jones", "s&p", "bitcoin", "cable" or "fiber". The `[symbols.aliases]` section of the config maps each name to a symbol at your broker. Matching ignores case.

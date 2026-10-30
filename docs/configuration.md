@@ -28,7 +28,7 @@ The server refuses to start, and says why, when:
 - There is no usable bridge key: neither `JARVIS_BRIDGE_KEY` nor `bridge.key_file` is set, the file cannot be read, or the key is not 64 hexadecimal characters (and not all zeros). The message points at `scripts/install-ea.ps1`. The key is never printed.
 - `server.bind` is not loopback and TLS (`tls_cert` and `tls_key`) and `[auth] enabled = true` are not both set.
 - Only one of `tls_cert` and `tls_key` is set, or a PEM file cannot be read.
-- `[auth] enabled = true` and `JARVIS_JWT_SECRET` is missing or shorter than 32 bytes.
+- `[auth] enabled = true` and `JARVIS_JWT_SECRET` is missing, shorter than 32 bytes, or guessable: fewer than 16 different byte values, a run of 8 equal bytes, or a block that repeats (`abcdabcd...`). Base64 or hex text is judged on the bytes it decodes to. The message prints the command that generates a good one (the same as in `.env.example`).
 - `llm.providers` is empty, two providers share a name, or `llm.default` names no provider.
 - `[trading]` or `[limits]` values are out of range (see below).
 
@@ -51,8 +51,15 @@ Safety: keep `demo` for every test. Do not change `mode` to get past a `mode_mis
 | `tls_cert` | path | unset | PEM certificate chain. Set it with `tls_key` to serve HTTPS and WSS. |
 | `tls_key` | path | unset | PEM private key. It must not be encrypted. Keep it out of Git (the `certs/`, `*.pem` and `*.key` patterns are gitignored). |
 | `dev_origins` | list of origins | `[]` | Browser origins (`"http://localhost:5173"`) allowed to call the API with the session cookie (CORS, and the WebSocket `Origin` check). Empty by default: the web UI is served by the API, and `pnpm -C web dev` goes through the Vite proxy, which is same-origin. Anything listed can drive the whole API, so list only origins you control. Entries are `scheme://host[:port]` with no path or wildcard. |
+| `header_read_timeout_secs` | integer 1 to 120 | `10` | How long a client has to send the headers of a request. It also closes a keep-alive connection that has been idle that long, and the TLS handshake has its own 10 s limit. A client that trickles its headers in cannot hold a connection open (finding NET-1). |
+| `request_timeout_secs` | integer 1 to 600 | `30` | How long a request may take to be answered, an upload of the body included. Applies to every route except the next row and the WebSocket (an open `/api/ws` has no limit; its upgrade is answered at once). A request that runs out gets `408 request_timeout`. |
+| `long_request_timeout_secs` | integer, `request_timeout_secs` to 3600 | `200` | The same for the routes that wait for a language model, the speech engines or a batch of trades: `/api/chat`, `/api/voice/*` and `/api/confirm/*`. A chat turn can make up to five model calls, so keep this above the `timeout_secs` of your slowest provider; the server logs a warning at startup when a provider is not shorter. A confirmed trade keeps running after its request is stopped. |
+| `max_connections` | integer 1 to 100000 | `256` | Open connections accepted at once, counted before any TLS handshake. Another connection is closed at once, unanswered. Open WebSockets (at most 16) count as connections. |
+| `chat_rate_limit_per_minute` | integer 1 to 10000 | `20` | `POST /api/chat` requests per minute for one login session (per client address when login is off). Over it: `429 rate_limited` with `Retry-After`, and the model is not called (finding NET-2). |
+| `transcribe_rate_limit_per_minute` | integer 1 to 10000 | `20` | The same for `POST /api/voice/transcribe`. |
 
 When TLS is on, responses carry `Strict-Transport-Security`, the session cookie is `Secure`, and the CSP upgrades insecure requests.
+The CSP lets the page connect to its own origin only (`connect-src 'self'`), which covers the WebSocket in Chrome, Edge and Firefox; see [security](security/threat-model.md).
 
 ## `[bridge]`
 
@@ -123,7 +130,7 @@ cancelling stay allowed when those limits are reached, because they reduce or ke
 
 | Key | Type | Default | Effect and safety |
 |---|---|---|---|
-| `token_ttl_secs` | 1 to 120 | `15` | How long a confirmation token is valid. |
+| `token_ttl_secs` | 1 to 120 | `15` | How long a confirmation token is valid. Limits and the market are checked again when you confirm, so a preview that has become impossible in those seconds (another preview was confirmed, the loss limit was reached) is refused with `422 gate_rejected`; see [api.md](api.md#previews-and-confirmation-sprint-2). |
 | `voice_token_cap_secs` | integer >= `token_ttl_secs` | `30` | For a voice turn, the window starts when the spoken read-back finishes, and never runs past this many seconds after the preview was made. |
 | `deviation_points` | 0 to 1000 | `20` | Largest slippage allowed for market orders and closes, in points. |
 | `kill_switch_engaged` | boolean | `false` | Start with every write blocked. Independently of this setting, a kill switch that was engaged when the server stopped is saved in the database and stays engaged after a restart until it is released with a login session and a fresh authenticator code. |
@@ -159,7 +166,7 @@ the reason is written to the log. `GET /api/status` reports `voice.stt` and `voi
 
 | Variable | Required | Effect and safety |
 |---|---|---|
-| `JARVIS_JWT_SECRET` | Yes, when `[auth] enabled = true` (the default), and for every `jarvis-api user` command | Signs session tokens and derives the key that encrypts TOTP secrets. At least 32 bytes. Generate a random value (see below). Changing it logs everyone out and makes stored TOTP secrets unreadable, so run `jarvis-api user reset-totp <name>` for each user afterwards. Never commit it. |
+| `JARVIS_JWT_SECRET` | Yes, when `[auth] enabled = true` (the default), and for every `jarvis-api user` command | Signs session tokens and derives the key that encrypts TOTP secrets. At least 32 bytes, with at least 16 different byte values and no repeated block (a value that is Base64 or hex text is judged on the bytes it decodes to); the server refuses anything weaker. Generate a random value (see below). Changing it logs everyone out and makes stored TOTP secrets unreadable, so run `jarvis-api user reset-totp <name>` for each user afterwards. Never commit it. |
 | `JARVIS_BRIDGE_KEY` | Yes, unless `[bridge] key_file` is set | The shared bridge key as 64 hexadecimal characters. When set and not empty it wins over `key_file`; if it is set but not a valid key, the server stops instead of falling back to the file. Same secret as the content of `bridge.key`. Never commit it, and never paste it into an issue or a chat. |
 | The variable named by `api_key_env`, for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | Only for that provider | The provider API key. Keep it in `.env` only. |
 | `RUST_LOG` | No | Log filter (tracing `EnvFilter` syntax). Unset, the console default is `info,jarvis_api=debug,jarvis_bridge_client=debug`, and the Windows service default is `info,jarvis_api=debug,jarvis_bridge_client=info`. |
@@ -177,7 +184,7 @@ $rng.GetBytes($bytes)
 [Convert]::ToBase64String($bytes)
 ```
 
-The result is 64 characters, which is above the 32-byte minimum. Paste it after `JARVIS_JWT_SECRET=` in `.env`.
+The result is 64 characters, which is above the 32-byte minimum, and random enough to pass the other checks. Paste it after `JARVIS_JWT_SECRET=` in `.env`.
 
 ### Variables used only by tests and tools
 

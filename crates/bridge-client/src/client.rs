@@ -4,8 +4,16 @@
 //! If a reply is lost the socket is wedged forever, so the actor
 //!
 //! - keeps exactly one request in flight (callers queue on an mpsc channel),
+//! - serves queued writes before queued reads (a separate lane, see below),
 //! - drops the socket after any timeout, transport error or protocol error, and
 //! - connects lazily, so a missing EA only affects the call that needs it.
+//!
+//! # Write priority
+//!
+//! Reads and writes queue on two channels and the actor always drains the write lane first.
+//! A confirmed write therefore waits for at most the one exchange that is already in flight
+//! (at most the read timeout, 3 s by default) plus any writes queued ahead of it, never for a
+//! whole line of reads. The exchange in flight cannot be taken back: REQ/REP is lock-step.
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -76,7 +84,10 @@ pub const MIN_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 /// When the last clone is dropped the actor stops and the socket is closed.
 #[derive(Debug, Clone)]
 pub struct BridgeClient {
+    /// Read lane.
     tx: mpsc::Sender<Job>,
+    /// Write lane: served first.
+    write_tx: mpsc::Sender<Job>,
 }
 
 impl BridgeClient {
@@ -102,6 +113,7 @@ impl BridgeClient {
             BridgeError::Transport("BridgeClient::new must be called inside a Tokio runtime".into())
         })?;
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
+        let (write_tx, write_rx) = mpsc::channel(QUEUE_DEPTH);
         let actor = Actor {
             target,
             key: config.key,
@@ -109,8 +121,8 @@ impl BridgeClient {
             write_timeout,
             socket: None,
         };
-        runtime.spawn(actor.run(rx));
-        Ok(Self { tx })
+        runtime.spawn(actor.run(rx, write_rx));
+        Ok(Self { tx, write_tx })
     }
 
     /// Send one command and decode the reply data into `T`.
@@ -122,12 +134,17 @@ impl BridgeClient {
     /// - `Remote`: the EA answered `ok: false`.
     pub async fn call<T: DeserializeOwned>(&self, command: Command) -> Result<T, BridgeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
+        let lane = if command.is_write() {
+            &self.write_tx
+        } else {
+            &self.tx
+        };
         let job = Job {
             command,
             enqueued: Instant::now(),
             reply: reply_tx,
         };
-        self.tx.send(job).await.map_err(|_| actor_stopped())?;
+        lane.send(job).await.map_err(|_| actor_stopped())?;
         let reply = reply_rx.await.map_err(|_| actor_stopped())??;
         reply.decode().map_err(|e| match BridgeError::from(e) {
             BridgeError::Remote { retcode, .. } if retcode == RETCODE_AUTH_FAILED => {
@@ -297,8 +314,19 @@ struct Actor {
 }
 
 impl Actor {
-    async fn run(mut self, mut rx: mpsc::Receiver<Job>) {
-        while let Some(job) = rx.recv().await {
+    async fn run(mut self, mut reads: mpsc::Receiver<Job>, mut writes: mpsc::Receiver<Job>) {
+        loop {
+            // `biased` makes the write lane win whenever both have a job. Both senders live in
+            // the same `BridgeClient`, so the lanes close together; a closed, empty write lane
+            // falls through to the read lane, which ends the loop once it is drained too.
+            let job = tokio::select! {
+                biased;
+                Some(job) = writes.recv() => job,
+                job = reads.recv() => match job {
+                    Some(job) => job,
+                    None => break,
+                },
+            };
             if job.reply.is_closed() {
                 // Caller gave up while queued; nothing was sent, so skip it.
                 continue;

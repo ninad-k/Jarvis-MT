@@ -202,23 +202,173 @@ fn first_mismatch_follows_field_order() {
 
 // ---- non-blocking intents ----------------------------------------------------------------
 
+fn explicit_request_needed(r: Result<(), jarvis_gate::intent::Mismatch>) -> bool {
+    r.err().is_some_and(|m| m.explicit_request_needed)
+}
+
+/// LLM-1: a new order needs an order in the user's latest message.
 #[test]
-fn other_confirm_cancel_never_block() {
-    let proposals = [
-        ProposedAction::Order(order(Side::Sell, "EURUSD", 3.0)),
-        ProposedAction::Close(CloseSelector::default()),
-        ProposedAction::Cancel(CancelSelector::default()),
-        ProposedAction::Modify(ModifyIntent {
-            ticket: 1,
-            sl: Some(1.0),
-            tp: None,
-        }),
+fn a_new_order_after_a_message_that_is_not_an_order_is_refused() {
+    let proposal = ProposedAction::Order(order(Side::Buy, "XAUUSD", 0.1));
+    for text in [
+        // Questions and chit-chat.
+        "what is gold at",
+        "how is the market looking today",
+        "is gold long term bullish",
+        "gold kya chal raha hai",
+        "thanks",
+        // A bare answer is not an order.
+        "yes",
+        "haan kar do",
+        "no",
+        "nahi",
+        // The side word alone, with nothing the parser can hold on to.
+        "yes the first one, buy",
+        "",
+    ] {
+        let said = say(text);
+        let got = cross_check(&said, &proposal);
+        assert_eq!(
+            field_of(got.clone()),
+            Some("action"),
+            "{text:?} -> {said:?}"
+        );
+        assert!(explicit_request_needed(got), "{text:?}");
+    }
+    // Other kinds of request do not license a new order either (already a mismatch).
+    for text in [
+        "close all",
+        "cancel my pending orders",
+        "move my sl to 3990",
+    ] {
+        assert_eq!(
+            field_of(cross_check(&say(text), &proposal)),
+            Some("action"),
+            "{text}"
+        );
+    }
+    // An order intent that somehow carries no side cannot license a trade.
+    let sideless = Intent::Order(OrderFacts::default());
+    assert!(explicit_request_needed(cross_check(&sideless, &proposal)));
+}
+
+/// The refusal message names the problem in words the model can act on.
+#[test]
+fn the_refusal_for_a_missing_order_says_what_was_missing() {
+    let proposal = ProposedAction::Order(order(Side::Buy, "XAUUSD", 0.1));
+    let m = cross_check(&say("what is gold at"), &proposal).unwrap_err();
+    let text = m.to_string();
+    assert!(text.contains("nothing that asks to buy or sell"), "{text}");
+    assert!(text.contains("open a new trade"), "{text}");
+}
+
+/// Voice, Hinglish and speech-to-text slips that really are orders still pass.
+#[test]
+fn spoken_and_hinglish_order_phrases_still_pass() {
+    let table: Vec<(&str, OrderIntent)> = vec![
+        ("buy 0.1 gold", order(Side::Buy, "XAUUSD", 0.1)),
+        ("Buy point one gold", order(Side::Buy, "XAUUSD", 0.1)),
+        ("buy zero point one cold", order(Side::Buy, "XAUUSD", 0.1)),
+        ("go long gold 0.1", order(Side::Buy, "XAUUSD", 0.1)),
+        ("short nasdaq 0.5", order(Side::Sell, "USTEC", 0.5)),
+        ("sell point one cold", order(Side::Sell, "XAUUSD", 0.1)),
+        ("gold kharido 0.1", order(Side::Buy, "XAUUSD", 0.1)),
+        ("0.1 gold becho", order(Side::Sell, "XAUUSD", 0.1)),
+        ("sona le lo 0.1", order(Side::Buy, "XAUUSD", 0.1)),
+        ("aadha lot nasdaq becho", order(Side::Sell, "USTEC", 0.5)),
+        ("teen lot gold kharido", order(Side::Buy, "XAUUSD", 3.0)),
+        (
+            "zero point one gold kharido",
+            order(Side::Buy, "XAUUSD", 0.1),
+        ),
+        // Facts the user did not state are filled in by the model: still an order.
+        ("gold kharido", order(Side::Buy, "XAUUSD", 0.1)),
+        ("buy gold", order(Side::Buy, "XAUUSD", 0.25)),
+        ("go short on dow jones", order(Side::Sell, "US30", 0.1)),
+        ("euro kharidna hai", order(Side::Buy, "EURUSD", 0.01)),
+        // Speech-to-text keeps the broker's suffix out of what people say.
+        ("buy 0.1 gold", order(Side::Buy, "XAUUSD.m", 0.1)),
     ];
+    for (text, o) in table {
+        let said = say(text);
+        assert!(
+            matches!(&said, Intent::Order(f) if f.side.is_some()),
+            "{text:?} must still read as an order with a side, got {said:?}"
+        );
+        assert_eq!(
+            cross_check(&said, &ProposedAction::Order(o)),
+            Ok(()),
+            "{text:?}"
+        );
+    }
+}
+
+/// Closes, modifies and cancels keep working after `Other` (LLM-1 only closes the order path),
+/// except a close that can hit several positions.
+#[test]
+fn closes_modifies_and_cancels_may_follow_other_but_a_multi_close_may_not() {
+    let one = ProposedAction::Close(CloseSelector {
+        tickets: vec![1_001_001],
+        ..Default::default()
+    });
+    let modify = ProposedAction::Modify(ModifyIntent {
+        ticket: 1,
+        sl: Some(1.0),
+        tp: None,
+    });
+    let cancel_one = ProposedAction::Cancel(CancelSelector {
+        tickets: vec![2_001_001],
+        ..Default::default()
+    });
+    let cancel_all = ProposedAction::Cancel(CancelSelector {
+        all: true,
+        ..Default::default()
+    });
     for said in [Intent::Other, Intent::Confirm, Intent::Cancel] {
-        for p in &proposals {
+        for p in [&one, &modify, &cancel_one, &cancel_all] {
             assert_eq!(cross_check(&said, p), Ok(()), "{said:?} vs {p:?}");
         }
     }
+
+    let many = [
+        ProposedAction::Close(CloseSelector {
+            tickets: vec![1, 2],
+            ..Default::default()
+        }),
+        ProposedAction::Close(CloseSelector {
+            all: true,
+            ..Default::default()
+        }),
+        ProposedAction::Close(CloseSelector {
+            symbol: Some("XAUUSD".into()),
+            ..Default::default()
+        }),
+        ProposedAction::Close(CloseSelector {
+            side: Some(Side::Buy),
+            ..Default::default()
+        }),
+        // Even a partial close of "everything" selected by filter.
+        ProposedAction::Close(CloseSelector::default()),
+    ];
+    for said in [Intent::Other, Intent::Confirm, Intent::Cancel] {
+        for p in &many {
+            let got = cross_check(&said, p);
+            assert_eq!(field_of(got.clone()), Some("action"), "{said:?} vs {p:?}");
+            assert!(explicit_request_needed(got), "{said:?} vs {p:?}");
+        }
+    }
+    // With an explicit close intent the same proposals are judged on their content as before.
+    for text in ["close all", "close all gold", "close my gold longs"] {
+        let said = say(text);
+        assert!(matches!(said, Intent::Close(_)), "{text}: {said:?}");
+    }
+    assert_eq!(
+        cross_check(&say("close all"), &many[1]),
+        Ok(()),
+        "close all -> close all"
+    );
+    // And a close of one named ticket after "close it" still works through the Close path.
+    assert_eq!(cross_check(&say("close it"), &one), Ok(()));
 }
 
 #[test]

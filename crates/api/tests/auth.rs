@@ -471,19 +471,52 @@ async fn resetting_or_removing_a_user_ends_their_sessions() {
 async fn weak_or_missing_secrets_are_refused_at_startup() {
     let mock = MockBridge::start().await;
     let app = build_app(&mock, idle_llm(), Options::default()).await;
-    for secret in ["", "short", &"s".repeat(31)] {
-        let result = AuthService::new(AuthParts {
-            secret: secret.to_owned(),
+    let refused = |secret: String| {
+        let audit = app.audit.clone();
+        async move {
+            AuthService::new(AuthParts {
+                secret,
+                session_hours: 12,
+                cookie_secure: false,
+                time: Arc::new(jarvis_api::clock::WallClock),
+                audit,
+                hasher: PasswordHasherCfg::cheap_for_tests(),
+            })
+            .await
+            .err()
+            .expect("must refuse")
+            .to_string()
+        }
+    };
+    // Too short, and then long enough but guessable (AUTH-2): one byte repeated, a handful of
+    // different characters, a block repeated, base64 that decodes to nothing random.
+    for secret in [
+        String::new(),
+        "short".to_owned(),
+        "s".repeat(31),
+        "a".repeat(32),
+        "a".repeat(64),
+        "test-secret-test-secret-test-secret-1234".to_owned(),
+        "abcdefghijklmnop".repeat(2),
+        "A".repeat(48),
+    ] {
+        let err = refused(secret.clone()).await;
+        assert!(err.contains("JARVIS_JWT_SECRET"), "{secret:?}: {err}");
+        assert!(err.contains("RandomNumberGenerator"), "{secret:?}: {err}");
+    }
+    // The generated kind is accepted.
+    assert!(
+        AuthService::new(AuthParts {
+            secret: JWT_SECRET.to_owned(),
             session_hours: 12,
             cookie_secure: false,
             time: Arc::new(jarvis_api::clock::WallClock),
             audit: app.audit.clone(),
             hasher: PasswordHasherCfg::cheap_for_tests(),
         })
-        .await;
-        let err = result.err().expect("must refuse").to_string();
-        assert!(err.contains("JARVIS_JWT_SECRET"), "{err}");
-    }
+        .await
+        .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -899,4 +932,172 @@ async fn wrong_methods_get_the_standard_error_shape() {
     let (status, body) = request_as(&app, &cookie, "DELETE", "/api/status", None).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(body["error"]["code"], "method_not_allowed");
+}
+
+// ------------------------------------------- lockout per client address (AUTH-1)
+
+/// Log in through the service itself, so a test can say which address the attempt came from
+/// (the in-process HTTP tests have none).
+async fn login_from(
+    app: &TestApp,
+    user: &TestUser,
+    password: &str,
+    code: &str,
+    ip: &str,
+) -> Result<(), jarvis_api::routes::ApiError> {
+    app.auth
+        .as_ref()
+        .unwrap()
+        .login(&user.name, password, code, ip)
+        .await
+        .map(|_| ())
+}
+
+fn is_generic_401(e: &jarvis_api::routes::ApiError) -> bool {
+    matches!(e, jarvis_api::routes::ApiError::Unauthorized(m) if m == GENERIC)
+}
+
+/// Ten bad attempts from one address, spread over enough minutes to stay under the per-address
+/// rate limit.
+async fn hammer_from(app: &TestApp, user: &TestUser, ip: &str, attempts: usize) {
+    for i in 0..attempts {
+        let err = login_from(app, user, "not the password!", "000000", ip)
+            .await
+            .expect_err("a wrong password never gets in");
+        assert!(is_generic_401(&err), "{err:?}");
+        if i % 4 == 3 {
+            app.clock().advance_ms(61_000);
+        }
+    }
+}
+
+#[tokio::test]
+async fn someone_who_knows_the_name_cannot_lock_the_owner_out() {
+    let (app, user, _mock) = auth_app().await;
+    let attacker = "203.0.113.66";
+    let home = "198.51.100.10";
+    hammer_from(&app, &user, attacker, 10).await;
+
+    // The attacker's address is shut out, even with the right credentials ...
+    app.clock().advance_ms(61_000);
+    let code = app.fresh_code(&user);
+    let err = login_from(&app, &user, PASSWORD, &code, attacker)
+        .await
+        .expect_err("locked");
+    assert!(is_generic_401(&err));
+    let rows = app.audit.rows(None).await.unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r.payload["reason"] == "locked" && r.payload["ip"] == attacker),
+        "the refusal is audited as a lock with the address"
+    );
+    assert!(
+        rows.iter().any(|r| r.payload["locked_now"] == true),
+        "and the failure that locked it says so"
+    );
+
+    // ... and the owner, from elsewhere, is not.
+    let code = app.fresh_code(&user);
+    login_from(&app, &user, PASSWORD, &code, home)
+        .await
+        .expect("the owner gets in from another address");
+
+    // The lock is 15 minutes, as before.
+    app.clock().advance_ms(10 * 60_000);
+    let code = app.fresh_code(&user);
+    login_from(&app, &user, PASSWORD, &code, attacker)
+        .await
+        .expect_err("still locked");
+    app.clock().advance_ms(3 * 60_000);
+    let code = app.fresh_code(&user);
+    login_from(&app, &user, PASSWORD, &code, attacker)
+        .await
+        .expect("open again");
+}
+
+#[tokio::test]
+async fn a_lock_does_not_leak_a_difference_in_what_the_client_sees() {
+    // The locked address gets the same answer as any other failure.
+    let (app, user, _mock) = auth_app().await;
+    hammer_from(&app, &user, "203.0.113.66", 10).await;
+    app.clock().advance_ms(61_000);
+    let (status, _, body) = login_raw(&app, "ninad", "not the password!", "000000").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["message"], GENERIC);
+    let code = app.fresh_code(&user);
+    let err = login_from(&app, &user, PASSWORD, &code, "203.0.113.66")
+        .await
+        .expect_err("locked");
+    assert!(is_generic_401(&err), "{err:?}");
+}
+
+#[tokio::test]
+async fn failures_from_many_addresses_slow_the_account_down_but_never_lock_it() {
+    let (app, user, _mock) = auth_app().await;
+    let auth = app.auth.as_ref().unwrap();
+    auth.set_slow_down_delay(std::time::Duration::from_millis(400));
+
+    // Before the mark, an attempt is not delayed.
+    let started = std::time::Instant::now();
+    let code = app.fresh_code(&user);
+    login_from(&app, &user, PASSWORD, &code, "198.51.100.1")
+        .await
+        .expect("a normal login");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(400),
+        "no delay yet: {:?}",
+        started.elapsed()
+    );
+
+    // 50 addresses, one bad attempt each: nobody is locked, so nobody is refused for it.
+    for n in 0..50 {
+        let ip = format!("203.0.113.{n}");
+        login_from(&app, &user, "not the password!", "000000", &ip)
+            .await
+            .expect_err("wrong");
+    }
+    // Now every attempt on the account waits, the owner's too, and the owner still gets in.
+    let code = app.fresh_code(&user);
+    let started = std::time::Instant::now();
+    login_from(&app, &user, PASSWORD, &code, "198.51.100.1")
+        .await
+        .expect("the owner is slowed down, not locked out");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(400),
+        "delayed: {:?}",
+        started.elapsed()
+    );
+
+    // The pressure fades with time.
+    app.clock().advance_ms(16 * 60_000);
+    let code = app.fresh_code(&user);
+    let started = std::time::Instant::now();
+    login_from(&app, &user, PASSWORD, &code, "198.51.100.1")
+        .await
+        .expect("login");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(400),
+        "no longer delayed: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_good_login_clears_the_failures_of_that_address() {
+    let (app, user, _mock) = auth_app().await;
+    let ip = "198.51.100.10";
+    // Nine failures, then a success, then nine more: never ten in a row.
+    hammer_from(&app, &user, ip, 9).await;
+    app.clock().advance_ms(61_000);
+    let code = app.fresh_code(&user);
+    login_from(&app, &user, PASSWORD, &code, ip)
+        .await
+        .expect("login");
+    app.clock().advance_ms(61_000);
+    hammer_from(&app, &user, ip, 9).await;
+    app.clock().advance_ms(61_000);
+    let code = app.fresh_code(&user);
+    login_from(&app, &user, PASSWORD, &code, ip)
+        .await
+        .expect("still not locked");
 }

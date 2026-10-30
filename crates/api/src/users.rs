@@ -62,7 +62,7 @@ pub async fn execute(
             writeln!(
                 out,
                 "New authenticator secret for '{name}'. Their sessions were ended and any \
-                 lockout cleared. The old secret no longer works."
+                 kill-switch release lock cleared. The old secret no longer works."
             )?;
             print_enrollment(out, &enrollment)?;
         }

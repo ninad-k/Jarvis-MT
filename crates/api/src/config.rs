@@ -212,6 +212,30 @@ pub struct ServerConfig {
     /// here can drive the whole API, so list only origins you control.
     #[serde(default)]
     pub dev_origins: Vec<String>,
+    /// Seconds a client has to send the headers of a request (NET-1). It also ends a keep-alive
+    /// connection that has been idle for this long, and bounds the TLS handshake. 1 to 120.
+    #[serde(default = "default_header_read_timeout_secs")]
+    pub header_read_timeout_secs: u64,
+    /// Seconds a request may take to be answered, body upload included (NET-1), for every
+    /// route except the ones below and the WebSocket (which has no limit). 1 to 600.
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    /// The same for the routes that wait for a language model, speech or a batch of trades:
+    /// `/api/chat`, `/api/voice/*` and `/api/confirm/*`. At least `request_timeout_secs`, at
+    /// most 3600. Keep it above the `timeout_secs` of your slowest `[[llm.providers]]` entry.
+    #[serde(default = "default_long_request_timeout_secs")]
+    pub long_request_timeout_secs: u64,
+    /// Open connections the server accepts at once (NET-1); further ones are closed at once.
+    /// 1 to 100000.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// `POST /api/chat` requests per minute and session (NET-2); each can cost several model
+    /// calls. 1 to 10000.
+    #[serde(default = "default_chat_rate_limit")]
+    pub chat_rate_limit_per_minute: usize,
+    /// `POST /api/voice/transcribe` requests per minute and session (NET-2). 1 to 10000.
+    #[serde(default = "default_transcribe_rate_limit")]
+    pub transcribe_rate_limit_per_minute: usize,
 }
 
 impl Default for ServerConfig {
@@ -222,12 +246,36 @@ impl Default for ServerConfig {
             tls_cert: None,
             tls_key: None,
             dev_origins: Vec::new(),
+            header_read_timeout_secs: default_header_read_timeout_secs(),
+            request_timeout_secs: default_request_timeout_secs(),
+            long_request_timeout_secs: default_long_request_timeout_secs(),
+            max_connections: default_max_connections(),
+            chat_rate_limit_per_minute: default_chat_rate_limit(),
+            transcribe_rate_limit_per_minute: default_transcribe_rate_limit(),
         }
     }
 }
 
 fn default_bind() -> String {
     "127.0.0.1:8787".to_owned()
+}
+fn default_header_read_timeout_secs() -> u64 {
+    10
+}
+fn default_request_timeout_secs() -> u64 {
+    30
+}
+fn default_long_request_timeout_secs() -> u64 {
+    200
+}
+fn default_max_connections() -> usize {
+    256
+}
+fn default_chat_rate_limit() -> usize {
+    20
+}
+fn default_transcribe_rate_limit() -> usize {
+    20
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -412,6 +460,7 @@ impl Config {
         for origin in &self.server.dev_origins {
             validate_origin(origin)?;
         }
+        self.validate_server_limits()?;
         if !(1..=168).contains(&self.auth.session_hours) {
             bail!("auth.session_hours must be between 1 and 168");
         }
@@ -446,6 +495,48 @@ impl Config {
         }
         self.validate_trading()?;
         Ok(())
+    }
+
+    fn validate_server_limits(&self) -> anyhow::Result<()> {
+        let s = &self.server;
+        if !(1..=120).contains(&s.header_read_timeout_secs) {
+            bail!("server.header_read_timeout_secs must be between 1 and 120");
+        }
+        if !(1..=600).contains(&s.request_timeout_secs) {
+            bail!("server.request_timeout_secs must be between 1 and 600");
+        }
+        if !(s.request_timeout_secs..=3600).contains(&s.long_request_timeout_secs) {
+            bail!(
+                "server.long_request_timeout_secs must be between server.request_timeout_secs \
+                 and 3600"
+            );
+        }
+        if !(1..=100_000).contains(&s.max_connections) {
+            bail!("server.max_connections must be between 1 and 100000");
+        }
+        for (name, value) in [
+            ("chat_rate_limit_per_minute", s.chat_rate_limit_per_minute),
+            (
+                "transcribe_rate_limit_per_minute",
+                s.transcribe_rate_limit_per_minute,
+            ),
+        ] {
+            if !(1..=10_000).contains(&value) {
+                bail!("server.{name} must be between 1 and 10000");
+            }
+        }
+        Ok(())
+    }
+
+    /// Providers whose own timeout is not shorter than the time a chat request may take: a turn
+    /// that waits for them can be cut short by the server. For a start-up warning.
+    pub fn providers_slower_than_chat_timeout(&self) -> Vec<&str> {
+        self.llm
+            .providers
+            .iter()
+            .filter(|p| p.timeout_secs >= self.server.long_request_timeout_secs)
+            .map(|p| p.name.as_str())
+            .collect()
     }
 
     fn validate_trading(&self) -> anyhow::Result<()> {
@@ -799,5 +890,65 @@ mod tests {
     fn missing_file_explains_how_to_fix() {
         let err = Config::load_from(std::path::Path::new("definitely/not/here.toml")).unwrap_err();
         assert!(err.to_string().contains("jarvis.example.toml"), "{err}");
+    }
+
+    // ---- [server] limits (NET-1, NET-2) -------------------------------------------------------
+
+    #[test]
+    fn server_limits_have_documented_defaults() {
+        let c = Config::from_toml_str(&minimal("")).unwrap();
+        let s = &c.server;
+        assert_eq!(s.header_read_timeout_secs, 10);
+        assert_eq!(s.request_timeout_secs, 30);
+        assert_eq!(s.long_request_timeout_secs, 200);
+        assert_eq!(s.max_connections, 256);
+        assert_eq!(s.chat_rate_limit_per_minute, 20);
+        assert_eq!(s.transcribe_rate_limit_per_minute, 20);
+        // The example file spells the same numbers out.
+        let e = Config::from_toml_str(EXAMPLE).unwrap();
+        assert_eq!(e.server.header_read_timeout_secs, 10);
+        assert_eq!(e.server.request_timeout_secs, 30);
+        assert_eq!(e.server.long_request_timeout_secs, 200);
+        assert_eq!(e.server.max_connections, 256);
+        assert_eq!(e.server.chat_rate_limit_per_minute, 20);
+        assert_eq!(e.server.transcribe_rate_limit_per_minute, 20);
+    }
+
+    #[test]
+    fn server_limits_are_range_checked() {
+        let with = |line: &str| Config::from_toml_str(&minimal(&format!("[server]\n{line}")));
+        for ok in [
+            "header_read_timeout_secs = 1",
+            "request_timeout_secs = 600\nlong_request_timeout_secs = 600",
+            "long_request_timeout_secs = 3600",
+            "max_connections = 1",
+            "chat_rate_limit_per_minute = 10000",
+            "transcribe_rate_limit_per_minute = 1",
+        ] {
+            assert!(with(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "header_read_timeout_secs = 0",
+            "header_read_timeout_secs = 121",
+            "request_timeout_secs = 0",
+            "request_timeout_secs = 601",
+            "long_request_timeout_secs = 29",
+            "long_request_timeout_secs = 3601",
+            "request_timeout_secs = 100\nlong_request_timeout_secs = 50",
+            "max_connections = 0",
+            "chat_rate_limit_per_minute = 0",
+            "chat_rate_limit_per_minute = 10001",
+            "transcribe_rate_limit_per_minute = 0",
+        ] {
+            assert!(with(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn slow_providers_are_reported_against_the_chat_timeout() {
+        let c = Config::from_toml_str(&format!("{}\ntimeout_secs = 300", minimal(""))).unwrap();
+        assert_eq!(c.providers_slower_than_chat_timeout(), ["local"]);
+        let c = Config::from_toml_str(&minimal("")).unwrap();
+        assert!(c.providers_slower_than_chat_timeout().is_empty());
     }
 }

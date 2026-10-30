@@ -47,17 +47,24 @@ impl Security {
 ///   into `index.html`. No `unsafe-inline`, no `unsafe-eval`.
 /// - Styles: same origin; `style-src-attr 'unsafe-inline'` only for `style="..."`
 ///   attributes (the SvelteKit root wrapper has one), never for `<style>` blocks.
-/// - Connections: same origin plus WebSocket (`wss:` with TLS, `ws:` on plain loopback).
+/// - Connections: this server's own origin and nothing else (CSP-1). The live feed is a
+///   WebSocket to the same host and port, and CSP level 3 defines `'self'` to cover it: `ws:`
+///   matches a page served over `http:` and `wss:` one served over `https:`. Chrome, Edge
+///   (and so the WebView2 of the desktop shell) and Firefox implement that. The bare `ws:` and
+///   `wss:` schemes that this policy used to add let a script reach a WebSocket on *any* host;
+///   they were there for older Safari, which is not a supported browser. The host of the page
+///   varies (`127.0.0.1`, `localhost`, a domain), so naming it in the header would only repeat
+///   what `'self'` already means, with the extra risk of building a header from the `Host` of
+///   the request.
 pub fn content_security_policy(tls: bool, script_hashes: &[String]) -> String {
     let hashes: String = script_hashes
         .iter()
         .map(|h| format!(" 'sha256-{h}'"))
         .collect();
-    let ws = if tls { "wss:" } else { "ws:" };
     let mut policy = format!(
         "default-src 'self'; script-src 'self'{hashes}; style-src 'self'; \
          style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; \
-         font-src 'self'; connect-src 'self' {ws}; worker-src 'self'; manifest-src 'self'; \
+         font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; \
          object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     );
     if tls {
@@ -277,6 +284,7 @@ pub async fn apply(State(security): State<Arc<Security>>, req: Request, next: Ne
 fn normalise_error(response: Response) -> Response {
     let error = match response.status() {
         StatusCode::PAYLOAD_TOO_LARGE => ApiError::PayloadTooLarge,
+        StatusCode::REQUEST_TIMEOUT => ApiError::RequestTimeout,
         StatusCode::METHOD_NOT_ALLOWED => ApiError::MethodNotAllowed,
         StatusCode::NOT_FOUND => ApiError::NotFound("no such endpoint".to_owned()),
         StatusCode::UNSUPPORTED_MEDIA_TYPE
@@ -333,7 +341,7 @@ mod tests {
             "style-src-attr 'unsafe-inline'",
             "img-src 'self' data: blob:",
             "media-src 'self' blob:",
-            "connect-src 'self' wss:",
+            "connect-src 'self';",
             "worker-src 'self'",
             "frame-ancestors 'none'",
             "base-uri 'self'",
@@ -345,9 +353,32 @@ mod tests {
         assert!(!tls.contains("unsafe-eval"));
         assert!(!tls.contains("script-src 'self' 'unsafe-inline'"));
         let plain = content_security_policy(false, &[]);
-        assert!(plain.contains("connect-src 'self' ws:"));
+        assert!(plain.contains("connect-src 'self';"));
         assert!(!plain.contains("upgrade-insecure-requests"));
         assert!(plain.contains("script-src 'self';"));
+    }
+
+    /// CSP-1: connections are limited to this server's own origin. No bare `ws:`/`wss:` (any host),
+    /// no wildcard, no other host, with or without TLS.
+    #[test]
+    fn connect_src_is_this_origin_only() {
+        for tls in [false, true] {
+            let policy = content_security_policy(tls, &["abc".to_owned()]);
+            let connect = policy
+                .split(';')
+                .map(str::trim)
+                .find(|d| d.starts_with("connect-src"))
+                .expect("a connect-src directive");
+            assert_eq!(connect, "connect-src 'self'", "tls = {tls}: {policy}");
+            for scheme in ["ws:", "wss:", "http:", "https:", "*"] {
+                assert!(
+                    !policy
+                        .split_whitespace()
+                        .any(|t| t == scheme || t == format!("{scheme};")),
+                    "{scheme} must not appear as a source (tls = {tls}): {policy}"
+                );
+            }
+        }
     }
 
     fn headers(origin: Option<&str>, host: Option<&str>) -> HeaderMap {

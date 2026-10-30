@@ -21,6 +21,7 @@ use crate::auth::{AuthParts, AuthReleaseGuard, AuthService, Session};
 use crate::clock::{ServerClock, TimeSource, WallClock};
 use crate::config::{Config, Mode};
 use crate::events::EventBus;
+use crate::ratelimit::RateLimiter;
 use crate::symbols::SymbolResolver;
 use crate::tools::ToolRegistry;
 use crate::trading::{Trading, TradingParts, WriteSink};
@@ -190,6 +191,19 @@ struct Inner {
     voice: Voice,
     shutdown: ShutdownSignal,
     ws_slots: Arc<Semaphore>,
+    /// Per-session budgets of the expensive routes (NET-2).
+    chat_limiter: RateLimiter,
+    transcribe_limiter: RateLimiter,
+}
+
+/// The window of the per-session request budgets.
+const REQUEST_RATE_WINDOW_MS: i64 = 60_000;
+
+/// Which expensive route a request budget is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Budget {
+    Chat,
+    Transcribe,
 }
 
 /// Cheap to clone; shared by every request handler.
@@ -239,6 +253,10 @@ impl AppState {
             })
             .collect();
         let clock = ServerClock::default();
+        let (chat_per_minute, transcribe_per_minute) = (
+            config.server.chat_rate_limit_per_minute,
+            config.server.transcribe_rate_limit_per_minute,
+        );
         let mode = Arc::new(ModeMonitor::new(config.mode));
         let events = EventBus::new();
         let trading = Trading::new(TradingParts {
@@ -272,6 +290,8 @@ impl AppState {
             voice: overrides.voice.unwrap_or_else(Voice::disabled),
             shutdown: ShutdownSignal::new(),
             ws_slots: Arc::new(Semaphore::new(MAX_SOCKETS)),
+            chat_limiter: RateLimiter::new(chat_per_minute, REQUEST_RATE_WINDOW_MS),
+            transcribe_limiter: RateLimiter::new(transcribe_per_minute, REQUEST_RATE_WINDOW_MS),
         }))
     }
 
@@ -426,6 +446,16 @@ impl AppState {
     pub fn ws_slots(&self) -> Arc<Semaphore> {
         self.0.ws_slots.clone()
     }
+    /// Spend one request of `budget` for `key` (the session, or the peer address when there is
+    /// none). `Err(retry_after_secs)` when the key is over its limit (NET-2).
+    pub fn spend_budget(&self, budget: Budget, key: &str) -> Result<(), u64> {
+        let now = self.0.trading.now_ms();
+        match budget {
+            Budget::Chat => self.0.chat_limiter.check(key, now),
+            Budget::Transcribe => self.0.transcribe_limiter.check(key, now),
+        }
+    }
+
     pub fn providers(&self) -> &[ProviderEntry] {
         &self.0.providers
     }
@@ -458,11 +488,15 @@ impl AppState {
     pub fn spawn_background_tasks(&self) -> tokio::task::JoinHandle<()> {
         let trading = self.0.trading.clone();
         let auth = self.0.auth.clone();
+        let state = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(PURGE_INTERVAL);
             loop {
                 tick.tick().await;
                 trading.purge();
+                let now = trading.now_ms();
+                state.0.chat_limiter.purge(now);
+                state.0.transcribe_limiter.purge(now);
                 if let Some(auth) = &auth {
                     auth.purge().await;
                 }

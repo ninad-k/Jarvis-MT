@@ -32,6 +32,8 @@ pub struct ScriptedLlm {
     script: Mutex<VecDeque<Result<ChatResponse, LlmError>>>,
     /// Returned once the script is exhausted (when set); otherwise an error.
     repeat: Option<ChatResponse>,
+    /// Waited before every answer (a slow model).
+    delay: Duration,
     pub requests: Mutex<Vec<ChatRequest>>,
 }
 
@@ -41,6 +43,18 @@ impl ScriptedLlm {
             name: name.to_owned(),
             script: Mutex::new(script.into()),
             repeat: None,
+            delay: Duration::ZERO,
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A model that takes `delay` to answer, then says "late".
+    pub fn slow(name: &str, delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_owned(),
+            script: Mutex::new(VecDeque::new()),
+            repeat: Some(text_response("late")),
+            delay,
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -51,6 +65,7 @@ impl ScriptedLlm {
             name: name.to_owned(),
             script: Mutex::new(VecDeque::new()),
             repeat: Some(response),
+            delay: Duration::ZERO,
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -70,6 +85,9 @@ impl LlmProvider for ScriptedLlm {
     }
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.requests.lock().unwrap().push(request.clone());
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
         if let Some(next) = self.script.lock().unwrap().pop_front() {
             return next;
         }
@@ -204,7 +222,7 @@ pub fn temp_db_url() -> String {
 }
 
 /// The secret the test auth service signs and encrypts with.
-pub const JWT_SECRET: &str = "test-secret-test-secret-test-secret-1234";
+pub const JWT_SECRET: &str = "vNERxatXB2lue4f0GwbfV416gXR7t8oIcjeNGJtSdXhePkwHtQb7O8T/ZgIHfLLN";
 
 pub struct TestApp {
     pub state: AppState,

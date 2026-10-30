@@ -976,6 +976,9 @@ pub struct Mismatch {
     pub field: &'static str,
     pub said: String,
     pub proposed: String,
+    /// True when the user's latest message did not ask for this kind of action at all (a
+    /// question or chit-chat, LLM-1): the model must ask the user to state it, not retry.
+    pub explicit_request_needed: bool,
 }
 
 fn mismatch(
@@ -987,6 +990,17 @@ fn mismatch(
         field,
         said: said.to_string(),
         proposed: proposed.to_string(),
+        explicit_request_needed: false,
+    })
+}
+
+/// The latest message did not ask for what was proposed.
+fn explicit_request_needed(said: &str, proposed: impl ToString) -> Result<(), Mismatch> {
+    Err(Mismatch {
+        field: "action",
+        said: said.to_owned(),
+        proposed: proposed.to_string(),
+        explicit_request_needed: true,
     })
 }
 
@@ -1058,9 +1072,20 @@ fn action_name(a: &ProposedAction) -> &'static str {
 }
 
 /// Reject a proposal that contradicts facts the user stated in `utterance_intent`.
-/// Facts the user did not state are not checked (the LLM may fill them from context,
-/// e.g. "close it" after discussing one position). `Other`/`Confirm`/`Cancel` intents
-/// never block.
+/// Facts the user did not state are not checked (the LLM may fill them from context, e.g.
+/// volume after "buy gold" when the user then answered "0.1"; "close it" after discussing
+/// one position).
+///
+/// What the latest message must have been (LLM-1):
+///
+/// - A **new order** needs an `Order` intent with a side. After a question, chit-chat, a bare
+///   "yes" or any other message the parser reads as `Other`/`Confirm`/`Cancel` (or as a close,
+///   modify or cancel request), the model cannot open a trade; the mismatch tells it to ask the
+///   user to state the trade.
+/// - A **close** or **cancel** may follow `Other`/`Confirm`/`Cancel` ("close it" after the model
+///   and the user discussed one position), except that a close which can hit more than one
+///   position (several tickets, or a symbol/side/all filter) needs an explicit `Close` intent.
+/// - A **modify** may follow `Other`/`Confirm`/`Cancel`.
 ///
 /// Notes:
 /// - The proposal must be the same *kind* of action the user asked for (field
@@ -1070,13 +1095,31 @@ fn action_name(a: &ProposedAction) -> &'static str {
 /// - A close/cancel proposal that lists explicit tickets cannot be checked against the
 ///   user's symbol, side or "all" (the gate resolves those from the account), so only
 ///   the tickets the user named are compared.
+/// - The parser reads "should I buy gold?" as an order with a side; telling a question from an
+///   instruction in the same words is left to the model and to the user's confirmation.
 pub fn cross_check(utterance_intent: &Intent, proposal: &ProposedAction) -> Result<(), Mismatch> {
     match (utterance_intent, proposal) {
-        (Intent::Other | Intent::Confirm | Intent::Cancel, _) => Ok(()),
-        (Intent::Order(f), ProposedAction::Order(o)) => check_order(f, o),
+        (Intent::Order(f), ProposedAction::Order(o)) => {
+            if f.side.is_none() {
+                return explicit_request_needed(NO_ORDER_SAID, action_name(proposal));
+            }
+            check_order(f, o)
+        }
         (Intent::Close(f), ProposedAction::Close(c)) => check_close(f, c),
         (Intent::CancelOrders(f), ProposedAction::Cancel(c)) => check_cancel(f, c),
         (Intent::Modify(f), ProposedAction::Modify(m)) => check_modify(f, m),
+        (Intent::Other | Intent::Confirm | Intent::Cancel, ProposedAction::Order(_)) => {
+            explicit_request_needed(NO_ORDER_SAID, action_name(proposal))
+        }
+        (Intent::Other | Intent::Confirm | Intent::Cancel, ProposedAction::Close(c))
+            if !closes_one_position(c) =>
+        {
+            explicit_request_needed(
+                "nothing that asks to close several positions",
+                "closing every position that matches a filter or a list",
+            )
+        }
+        (Intent::Other | Intent::Confirm | Intent::Cancel, _) => Ok(()),
         (said, other) => {
             let said_name = match said {
                 Intent::Order(_) => "open a new trade",
@@ -1087,6 +1130,14 @@ pub fn cross_check(utterance_intent: &Intent, proposal: &ProposedAction) -> Resu
             mismatch("action", said_name, action_name(other))
         }
     }
+}
+
+const NO_ORDER_SAID: &str = "nothing that asks to buy or sell";
+
+/// A close that names exactly one ticket can only touch that position. Anything else (a filter,
+/// `all`, several tickets) can touch many, and the gate only learns how many from the account.
+fn closes_one_position(c: &CloseSelector) -> bool {
+    c.tickets.len() == 1 && c.symbol.is_none() && c.side.is_none() && !c.all
 }
 
 fn check_order(f: &OrderFacts, o: &OrderIntent) -> Result<(), Mismatch> {
