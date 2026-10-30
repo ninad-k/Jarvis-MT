@@ -1,179 +1,379 @@
-# Runbook (Sprint 1)
+# Runbook
 
-How to run, check and fix the Sprint 1 stack on a Windows PC. Setup steps are in the [README](../README.md). Sprint 1 is read-only: nothing here places or changes a trade.
+Day-to-day operation of Jarvis MT on a Windows PC or VPS: starting and stopping, health checks, logs, the
+audit log, users, the kill switch, recovery and backups. For first-time setup see the [README](../README.md).
+For the Windows service see [windows-service.md](windows-service.md). For settings see
+[configuration.md](configuration.md).
 
-Run all commands from the repo root (`D:\Projects\Jarvis-MT` in this checkout). The config path and the audit database path are relative to the working directory.
+Run commands from the repository root (for example `D:\Projects\Jarvis-MT`). The config path, `.env`, `data\`,
+`logs\` and `models\` are all relative to the working directory, so starting from another folder points the
+server at the wrong files.
 
 ## Ports
 
-| Port | Component | Started by | Notes |
+| Port | Component | Bound to | Notes |
 |---|---|---|---|
-| 5555 | `JarvisBridge` EA (ZeroMQ REP) | Attaching the EA in MT5, or `mock_server` | `tcp://127.0.0.1:5555`. Change `bridge.endpoint` in the config and the EA input `InpEndpoint` together. The EA refuses anything but loopback. |
-| 8787 | `jarvis-api` (HTTP) | `cargo run -p jarvis-api` | `server.bind` in the config. Loopback only. |
-| 5173 | Vite dev server (web) | `pnpm -C web dev` | Vite's default port. The API's CORS allow-list covers `localhost:5173` and `127.0.0.1:5173`. |
-| 11434 | Ollama | The Ollama app | `llm.providers` entry `local`, `base_url`. |
+| 8787 | `jarvis-api` (HTTP, WebSocket, web UI) | `server.bind`, `127.0.0.1:8787` by default | Non-loopback needs TLS and login. Expose it only as the server's TLS port. |
+| 5555 | `JarvisBridge` EA (ZeroMQ REP) | `127.0.0.1` only | Must match `bridge.endpoint` and the EA input `InpEndpoint`. Never open it on the network. |
+| 5173 | Vite dev server | Local | `pnpm -C web dev`. Proxies `/api` to port 8787. |
+| 11434 | Ollama | `127.0.0.1` | Used by the `local` provider. Do not expose it. |
+| 443 | Reverse proxy (optional) | Public | Terminates TLS in front of a loopback `jarvis-api`. See the [VPS guide](vps.md). |
 
-Only one process can bind port 5555. Stop `mock_server` before you attach the real EA. If `bind(...) failed` appears in the Experts log, another process has the port.
+Only one process can bind a port. If `bind(...) failed` appears in the EA log, or `binding 127.0.0.1:8787 ... is
+another jarvis-api running?` appears in the server log, something else holds the port. Stop the other process first.
 
 ## Starting
 
-Start in this order:
+Start in this order: MT5 (logged in, with the EA attached), then Ollama if you use it, then the API, then
+the web UI if you use the Vite dev server.
 
-1. **MT5.** Open the demo terminal and check that it is logged into a demo account.
-2. **JarvisBridge.** Attach it if it is not already on a chart, then check the Experts log for the listening line (see below).
-3. **Ollama**, if you use the `local` provider. Check the model is present with `ollama list`. Pull it once with `ollama pull qwen3.5:9b`.
-4. **API.**
-
-   ```powershell
-   cargo run -p jarvis-api
-   ```
-
-   The log should show `jarvis-api 0.1.0 starting`, then `bridge reachable` (or a warning if the EA is not up), then `listening on http://127.0.0.1:8787`. The API starts even if MT5 is down.
-
-5. **Web UI.**
-
-   ```powershell
-   pnpm -C web dev
-   ```
-
-Check the stack:
+**Development (console, Vite dev server)**
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8787/api/status | ConvertTo-Json -Depth 5
+cargo run -p jarvis-api
+pnpm -C web dev                      # second terminal, http://localhost:5173
 ```
 
-Expect `"connected": true` and `"trade_mode": "demo"` under `bridge`, and `"mode_mismatch": false` at the top level. Under `llm`, the `local` provider should show `"available": true`. The API does not probe providers over the network, so `available` only says whether the provider could be built from its config (for cloud providers, whether the API key variable is set).
+**Release binary (console)**
+
+```powershell
+cargo build --release -p jarvis-api
+.\target\release\jarvis-api.exe
+```
+
+Build the web UI first if you want the API to serve it (`pnpm -C web build`), and set `static_dir = "web/build"`.
+Then open `http://127.0.0.1:8787` (or the `https://` address when TLS is on).
+
+**Windows service**
+
+```powershell
+Start-Service JarvisMT               # or: .\target\release\jarvis-api.exe service start (elevated)
+```
+
+See [windows-service.md](windows-service.md).
+
+The log of a healthy start contains, in order: `jarvis-api <version> starting`, `bridge reachable` (or a
+warning that it is not up yet, which is allowed), and `listening on http://...` or `listening on https://...`.
+The server starts even when MT5 is down, and the bridge is checked again on every request.
 
 ## Stopping
 
-- **Web UI:** press Ctrl+C in its terminal.
-- **API:** press Ctrl+C. The log shows `Ctrl+C received, shutting down`, then `shut down cleanly`. Chat sessions are kept in memory, so they are lost on restart.
-- **EA:** right-click the chart and remove the Expert Advisor (Expert Advisors > Remove). The Experts log shows `JarvisBridge stopped (reason N, M requests served).`
-- **mock_server:** press Ctrl+C.
-- **Ollama:** quit it from the tray icon if you want to free memory.
+- **Console:** Ctrl+C. The log shows `Ctrl+C received`, then `shut down cleanly`. Open WebSockets are closed and
+  other connections get 10 seconds to finish.
+- **Service:** `Stop-Service JarvisMT`.
+- **EA:** remove it from the chart (right-click the chart, Expert Advisors, Remove). The Experts log shows
+  `JarvisBridge stopped (reason N, M requests served).`
+- **Mock EA:** Ctrl+C in its terminal.
 
-## The JarvisBridge EA
+Chat history and confirmation tokens are held in memory. A restart clears chat sessions and any pending preview. The
+kill switch is saved in the database: if it was engaged when the server stopped, it is engaged again after the restart.
 
-### Expected Experts log lines
+## Health checks
 
-Open the Toolbox (Ctrl+T) and the Experts tab.
-
-| Line | Meaning |
-|---|---|
-| `JarvisBridge 0.1.0 listening on 127.0.0.1:5555 (libzmq 4.2.1, read-only)` | Started. The libzmq version is the one in the loaded DLL. |
-| `JarvisBridge: 'Allow DLL imports' is required for this EA (libzmq.dll).` | DLL imports are off for this EA. Init fails. See below. |
-| `JarvisBridge: refusing InpEndpoint '...': only tcp://127.0.0.1:<port> is allowed (localhost only).` | `InpEndpoint` is not a loopback address. Init fails. |
-| `JarvisBridge: bind(...) failed: ...` | The port is in use, usually by `mock_server` or another copy of the EA. |
-| `JarvisBridge: socket rebuilt, listening on ...` | The socket was recreated after a failed reply. This is normal. |
-
-For one line per request, set the EA input `InpVerbose` to `true`. It is off by default. Each line shows `cmd`, `id`, `ok`, `retcode` and the time taken.
-
-### Enabling DLL imports for this EA only
-
-`JarvisBridge` needs `libzmq.dll`, so DLL imports must be allowed for it.
-
-1. In the Navigator (Ctrl+N), open Expert Advisors > JarvisMT > JarvisBridge and drag it onto a chart. If the EA is already attached, remove it first.
-2. In the properties window, open the **Common** tab and tick **Allow DLL imports**.
-3. Click OK.
-
-Do not turn on the global option under Tools > Options > Expert Advisors. That would allow DLL imports for every EA. The Algo Trading button does not affect this EA.
-
-### JarvisSelfTest
-
-`Scripts > JarvisMT > JarvisSelfTest` runs canned requests through the EA's request dispatcher. It uses no ZeroMQ and no DLLs, so it does not need DLL imports. It prints `PASS` or `FAIL` for each check in the Experts log, and prints live terminal data (ping, account, positions) so you can compare it with the terminal. The last line is `=== JarvisSelfTest done: <N> passed, <M> failed ===`. Run it after compiling or upgrading the EA.
-
-## Logs and the audit database
-
-**Where the logs are**
-
-- **API:** the console where `cargo run -p jarvis-api` is running. There is no log file. The level comes from `RUST_LOG` in `.env`. The default is `info,jarvis_api=debug,jarvis_bridge_client=debug`.
-- **Web UI:** the console of `pnpm -C web dev`, and the browser's developer tools console.
-- **EA:** the Experts tab in the MT5 Toolbox. MetaTrader also keeps daily Experts logs in `<data folder>\MQL5\Logs`.
-
-**Where the audit database is**
-
-- The path is `data\jarvis.db`, relative to the working directory. Started from the repo root, that is `D:\Projects\Jarvis-MT\data\jarvis.db`. The `data/` folder is gitignored.
-- The database runs in WAL mode. While the API runs, `jarvis.db-wal` and `jarvis.db-shm` sit next to it. Do not copy `jarvis.db` alone while the API is running.
-- The table is `audit(id, ts, session_id, kind, payload)`. `ts` is UTC, and `payload` is JSON text. The kinds are `utterance`, `tool_call`, `bridge_request`, `bridge_reply`, `assistant_reply` and `error`.
-- The table is append-only. Triggers abort any `UPDATE` or `DELETE`. Do not try to change it.
-
-**How to query it**
-
-The `sqlite3` command-line tool is not installed on this machine. Either install it from sqlite.org, or use the Python one-liner, which opens the file read-only and needs no install:
+`GET /api/health` needs no login and answers exactly `{"ok":true}` when the server is up. Use it for monitors:
 
 ```powershell
-python -c "import sqlite3; c = sqlite3.connect('file:data/jarvis.db?mode=ro', uri=True); [print(r) for r in c.execute('SELECT id, ts, session_id, kind, payload FROM audit ORDER BY id DESC LIMIT 20')]"
+Invoke-RestMethod http://127.0.0.1:8787/api/health
 ```
 
-With `sqlite3`, the same SQL works from the repo root:
+With TLS on, use the `https://` address. The certificate must be trusted by Windows, for example one made by mkcert.
+
+`GET /api/status` needs a session when login is on, so it is not a monitor target. Use it from the web UI, or after
+logging in. It reports the MT5 bridge (`connected`, `latency_ms`, `trade_mode`, `terminal_connected`), the
+mode, `mode_mismatch`, the kill switch, voice (`stt`, `tts`), limits and the LLM providers. It never fails because the
+bridge is down. It reports that instead.
+
+Expected values in a normal demo session: `"mode": "demo"`, `"mode_mismatch": false`, `"connected": true`,
+`"trade_mode": "demo"`, `"kill_switch": {"engaged": false, ...}`.
+
+## Logs
+
+| Where | What | How to read it |
+|---|---|---|
+| Console | Server log when started with `jarvis-api` | Look at the window. The level comes from `RUST_LOG` in `.env`. |
+| `logs\jarvis-api.log.<date>` | Server log when running as the service (one file per day) | Open the newest file. Old files are not deleted, so delete them yourself. |
+| Toolbox > Experts (MT5) | EA log | Set the EA input `InpVerbose` to `true` for one line per request. |
+| `%APPDATA%\MetaQuotes\Terminal\<id>\MQL5\Logs` | Daily MT5 logs | Useful when the Experts tab has been cleared. |
+| `data\jarvis.db`, table `audit` | Structured record of every step | See below. |
+
+Browser developer tools show the web UI console. A Content Security Policy error in that console after a web
+rebuild is covered in the troubleshooting table.
+
+## The audit log
+
+Every chat turn, preview, confirmation, cancellation, trade result, kill switch change, login and failed login, and
+voice transcription or speech is recorded in the `audit` table of `data\jarvis.db`. The table is append-only: triggers
+refuse `UPDATE` and `DELETE`. Audio is never stored, only the text.
+
+Ways to read it:
+
+- **Web UI:** the audit page (`/audit`), which lists the newest entries first.
+- **API:** `GET /api/audit?limit=100` (needs a session). Add `&before_id=<id>` to page back.
+- **SQL:** see below. The file is in WAL mode, so `jarvis.db-wal` and `jarvis.db-shm` exist while the server runs.
+  Do not copy `jarvis.db` alone while the server runs.
+
+Row kinds: `utterance` (what you typed or said), `intent` (a confirm, cancel, order, close, modify or cancel-orders
+request; questions and small talk get none), `tool_call`, `bridge_request`, `bridge_reply`, `preview`,
+`gate_rejected`, `confirm`, `confirm_second`, `cancel`, `trade_result`, `kill_switch`, `login`, `login_failed`,
+`voice_stt`, `voice_tts`, `error`, and the final reply row written at the end of each chat turn.
+
+Query with the `sqlite3` command-line tool if it is installed:
 
 ```powershell
 sqlite3 data\jarvis.db "SELECT id, ts, session_id, kind, payload FROM audit ORDER BY id DESC LIMIT 20;"
 ```
 
-Other useful queries:
+Or with Python's standard library, read-only, which needs no install:
+
+```powershell
+python -c "import sqlite3; c = sqlite3.connect('file:data/jarvis.db?mode=ro', uri=True); [print(r) for r in c.execute('SELECT id, ts, kind, payload FROM audit ORDER BY id DESC LIMIT 20')]"
+```
+
+Useful queries:
 
 ```sql
--- Every step of one chat session (use the session_id from the chat response)
+-- Everything that touched trading, newest first
+SELECT id, ts, kind, payload FROM audit
+ WHERE kind IN ('preview', 'confirm', 'confirm_second', 'cancel', 'trade_result', 'kill_switch')
+ ORDER BY id DESC LIMIT 50;
+
+-- One chat session, in order (session_id is in the chat response)
 SELECT ts, kind, payload FROM audit WHERE session_id = '<uuid>' ORDER BY id;
 
--- Tool calls that failed
-SELECT ts, payload FROM audit WHERE kind = 'tool_call' AND payload LIKE '%"ok":false%';
+-- Trade writes whose outcome is unknown (see "Recovering from outcome_unknown")
+SELECT ts, payload FROM audit WHERE kind = 'trade_result' AND payload LIKE '%"outcome":"unknown"%';
 
--- Row count per kind
+-- Failed logins and why (reason is one of unknown_user, bad_password, bad_code, code_reused, locked, rate_limited, malformed)
+SELECT ts, payload FROM audit WHERE kind = 'login_failed' ORDER BY id DESC LIMIT 50;
+
+-- Rows per kind
 SELECT kind, COUNT(*) FROM audit GROUP BY kind;
 ```
 
-## Configuration
+Passwords and TOTP codes are never written to the log.
 
-- **Which file:** `config/jarvis.toml`, or the file named by the `JARVIS_CONFIG` environment variable. The default path is relative to the working directory, so start from the repo root or set `JARVIS_CONFIG`.
-- **When it is read:** at startup only. After you edit it, restart the API.
-- **Missing file:** the API stops with `config file not found at ...` and tells you to copy `config/jarvis.example.toml`.
-- **Secrets:** `.env` in the repo root. The API loads it at startup. It holds `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, and `RUST_LOG` for the log level.
-- **Symbol names:** `[symbols] suffix` is appended to every resolved name, for example `.m`. `[symbols.aliases]` maps spoken names to broker symbols.
+## Users
+
+Login accounts are managed only from the machine that runs Jarvis. There is no network endpoint for it. Every
+`user` command reads `.env` in the working directory, so run it from the repository root, or from the folder the
+service runs from. It also needs `JARVIS_JWT_SECRET` to be set.
+
+```powershell
+cargo run -p jarvis-api -- user add <name>          # asks for the password twice, shows a QR code and the key
+cargo run -p jarvis-api -- user list                 # name, created time, last login, LOCKED flag
+cargo run -p jarvis-api -- user reset-totp <name>    # new authenticator secret (lost phone); ends their sessions, clears a lockout
+cargo run -p jarvis-api -- user remove <name>        # asks you to type the name; -y skips the question
+```
+
+With the release binary, replace `cargo run -p jarvis-api --` with `.\target\release\jarvis-api.exe`.
+
+Notes:
+
+- Usernames are 1 to 64 characters from `a-z`, `A-Z`, `0-9` and `. _ - @`. They are compared case-insensitively.
+- Passwords are at least 12 characters and at most 256 bytes.
+- The QR code is printed once. Scan it with an authenticator app, or enter the key by hand. Run `reset-totp` to get a new one.
+- `user add` with `--password-stdin` reads the password from the first line of standard input, for scripts. Avoid it
+  in shared shell history.
+- `remove` ends the user's sessions at once.
+
+## Rotating the JWT secret
+
+Change `JARVIS_JWT_SECRET` only when you have to, for example when `.env` may have leaked.
+
+1. Stop the server.
+2. Replace the value in `.env` with a new random value of at least 32 bytes (see [configuration.md](configuration.md)).
+3. Start the server. Everyone is logged out, because session tokens are signed with the old key.
+4. Run `user reset-totp <name>` for **every** user. Their stored TOTP secrets were encrypted with the old key and cannot be read
+   with the new one, so logins fail until each user has a new secret. Give each user the new QR code.
+
+A backup taken before the rotation needs the old `.env` to restore its TOTP secrets. Keep the old `.env` with that backup, and keep it private.
+
+## The kill switch
+
+The kill switch blocks every write at once: new orders, closes, changes and cancellations. It is the first thing to
+reach for when something looks wrong.
+
+- **Engage:** use the kill switch control in the web UI, or `POST /api/killswitch` with `{"engaged": true, "reason": "manual"}`.
+  Engaging needs only a session. It cancels every pending preview at once.
+- **Release:** use the same control. When login is on, the release needs a fresh authenticator code (the request body is
+  `{"engaged": false, "totp": "<6 digits>"}`). Each code works once, so wait for the next 30-second code after a failure.
+- **It does not close positions.** Close positions in MT5 or with the close controls.
+- **It is saved to disk.** A restart, or the service restarting itself after a crash, does not turn trading back on: the
+  switch comes back engaged and is only released with a session and a fresh authenticator code. If the saved state cannot
+  be read, trading stays off. `[trading] kill_switch_engaged = true` additionally starts the server with it engaged.
+- **It is checked again before every single write** in a batch, so a batch stops part way. The response reports `"aborted": "kill_switch"`,
+  and the writes that were not sent are listed as not sent.
+- The EA-side refusal of writes is separate: turning off Algo Trading in MT5 also stops writes. Use both if you
+  are leaving the PC and do not want any trade to happen.
+
+Engaging does not change MT5 state. Check your positions and pending orders in MT5 after an incident.
+
+## Recovering from outcome_unknown
+
+`504 outcome_unknown` means a write was sent to the EA and no reply came back in time. MT5 may or may not have executed it.
+The API does not retry it, and the server tells the web UI to refresh positions.
+
+1. **Do not send the same trade again.** Do not retry the request from the chat, the confirm button or a voice command.
+2. Check MT5: the Trade tab (open positions and pending orders) and the Account History tab (deals) for the symbol and the time.
+   You can also run the read-only commands of the bridge CLI, which do not change anything:
+   ```powershell
+   cargo run -p jarvis-bridge-client --example bridge_cli -- positions
+   cargo run -p jarvis-bridge-client --example bridge_cli -- orders
+   cargo run -p jarvis-bridge-client --example bridge_cli -- history --days 1
+   ```
+3. Read the message. It says which write was unknown, how many earlier writes completed, and that the remaining writes were not sent.
+   The audit log has the `trade_result` row with `"outcome":"unknown"` (see the queries above).
+4. If the position is not there and you still want it, make a new preview and confirm it. If it is there, manage it as normal.
+5. If the EA has stopped answering, follow "EA not answering" below before doing anything else.
+
+## EA re-attach after an MT5 restart
+
+After MT5 restarts, check that JarvisBridge is still attached. The chart shows the smiley face in the top-right corner when
+an EA is running. The Experts tab should show the listening line:
+
+```text
+JarvisBridge 0.2.0 listening on 127.0.0.1:5555 (libzmq 4.2.1, writes only on request, real accounts refused)
+```
+
+With `InpAllowReal` set to `true`, the last part reads `real accounts ALLOWED (InpAllowReal=true)`.
+
+If the line is missing, attach the EA again:
+
+1. Open the chart, then Navigator (Ctrl+N), Expert Advisors > JarvisMT > JarvisBridge, and drag it onto the chart.
+2. On the Common tab, tick **Allow DLL imports** and **Allow Algo Trading**. Leave the global option under Tools > Options > Expert Advisors off.
+3. Make sure the **Algo Trading** button on the toolbar is on. Writes are refused while it is off.
+
+For a real account, the EA also needs its `InpAllowReal` input set to `true`. Do not set it unless you have decided to trade real money.
+
+If the server is running while the EA is re-attached, the next request reconnects automatically. No restart is needed.
+
+## Updating the models
+
+Voice models are fetched by `scripts/fetch-models.ps1`. The script pins each download to a source revision and a SHA-256 hash,
+skips files that already match, and refuses a file whose hash does not match.
+
+```powershell
+pwsh scripts/fetch-models.ps1            # install missing or mismatched files
+pwsh scripts/fetch-models.ps1 -Force     # download and install again even if they match
+```
+
+Models are loaded at server start. After any change, restart the server. Changing a pinned revision or hash is a code change
+and needs review.
+
+## Upgrading
+
+1. Stop the server or the service, and take a backup (see below).
+2. Update the source: `git pull` on `main`, or the tag you want.
+3. Rebuild: `cargo build --release -p jarvis-api`, and `pnpm -C web install` followed by `pnpm -C web build` if `web/` changed.
+4. If `mql5/` changed, reinstall and recompile the EA, then re-attach it:
+   ```powershell
+   pwsh scripts/install-ea.ps1 -DataFolder <32-character-id>
+   pwsh scripts/compile-ea.ps1 -DataFolder <32-character-id>
+   ```
+5. Start the server or the service. Migrations run at startup and are applied once each.
+6. Check `/api/health`, then `/api/status`, and place nothing until both look right.
+7. Read the [CHANGELOG](../CHANGELOG.md) for the version you moved to.
+
+## Backups
+
+| What | Where | Why |
+|---|---|---|
+| Database | `data\jarvis.db`, plus `data\jarvis.db-wal` and `data\jarvis.db-shm` if present | The audit log, users (password hashes, encrypted TOTP secrets) and revoked sessions |
+| Config | `config\jarvis.toml` | Your limits, symbols and providers |
+| Secrets | `.env` | `JARVIS_JWT_SECRET` and provider keys. Needed with the database to read TOTP secrets. |
+| Models | `models\` | Optional. Re-download with `fetch-models.ps1`. |
+| Logs | `logs\` | Optional. Useful for an incident. |
+
+Take a consistent copy of the database. Either stop the server or the service first, then copy all three database files, or use SQLite's
+online backup while the server runs (with the `sqlite3` tool installed):
+
+```powershell
+sqlite3 data\jarvis.db ".backup 'D:\backups\jarvis-2026-10-30.db'"
+```
+
+Store backups where only the trading user can read them. A copy of `.env` and the database together contains everything needed to log in
+to Jarvis, so treat it like the secrets it is. Test a restore on another folder before you rely on it.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/api/status` shows `"connected": false`. Chat answers say MT5 is not reachable. | The EA is not attached, or MT5 is closed. A refused connection is reported after about 2 s on Windows. | Attach `JarvisBridge` and check for the listening line. The API keeps retrying on each call. No restart is needed. |
-| `503 bridge_unavailable`, "bridge did not reply within 3000 ms" | The EA is attached but not answering. The timeout is `bridge.timeout_ms`. | Check the Experts log for errors. Remove and re-attach the EA. Raise `bridge.timeout_ms` only if replies are slow. |
-| `unknown symbol: XAUUS` (the chat tool reports it, and `/api/watchlist` lists it under `errors`) | The broker's symbol name differs, for example `XAUUSD.m`, `GOLD` or `NAS100`. | Find the exact name in Market Watch (Ctrl+M). Set `[symbols] suffix` or add an entry under `[symbols.aliases]` in `config/jarvis.toml`. Restart the API. |
-| `409 mode_mismatch` on chat, and `"mode_mismatch": true` in `/api/status` | The config has `mode = "demo"`, but the terminal is logged into a real account. | Log the terminal into the demo account. Do not switch `mode` to `live` to get past this. The flag clears on the next successful bridge call after the account is fixed. |
-| API exits at startup: `refusing to start: config mode is 'demo' but the MT5 account reports trade_mode 'Real'` | The same mismatch, detected at startup while the bridge is up. | Same as above. |
-| The first reply from the `local` provider takes about 100 s | Ollama is loading `qwen3.5:9b` into memory. Later replies take about 2 s. | Wait for the first reply, and keep Ollama running. The provider's `timeout_secs` is 180, and the web UI also gives up after 180 s. |
-| `502 llm_error` on chat | The provider call failed. For `local`, Ollama is not running or the model is not pulled. | Start Ollama, then run `ollama pull qwen3.5:9b`. |
-| A cloud provider shows `"available": false` | Its API key variable is not set (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`). | Set the key in `.env` and restart the API. |
-| EA init fails with `'Allow DLL imports' is required` | DLL imports are off for this EA. | Enable them on the EA's Common tab and re-attach (see above). Do not enable them globally. |
-| EA does not start, with `bind(...) failed` | Another process has port 5555. | Stop `mock_server` or the other EA instance. |
-| `config file not found at config/jarvis.toml` | The config was not copied, or the API was started from another folder. | Copy `config/jarvis.example.toml` to `config/jarvis.toml`, start from the repo root, or set `JARVIS_CONFIG`. |
-| `binding 127.0.0.1:8787 (is another jarvis-api running?)` | Port 8787 is in use. | Stop the other process, or change `server.bind` to another loopback port. |
-| `install-ea.ps1`: `SHA-256 mismatch` or `has no SHA-256 entry` | A DLL in `mql5/Libraries` changed, or the table in `THIRD_PARTY.md` does not match. | Restore the DLL from git or from the upstream release. Do not edit the hash to match a file you do not recognize. |
-| `install-ea.ps1`: `Not an MT5 data folder (no MQL5 subfolder)` | The `-DataFolder` value is wrong, or the terminal has never been run. | Open the terminal once. Check the folder ID under File > Open Data Folder and pass it with `-DataFolder`. |
-| `compile-ea.ps1` fails with `FAILED: compile errors` or `warnings in our code` | A compile error, or a warning in our own code (warnings fail the run unless `-AllowWarnings` is passed). | Read the printed lines, which are the MetaEditor errors and warnings, and fix them. Use `-AllowWarnings` only to look at a build, not as a fix. |
-| `Source not found ... run scripts\install-ea.ps1 first` | The EA was never installed into this data folder. | Run `install-ea.ps1` with the right `-DataFolder`. |
-| Path errors such as "path too long", or tools that cannot start in a long folder | Windows limits most tools to 260-character paths. This can hit the repo, the Cargo target folder or a long MT5 data path. Some shells also refuse to start in a working directory with a path that is too long, which happened with a scratch folder during this check. | Keep the repo near the drive root, as `D:\Projects\Jarvis-MT` is. If a tool still fails, run it from a shorter folder. |
-| Requests to `/api/...` fail in the browser | The API is not running on 8787, so the Vite proxy has nothing to forward to. | Start `cargo run -p jarvis-api`. |
+| `refusing to start: login is enabled but the session key is unusable` | `JARVIS_JWT_SECRET` is missing or shorter than 32 bytes | Set it in `.env` in the working directory (see [configuration.md](configuration.md)). |
+| `refusing to start: config mode is 'demo' but the MT5 account reports trade_mode 'Real'` | The terminal is logged into a real account | Log MT5 into the demo account. Do not change `mode` to `live`. |
+| `409 mode_mismatch` on chat, `"mode_mismatch": true` in `/api/status` | Same, detected while running | Same fix. The flag clears on the next successful bridge call. |
+| `/api/status` shows `"connected": false`, or chat says MT5 is not reachable | The EA is not attached, or MT5 is closed | Start MT5, attach JarvisBridge, and check the listening line. No restart of the server is needed. |
+| `503 bridge_unavailable`, "bridge did not reply within 3000 ms" | The EA is attached but not answering | Check the Experts log. Remove and re-attach the EA. Raise `bridge.timeout_ms` only if replies are slow. |
+| `unknown symbol: XAUUS` or `unknown symbol` in the watchlist errors | The broker's name differs (`XAUUSD.m`, `XAUUSD_`, `GOLD`, `US100`, `NAS100`) | Find the exact name in Market Watch (Ctrl+M). Set `[symbols] suffix` (for example `".m"`), or an alias under `[symbols.aliases]`. Restart. |
+| `writes refused: Algo Trading is disabled in the terminal` or `... trading is not allowed for this EA` | The Algo Trading button is off, or the EA's Allow Algo Trading is not ticked | Turn on the Algo Trading button and tick Allow Algo Trading on the EA's Common tab. |
+| `writes refused on a real account (InpAllowReal is false)` | The MT5 account is real and the EA input is off | Expected while on a real account. Set `InpAllowReal` only if you have decided to trade real money. |
+| `bind(...) failed` in the EA log | Port 5555 is used by another process | Stop `mock_server` or the other EA. |
+| `binding 127.0.0.1:8787 (is another jarvis-api running?)` | Port 8787 is used | Stop the other process, or pick another loopback port. |
+| The first chat reply takes about 100 seconds | Ollama is loading `qwen3.5:9b` into memory | Wait. Later replies are faster. Keep Ollama running. |
+| `502 llm_error` | The provider call failed. For `local`, Ollama is not running or the model is missing | Start Ollama, then `ollama pull qwen3.5:9b`. For a cloud provider, check the key variable in `.env`. |
+| A provider shows `"available": false` | Its key variable (for example `ANTHROPIC_API_KEY`) is not set in the environment | Set it in `.env` and restart. |
+| `503 voice_unavailable`, "speech-to-text is not available" | Speech-to-text did not load: the model file is missing, or the build has no `whisper` feature | Run `scripts/fetch-models.ps1`, check `whisper_model`, and check the log line `speech-to-text is off: ...`. Build with `--features whisper` for speech-to-text. |
+| `503 voice_unavailable`, "text-to-speech is not available" | Piper did not load: `piper_exe` or `piper_voice` is wrong | Check both paths and the log line `text-to-speech is off: ...`. |
+| Voice is off with a log line `voice is off: ...` | The `[voice]` section is incomplete (for example `enabled = true` without model paths) | Fill in the paths in `[voice]`, or set `enabled = false`. |
+| `whisper` build fails with `stdio.h not found` or similar C header errors | The build did not run inside the MSVC environment | Open a Developer PowerShell, or run `"<VS Build Tools>\VC\Auxiliary\Build\vcvars64.bat"` first, then build in that same window. |
+| Browser console shows `Refused to execute inline script` after `pnpm -C web build` | The server hashes the inline script once at startup and still has the old hash | Restart the API (or the service) after every web rebuild. |
+| Login succeeds, but the next request is unauthorized, when the page is opened over `http://` while TLS is on | The session cookie is `Secure` and is not sent over plain HTTP | Open the `https://` address. |
+| `401 unauthorized` with "code not accepted" when releasing the kill switch | Wrong, reused or late code | Wait for the next 30-second code and enter it. |
+| `401 unauthorized` with "invalid username, password or code" | Wrong password, code, or a locked account | Re-check the code. After 10 failed attempts the account is locked for 15 minutes. `user reset-totp` also clears a lock. |
+| `429 rate_limited` on login | More than 5 login attempts in a minute from one client IP | Wait for the `Retry-After` time. Behind a reverse proxy all users share one IP. |
+| `429 rate_limited` on confirm | More than 10 confirmations per minute in one session | Wait, then confirm again. Each preview still expires after 15 seconds. |
+| `403 origin not allowed` on the live-update connection, behind a reverse proxy | The proxy changed the `Host` header, so the `Origin` does not match | Make the proxy pass `Host $host` (or the public host), and keep the `Upgrade` headers. See the [VPS guide](vps.md). |
+| `config file not found at config/jarvis.toml` | Config not copied, or started from another folder | Copy `config\jarvis.example.toml` to `config\jarvis.toml`, start from the repository root, or set `JARVIS_CONFIG`. |
+| `install-ea.ps1`: `SHA-256 mismatch` or `has no SHA-256 entry` | A DLL in `mql5\Libraries` changed, or the table in `mql5\THIRD_PARTY.md` does not match | Restore the DLL from Git or the upstream release. Do not edit a hash to match a file you do not recognise. |
+| `install-ea.ps1`: `Not an MT5 data folder (no MQL5 subfolder)` | Wrong `-DataFolder`, or the terminal was never run | Open the terminal once, then check the folder under File > Open Data Folder. |
+| `compile-ea.ps1` fails with compile errors or with warnings in our code | An error in the EA source | Read the printed MetaEditor lines and fix them. `-AllowWarnings` is for looking at a build, not for shipping. |
+| Path errors, or tools that cannot start in a long folder | Windows limits paths to 260 characters without the long-path setting | Keep the repository near the drive root. |
+
+### EA not answering
+
+If writes time out repeatedly (`outcome_unknown`, `bridge_unavailable`):
+
+1. Turn the kill switch on, so nothing else is sent.
+2. Read the Experts log for `reply could not be sent` or `rebuilding the socket`. These lines mean the EA is recovering on its own.
+3. Remove the EA from the chart and attach it again. Check the listening line.
+4. Check each position and pending order in MT5 (see "Recovering from outcome_unknown").
+5. Release the kill switch only when the bridge answers `ping` with `connected: true`.
+
+## Development tools that can trade
+
+`bridge_cli` sends commands straight to the EA. Its `buy`, `sell`, `modify`, `close` and `cancel` commands need `--yes`, and they
+skip the confirmation gate, the limits and the kill switch. Use them only on a demo account, for testing the EA. Never use them
+in place of the chat flow.
+
+```powershell
+cargo run -p jarvis-bridge-client --example bridge_cli -- ping
+cargo run -p jarvis-bridge-client --example bridge_cli -- price XAUUSD
+cargo run -p jarvis-bridge-client --example bridge_cli -- account
+```
+
+The `symbol` argument takes the broker's name, not an alias. The `ping` reply reports `trade_mode`. Check it says `demo` before any write.
 
 ## Updating the EA's DLLs
 
-The DLLs in `mql5/Libraries` are the prebuilt x64 libzmq 4.2.1 and libsodium 1.0.11 binaries from mql-zmq. `scripts/install-ea.ps1` refuses to install any DLL whose hash does not match the table in `mql5/THIRD_PARTY.md`, so the table and the files must change together. SPEC.md says to ask first before committing binaries, so get approval before committing new DLLs.
+The DLLs in `mql5\Libraries` are the x64 builds of libzmq and libsodium from mql-zmq. `scripts/install-ea.ps1` refuses to install a DLL whose
+hash does not match the table in `mql5\THIRD_PARTY.md`, so the table and the files change together. [SPEC.md](../SPEC.md) requires approval before
+new binaries are committed.
 
-1. Replace the DLL files in `mql5\Libraries\` with the new x64 builds. The libzmq note in `THIRD_PARTY.md` recommends a current libzmq release before any use beyond localhost.
-2. Compute the new hashes:
-
+1. Replace the files in `mql5\Libraries\` with the new x64 builds.
+2. Compute the new hashes: `Get-FileHash mql5\Libraries\*.dll -Algorithm SHA256`.
+3. Update the table in `mql5\THIRD_PARTY.md`: version and SHA-256 for each DLL, keeping the format. The install script reads it.
+4. If the mql-zmq headers are re-vendored, re-apply the local patch listed in `THIRD_PARTY.md`.
+5. Reinstall, recompile and check:
    ```powershell
-   Get-FileHash mql5\Libraries\*.dll -Algorithm SHA256
-   ```
-
-3. Update the table in `mql5/THIRD_PARTY.md`: the version and the SHA-256 for each DLL. Keep the table format, with the DLL name in the first column and the 64-character hash in the last column. The install script parses those cells.
-4. If the mql-zmq headers are re-vendored instead, re-apply the local `char` to `uchar` patch listed in `THIRD_PARTY.md`.
-5. Reinstall and recompile, then check the EA:
-
-   ```powershell
-   pwsh scripts/install-ea.ps1
-   pwsh scripts/compile-ea.ps1
+   pwsh scripts/install-ea.ps1 -DataFolder <32-character-id>
+   pwsh scripts/compile-ea.ps1 -DataFolder <32-character-id>
    cargo run -p jarvis-bridge-client --example bridge_cli -- ping
    ```
+6. Re-attach the EA, then run the live tests (see the README) on a demo account.
 
-   Re-attach the EA, then run the live tests (`cargo test -p jarvis-bridge-client --features mock -- --ignored --test-threads=1`).
+## Related docs
+
+- [Configuration](configuration.md): every setting and environment variable.
+- [Windows service](windows-service.md): install, run and update the service.
+- [VPS guide](vps.md): running on a server next to MT5.
+- [HTTP API](api.md) and [bridge protocol](protocol.md): the wire contracts.
+- [Architecture](architecture.md): how the parts fit together.

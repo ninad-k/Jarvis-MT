@@ -1,158 +1,267 @@
 # Jarvis MT
 
-Jarvis MT is a voice and chat trading assistant for MetaTrader 5 (MT5). You type a question such as "what's gold at?" or "show my positions", and an LLM answers from live data in your MT5 terminal, read through a Rust backend and a small MQL5 Expert Advisor (EA). It is built for one trader running MT5 on a Windows PC or VPS.
+[![CI](https://github.com/ninad-k/Jarvis-MT/actions/workflows/ci.yml/badge.svg)](https://github.com/ninad-k/Jarvis-MT/actions/workflows/ci.yml)
+[![Security](https://github.com/ninad-k/Jarvis-MT/actions/workflows/security.yml/badge.svg)](https://github.com/ninad-k/Jarvis-MT/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://github.com/ninad-k/Jarvis-MT/actions/workflows/scorecard.yml/badge.svg)](https://github.com/ninad-k/Jarvis-MT/actions/workflows/scorecard.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Sprint 1 is read-only. Voice and trading arrive in later sprints.
+Jarvis MT is a voice and chat trading tool for MetaTrader 5 (MT5). You type or say a request such as "what's gold at?"
+or "buy 0.01 gold", and a language model reads live data from your terminal or proposes an order. Nothing is sent to MT5 until
+you confirm a short-lived preview, by button or by voice. It is built for one trader running MT5 on a Windows PC or a VPS.
+
+> **Disclaimer.** Jarvis MT is not financial advice and comes without warranty (see [LICENSE](LICENSE)). Trade only on demo accounts
+> until you have tested the whole flow. You are responsible for every trade you confirm.
 
 ## Safety model
 
-- The LLM can only call read tools. From Sprint 2 it can also call `propose_*` tools, which create a preview and never send an order.
-- A trade reaches MT5 only after the user confirms a preview with a short-lived token (15 seconds, Sprint 2).
-- Demo is the default. The API refuses to start in demo mode when the bridge reports a real account. If the account switches to real while the API runs, chat returns `409 mode_mismatch`.
-- The bridge listens on `127.0.0.1` only. The API binds to loopback only until authentication arrives in Sprint 4.
-- Account login, name and server never reach the LLM or the browser.
+The rules below are the core rules of [SPEC.md](SPEC.md). Each one is enforced in code and covered by tests.
 
-The full rules are in [SPEC.md](SPEC.md).
+1. The language model can only call read tools and `propose_*` tools. No tool sends a trade.
+2. Every proposal is a preview with a one-time token that expires after 15 seconds.
+3. Only a confirmation (the button, or a spoken "confirm") sends a write to MT5.
+4. Batch actions, such as close all, need a second confirmation that repeats the count.
+5. Limits are checked before a preview is shown: lot size, open positions, daily loss, allowed symbols and trading hours.
+6. A kill switch blocks every write at once.
+7. The default mode is DEMO. LIVE needs an explicit setting, and the backend refuses to start in DEMO against a real account.
+8. Account login, name and server stay in MT5. They never reach the language model or the browser.
+9. On an unclear request, the app asks instead of guessing.
+10. Every step, from the utterance to the trade result, is written to an append-only audit log.
 
-## Status: Sprint 1
+The bridge to MT5 listens on loopback only, and remote access requires HTTPS and login.
 
-Implemented:
+## Features
 
-- Read-only chat over live MT5 data: price, account, open positions, pending orders and deal history.
-- A web HUD with an account strip, watchlist, positions, chat transcript and bridge status.
-- An append-only SQLite audit log of every chat step.
+Marked **(local)** when the feature runs entirely on your PC, with no cloud service involved.
 
-Not in Sprint 1: trading, voice, authentication. The plan and demo script are in [tasks/plan.md](tasks/plan.md). The task list is in [tasks/todo.md](tasks/todo.md).
+- **Market data and account (local):** bid and ask prices, account summary, open positions, pending orders and closed deals with totals
+  that the backend computes. Totals are never estimated by the model.
+- **Chat (Ollama is local; Anthropic and OpenAI are cloud):** typed questions in English and Hinglish, with tool calls shown in the transcript.
+- **Trading with confirmation (local):** market and pending orders, stop loss and take profit changes, closes (full or partial) and cancels.
+  Each one is a preview with a 15-second token. Batch actions need two confirmations.
+- **Limits and kill switch (local):** `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, trading hours, and a kill switch that blocks writes.
+- **Login (local):** password (Argon2id) with an authenticator code (TOTP), a session cookie, rate limits and lockout. Users are created on the machine itself.
+- **Voice (local):** speech-to-text with Whisper and text-to-speech with Piper. Confirmations are read back aloud, and the 15-second window starts when reading finishes.
+- **Audit (local):** a SQLite log of every step, with an audit page in the web UI and an API.
+- **Web UI and PWA:** a HUD with an orb, watchlist, positions, transcript, confirm modal, kill switch and audit page. Installable on a phone.
+- **Desktop app (local):** a Tauri 2 window around the same web UI. It contains no trading logic.
+- **Windows service (local):** runs the backend at boot, restarts it after a failure, and writes daily log files.
+- **Remote access (VPS):** HTTPS and WSS, with a certificate you provide or a reverse proxy. See [docs/vps.md](docs/vps.md).
 
-## Repo layout
-
-| Path | What it is |
-|---|---|
-| `crates/api` | `jarvis-api`: the HTTP API, read tools, agent loop, config and audit log |
-| `crates/bridge-client` | `jarvis-bridge-client`: protocol types, ZeroMQ client, mock EA, `bridge_cli` and `mock_server` examples |
-| `crates/llm` | `jarvis-llm`: LLM provider trait and Anthropic, OpenAI and Ollama clients |
-| `mql5/` | `JarvisBridge` EA, JSON and protocol headers, vendored mql-zmq (see [THIRD_PARTY.md](mql5/THIRD_PARTY.md)) |
-| `web/` | SvelteKit web app (the HUD) |
-| `config/` | `jarvis.example.toml`: non-secret settings, symbol aliases, LLM providers |
-| `scripts/` | `install-ea.ps1` and `compile-ea.ps1` |
-| `docs/` | [architecture](docs/architecture.md), [runbook](docs/runbook.md), [HTTP API](docs/api.md), [bridge protocol](docs/protocol.md) |
-| `tasks/`, `SPEC.md` | Sprint plan, task list and product spec |
-| `.env.example` | Template for secrets (LLM API keys) |
-
-## Windows setup
+## Quick start (Windows)
 
 ### Prerequisites
 
-1. **Rust** (stable) via [rustup](https://rustup.rs). The repo's `rust-toolchain.toml` selects stable with rustfmt and clippy. The crates use edition 2024, so you need Rust 1.85 or newer.
+1. **Rust** (stable) from [rustup](https://rustup.rs). The crates need Rust 1.88 or newer.
 2. **Node.js 22 or newer** and **pnpm**.
-3. **MetaTrader 5** with a **demo** account, logged in. Open the terminal at least once so its data folder has an `MQL5` subfolder.
-4. **PowerShell 7** (`pwsh`) for the two scripts. Windows PowerShell 5.1 also works if you replace `pwsh` with `powershell`.
-5. **An LLM**, either:
-   - **Ollama** with the default model: `ollama pull qwen3.5:9b`. This is the default `local` provider.
-   - or an **Anthropic** or **OpenAI** API key. Put it in `.env` and pick that provider in `config/jarvis.toml` (`llm.default`) or in the web UI.
+3. **MetaTrader 5** with a **demo** account, logged in. Open the terminal once so its data folder has an `MQL5` subfolder.
+4. **PowerShell 7** (`pwsh`) for the scripts. Windows PowerShell 5.1 also works if you use `powershell` in place of `pwsh`.
+5. **A language model**, one of:
+   - **Ollama** with the default model: `ollama pull qwen3.5:9b`. This is the `local` provider.
+   - or an **Anthropic** or **OpenAI** API key, kept in `.env` and selected in `config\jarvis.toml` or in the web UI.
 
-### Steps
+### 1. Create your config and secrets
 
-1. **Create your local config.** From the repo root:
+From the repository root:
 
-   ```powershell
-   Copy-Item config\jarvis.example.toml config\jarvis.toml
-   Copy-Item .env.example .env
-   ```
+```powershell
+Copy-Item config\jarvis.example.toml config\jarvis.toml
+Copy-Item .env.example .env
+```
 
-   Skip the first line if `config\jarvis.toml` already exists. Set `[symbols] suffix` and the aliases to your broker's symbol names. Put API keys in `.env` only. Both files are gitignored, so keep them out of commits.
+In `config\jarvis.toml`, set `[symbols] suffix` and the aliases to your broker's names (for example `.m` if the broker appends it).
+In `.env`, set `JARVIS_JWT_SECRET` to a random value of at least 32 bytes. Generate one with:
 
-2. **Install the EA into your MT5 data folder.**
+```powershell
+$r = [Security.Cryptography.RandomNumberGenerator]::Create(); $b = New-Object byte[] 48; $r.GetBytes($b); [Convert]::ToBase64String($b)
+```
 
-   ```powershell
-   pwsh scripts/install-ea.ps1
-   ```
+Put any provider keys in `.env` too. Both files are gitignored. Every setting is in [docs/configuration.md](docs/configuration.md).
 
-   The script's default `-DataFolder` points at one specific terminal. For any other terminal, pass its data folder ID: the 32-character folder name under `%APPDATA%\MetaQuotes\Terminal`, which MT5 shows under File > Open Data Folder.
+### 2. Install and compile the EA
 
-   ```powershell
-   pwsh scripts/install-ea.ps1 -DataFolder <32-character-id>
-   ```
+Find your terminal's data folder in MT5 under **File > Open Data Folder**. Its name is a 32-character ID. Then:
 
-   The script checks the DLL SHA-256 hashes in `mql5/THIRD_PARTY.md` before and after copying. It only adds or overwrites its own files.
+```powershell
+pwsh scripts/install-ea.ps1 -DataFolder <32-character-id>
+pwsh scripts/compile-ea.ps1 -DataFolder <32-character-id>
+```
 
-3. **Compile the EA.**
+Always pass `-DataFolder`. The default in the scripts is a terminal path from the maintainer's PC. If MT5 is not in `C:\Program Files\MetaTrader 5`,
+pass `-MetaEditor "<path to MetaEditor64.exe>"` to `compile-ea.ps1`. Both scripts check the DLL hashes in [mql5/THIRD_PARTY.md](mql5/THIRD_PARTY.md).
 
-   ```powershell
-   pwsh scripts/compile-ea.ps1
-   ```
+### 3. Attach JarvisBridge
 
-   The script runs MetaEditor on the installed copy and fails on any compile error or on a warning in our code. If MT5 is not in `C:\Program Files\MetaTrader 5`, pass `-MetaEditor "<path to MetaEditor64.exe>"`. Use the same `-DataFolder` as in step 2. A successful run ends with `OK: ...\JarvisBridge.ex5`.
+In MT5, run the self-test first: **Navigator (Ctrl+N) > Scripts > JarvisMT > JarvisSelfTest**. The Toolbox Experts tab (Ctrl+T) should end with
+`=== JarvisSelfTest done: <N> passed, 0 failed ===`.
 
-4. **Run the self-test in MT5.** In the Navigator (Ctrl+N), open Scripts > JarvisMT > JarvisSelfTest and run it on a chart. In the Experts tab of the Toolbox (Ctrl+T), look for `=== JarvisSelfTest done: <N> passed, 0 failed ===`.
+Then attach the EA to a chart: **Navigator > Expert Advisors > JarvisMT > JarvisBridge**. On its **Common** tab, tick **Allow DLL imports** and
+**Allow Algo Trading**. Keep the global option under Tools > Options > Expert Advisors off. The **Algo Trading** button on the toolbar must be on,
+because writes are refused while it is off.
 
-5. **Attach JarvisBridge with DLL imports enabled for this EA only.** In the Navigator, open Expert Advisors > JarvisMT > JarvisBridge (right-click > Refresh if it is missing) and drag it onto a chart. On the Common tab, tick **Allow DLL imports**. Leave the global option under Tools > Options > Expert Advisors off. The Algo Trading button does not matter, because this EA version is read-only.
+The Experts tab should show a line that starts with `JarvisBridge 0.2.0 listening on 127.0.0.1:5555`.
 
-   The Experts tab should show:
+Check the bridge from the repository root:
 
-   ```
-   JarvisBridge 0.1.0 listening on 127.0.0.1:5555 (libzmq 4.2.1, read-only)
-   ```
+```powershell
+cargo run -p jarvis-bridge-client --example bridge_cli -- ping
+```
 
-6. **Check the bridge.**
+The reply should contain `"trade_mode": "demo"`.
 
-   ```powershell
-   cargo run -p jarvis-bridge-client --example bridge_cli -- ping
-   ```
+### 4. Create the first login user
 
-   The reply is JSON. Check that `"trade_mode"` is `"demo"` and `"protocol_version"` is `1`. Then try `cargo run -p jarvis-bridge-client --example bridge_cli -- price XAUUSD`, using your broker's symbol name. `bridge_cli` does not resolve aliases.
+Login is on by default, so create a user before you try to sign in. You will be asked for a password (at least 12 characters) and
+the QR code for your authenticator app:
 
-7. **Start the API** from the repo root, because the config path is relative to the working directory:
+```powershell
+cargo run -p jarvis-api -- user add <name>
+```
 
-   ```powershell
-   cargo run -p jarvis-api
-   ```
+### 5. Build the web UI and start the API
 
-   It serves `http://127.0.0.1:8787`. To check it, run `Invoke-RestMethod http://127.0.0.1:8787/api/status`. If the EA is not attached yet, the API still starts and reports `"connected": false`.
+```powershell
+pnpm -C web install
+pnpm -C web build
+```
 
-8. **Start the web UI** in a second terminal:
+In `config\jarvis.toml`, uncomment `static_dir = "web/build"` under `[server]`. Then start the API from the repository root:
 
-   ```powershell
-   pnpm -C web install
-   pnpm -C web dev
-   ```
+```powershell
+cargo run -p jarvis-api
+```
 
-   Open http://localhost:5173. Vite proxies `/api` to port 8787, so keep the API running.
+Open **http://127.0.0.1:8787**, sign in with your password and the six-digit code.
 
-9. **Try it.** Ask "price of gold", "what's my equity", "list my open positions" and "what did I trade yesterday". Then ask "buy gold". The assistant should say it cannot place trades yet. Every step is written to the audit table (see the [runbook](docs/runbook.md#logs-and-the-audit-database)).
+For UI development with hot reload, run `pnpm -C web dev` in a second terminal and open **http://localhost:5173**. Vite proxies `/api` to port 8787.
+
+The API starts even when MT5 is down, and reports the bridge as disconnected.
+
+### 6. Your first trade (demo)
+
+Ask a few read questions first: "what's gold at?", "what's my equity?", "show my positions", "what did I trade yesterday?".
+
+Then try a trade with a small volume:
+
+- "buy 0.01 gold" creates a preview. Nothing is sent yet.
+- Click **Confirm**, or say "confirm", within 15 seconds. The order goes to the demo account, and the result shows the MT5 return code.
+- "close all nasdaq longs" is a batch. It asks you to confirm twice, and the second prompt repeats the count.
+
+The phrases and the Hinglish equivalents are in [docs/user-guide.md](docs/user-guide.md). Check the numbers against MT5.
+
+### Voice (optional)
+
+Voice needs local models and a build with the `whisper` feature.
+
+```powershell
+pwsh scripts/fetch-models.ps1
+```
+
+This downloads Piper, a Piper voice and the Whisper `base.en` model into `models\`, checks their SHA-256 hashes, and skips files that already match.
+The `[voice]` section of the example config already points at these paths and has `enabled = true`. Restart the API after fetching the models.
+
+Text-to-speech works with the default build. Speech-to-text needs the `whisper` feature, which compiles whisper.cpp. Install these first:
+
+- **Visual Studio Build Tools** with the "Desktop development with C++" workload.
+- **CMake** (on `PATH`).
+- **LLVM** (provides `libclang.dll`, normally in `C:\Program Files\LLVM\bin`).
+
+Build inside the MSVC environment. Run `vcvars64.bat` from the Build Tools in the same shell window (or use the x64 Native Tools prompt), then:
+
+```powershell
+$env:CMAKE_C_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG"
+$env:CMAKE_CXX_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG"
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+cargo build --release -p jarvis-api --features whisper
+```
+
+If the build fails with `stdio.h not found` or similar C header errors, the shell did not load the MSVC environment. See the runbook troubleshooting table.
+
+### Desktop app (optional)
+
+The Tauri shell opens the web UI in its own window. It loads the backend from the address you give it, so the backend must be running:
+
+```powershell
+pnpm -C apps/desktop install
+pnpm -C apps/desktop dev
+```
+
+The default backend address is `https://127.0.0.1:8787`. For plain HTTP on loopback, enter `http://127.0.0.1:8787` in the launcher. For HTTPS, see [docs/desktop.md](docs/desktop.md).
 
 ## Develop without MT5
 
-- **Full stack on canned data.** Start the mock EA on the bridge port, then the API and the web UI as above:
+- **Full stack on canned prices.** Start the mock EA on the bridge port, then the API and the web UI as above. Stop it before you attach the real EA, because both use port 5555:
 
   ```powershell
   cargo run -p jarvis-bridge-client --features mock --example mock_server
   ```
 
-  It listens on `tcp://127.0.0.1:5555` until you press Ctrl+C. Stop it before you attach the real EA, because both use port 5555. The mock serves canned prices for XAUUSD, US100, US30, EURUSD, GBPUSD and BTCUSD and reports a demo account. Chat still needs an LLM.
+  It serves prices for XAUUSD, US100, US30, EURUSD, GBPUSD and BTCUSD and reports a demo account. Chat still needs a language model.
 
 - **UI only.** `pnpm -C web dev:mock` runs the web app with no backend. Every API call is answered from `web/src/lib/mock.ts`.
 
 ## Tests
 
-| Command | Needs | Checks |
+| Command | Needs | What it checks |
 |---|---|---|
-| `cargo test --workspace` | Nothing | Unit and contract tests: protocol fixtures, mock bridge, agent loop with a fake LLM, provider request mapping |
-| `cargo clippy --workspace --all-targets -- -D warnings` | Nothing | Lints, with warnings treated as errors |
-| `cargo fmt --all --check` | Nothing | Formatting |
-| `pwsh scripts/compile-ea.ps1` | MT5 installed | The EA compiles with zero errors |
-| `cargo test -p jarvis-bridge-client --features mock -- --ignored --test-threads=1` | Demo terminal with the EA attached | Live tests in `crates/bridge-client/tests/live.rs` against the real EA. They only read. |
-| `pnpm -C web check` | `pnpm -C web install` | Svelte and TypeScript checks |
+| `cargo test --workspace --features jarvis-bridge-client/mock` | Rust | Unit and contract tests: protocol fixtures, the mock bridge, the chat loop with a fake model, the gate, auth and the HTTP API |
+| `cargo clippy --workspace --all-targets --features jarvis-bridge-client/mock -- -D warnings` | Rust | Lints, with warnings as errors |
+| `cargo fmt --all --check` | Rust | Formatting |
+| `pnpm -C web check` and `pnpm -C web test` | `pnpm -C web install` | Svelte and TypeScript checks, unit tests |
+| `pnpm -C web test:e2e` | Browsers for Playwright | End-to-end tests of the web UI |
+| `pwsh scripts/check.ps1` | Everything below | All of the above, the whisper feature, the desktop shell, web build and security scans |
+| `cargo test -p jarvis-bridge-client --features mock --test live -- --ignored --test-threads=1` | Demo terminal with the EA attached | Read-only live tests against the EA |
+| `cargo test -p jarvis-bridge-client --features mock --test live_trading -- --ignored --test-threads=1` | Demo terminal with the EA attached | **Places and closes 0.01-lot demo orders and positions.** Run only on a demo account. |
 
-For the live tests, set `JARVIS_LIVE_SYMBOL` to a symbol name your broker uses (default `EURUSD`), for example in PowerShell: `$env:JARVIS_LIVE_SYMBOL = "XAUUSD.m"`. `JARVIS_BRIDGE_ENDPOINT` overrides the default `tcp://127.0.0.1:5555`.
+`pwsh scripts/check.ps1` takes `-SkipWeb`, `-SkipSecurity`, `-SkipWhisper` and `-SkipDesktop`. Without the skip flags it needs the
+security tools (cargo-deny, cargo-audit, pnpm, gitleaks, semgrep) and counts a missing tool as a failure. A quick Rust-only run:
+
+```powershell
+pwsh scripts/check.ps1 -SkipWeb -SkipSecurity -SkipWhisper -SkipDesktop
+```
+
+## Project layout
+
+| Path | What it is |
+|---|---|
+| `crates/api` | `jarvis-api`: HTTP and WebSocket API, login, trading service, voice routes, audit log, `user` and `service` commands |
+| `crates/gate` | `jarvis-gate`: limits, intent parser, previews, confirmation tokens, kill switch |
+| `crates/llm` | `jarvis-llm`: provider trait with tool calling; Ollama, Anthropic and OpenAI clients |
+| `crates/voice` | `jarvis-voice`: Whisper speech-to-text (feature `whisper`) and Piper text-to-speech |
+| `crates/bridge-client` | `jarvis-bridge-client`: wire types, ZeroMQ client, mock bridge, `bridge_cli` and `mock_server` examples |
+| `mql5/` | `JarvisBridge` EA, protocol headers, vendored mql-zmq ([THIRD_PARTY.md](mql5/THIRD_PARTY.md)) |
+| `web/` | SvelteKit web app: the HUD, login, audit page, PWA |
+| `apps/desktop/` | Tauri 2 desktop shell |
+| `config/` | `jarvis.example.toml`, the settings template |
+| `scripts/` | `install-ea.ps1`, `compile-ea.ps1`, `fetch-models.ps1`, `check.ps1` |
+| `docs/` | Architecture, runbook, configuration, API, protocol and user docs (see below) |
+| `tasks/`, `SPEC.md` | Product spec and sprint plans |
+| `.github/` | CI, security, Scorecard, Whisper and release workflows |
 
 ## Documentation
 
-- [Architecture](docs/architecture.md): components, the request flow of one chat turn, design decisions and safety rules by sprint.
-- [Runbook](docs/runbook.md): starting and stopping, ports, logs, the audit database, troubleshooting and DLL updates.
-- [HTTP API](docs/api.md) and [bridge protocol](docs/protocol.md): the wire contracts.
-- [SPEC.md](SPEC.md) and [tasks/plan.md](tasks/plan.md): the product spec and the Sprint 1 plan.
+| Document | For |
+|---|---|
+| [SPEC.md](SPEC.md) | The product rules and the boundaries of the project |
+| [docs/user-guide.md](docs/user-guide.md) | Traders: what you can ask, how confirmations work, DEMO and LIVE, limits |
+| [docs/architecture.md](docs/architecture.md) | Developers and reviewers: components, flows, where each rule is enforced, failure modes |
+| [docs/runbook.md](docs/runbook.md) | Operators: start and stop, health, logs, audit queries, users, kill switch, recovery, backups |
+| [docs/configuration.md](docs/configuration.md) | Every setting in `jarvis.toml` and every environment variable |
+| [docs/windows-service.md](docs/windows-service.md) | Installing and running the Windows service |
+| [docs/vps.md](docs/vps.md) | Running on a Windows VPS: sizing, hardening, TLS, monitoring, LIVE |
+| [docs/api.md](docs/api.md) | HTTP and WebSocket contract |
+| [docs/protocol.md](docs/protocol.md) | Bridge protocol between the API and the EA |
+| [docs/desktop.md](docs/desktop.md) | The desktop app and its TLS setup |
+| [docs/glossary.md](docs/glossary.md) | Terms used across the docs |
+| [docs/adr/README.md](docs/adr/README.md) | Architecture decision records |
+| [tasks/plan-sprints-2-5.md](tasks/plan-sprints-2-5.md) | The plan for Sprints 2 to 5 |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
 
-## License
+## Contributing, security and license
 
-Apache-2.0. See [LICENSE](LICENSE).
+- [CONTRIBUTING.md](CONTRIBUTING.md) explains the setup, the ground rules and the pull request checklist. The safety path needs tests and an ADR.
+- [SECURITY.md](SECURITY.md) explains how to report a vulnerability privately. Do not open a public issue for one.
+- [SUPPORT.md](SUPPORT.md) covers where to ask questions. [GOVERNANCE.md](GOVERNANCE.md) describes decisions and maintainers.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) applies in all project spaces.
+
+Licensed under the [Apache License 2.0](LICENSE). Vendored code and its licences are listed in [mql5/THIRD_PARTY.md](mql5/THIRD_PARTY.md).
+Maintained by Ninad K ([@ninad-k](https://github.com/ninad-k)).
