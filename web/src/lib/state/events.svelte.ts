@@ -1,4 +1,4 @@
-import { MOCK, type WsEvent } from '#lib/api.ts';
+import type { WsEvent } from '#lib/api.ts';
 import { reconnectDelay } from '#lib/backoff.ts';
 import { killSwitch } from './killswitch.svelte';
 import { refreshTrading, status } from './hud.svelte';
@@ -62,7 +62,8 @@ class EventsStore {
 
 	private async connect(): Promise<void> {
 		this.link = 'connecting';
-		if (MOCK) {
+		// Written out so the mock module is dropped from production builds (audit WEB-1).
+		if (import.meta.env.VITE_MOCK === '1') {
 			const { onMockEvent } = await import('../mock');
 			if (!this.wanted) return;
 			this.stopMock = onMockEvent((e) => this.handle(e));

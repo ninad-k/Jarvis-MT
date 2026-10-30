@@ -364,7 +364,9 @@ async function networkRequest<T>(path: string, opts: RequestOptions): Promise<T>
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 	try {
-		if (MOCK) {
+		// The test is written out here (not via MOCK) so Vite folds it to `false` at build time and
+		// leaves the mock module out of production builds entirely (audit WEB-1).
+		if (import.meta.env.VITE_MOCK === '1') {
 			const { mockRequest } = await import('./mock');
 			return await mockRequest<T>(path, opts);
 		}
