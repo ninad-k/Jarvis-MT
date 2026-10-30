@@ -12,6 +12,8 @@
 //|     the symbol's step is rejected.                               |
 //|   - Real accounts are refused (retcode -3) unless the EA input   |
 //|     InpAllowReal is true, and when Algo Trading is off.          |
+//|   - order_send is refused (retcode -1) when its volume is above  |
+//|     the EA input InpMaxLot (0 = no cap). Closes are not capped.  |
 //|   - The last 64 write replies are cached by request id. A write  |
 //|     whose id is in the cache gets the cached reply verbatim and  |
 //|     is NOT executed again.                                       |
@@ -33,6 +35,10 @@
 
 //--- set by the EA from its InpAllowReal input; the self-test script leaves it false
 bool g_jarvisAllowReal=false;
+
+//--- set by the EA from its InpMaxLot input: the largest volume of one order_send, 0 = no cap.
+//--- Defence in depth behind the API's [limits] max_lot; the self-test script keeps the default.
+double g_jarvisMaxLot=1.0;
 
 //--- outcome of one write request. ok=false carries "error", ok=true carries "data".
 struct JarvisTradeOut
@@ -203,6 +209,17 @@ int Jarvis_WriteGate(string &err)
 //+------------------------------------------------------------------+
 //| Validation helpers (all return false with err set)               |
 //+------------------------------------------------------------------+
+
+//--- per-order cap from the InpMaxLot input; 0 (or less) disables it
+bool Jarvis_CheckMaxLot(const double vol,string &err)
+  {
+   if(g_jarvisMaxLot>0.0 && vol>g_jarvisMaxLot+JARVIS_VOLUME_TOLERANCE)
+     {
+      err="volume exceeds the EA's InpMaxLot ("+CJsonWriter::FormatNum(g_jarvisMaxLot)+")";
+      return false;
+     }
+   return true;
+  }
 
 //--- volume must be within [min,max] and a whole multiple of the step; never rounded
 bool Jarvis_CheckVolume(const string sym,const double vol,string &err)
@@ -481,6 +498,12 @@ void Jarvis_CmdOrderSend(CJson &req,const int args,JarvisTradeOut &out)
    if(hasTp && tp<0.0)
      {
       Jarvis_Reject(out,"tp must not be negative");
+      return;
+     }
+   //--- per-order volume cap (InpMaxLot): needs no market or account state, so it answers -1 everywhere
+   if(!Jarvis_CheckMaxLot(volume,err))
+     {
+      Jarvis_Reject(out,err);
       return;
      }
 

@@ -3,7 +3,7 @@
 Wire contract between the Rust backend (`jarvis-bridge-client`) and the MQL5 EA `JarvisBridge`.
 Read commands (`ping`, `get_price`, `get_account`, `get_positions`, `get_orders`, `get_history`,
 `get_symbol`) and write commands (`order_send`, `position_modify`, `position_close`,
-`position_close_partial`, `order_cancel`) are specified below. EA 0.3.0 implements both.
+`position_close_partial`, `order_cancel`) are specified below. EA 0.3.x implements both (0.3.1 adds the `InpMaxLot` volume cap; the protocol is unchanged).
 
 **Version 2 (EA 0.3.0) is not compatible with version 1.** Every message is now authenticated
 (finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)): it travels as two ZeroMQ
@@ -454,7 +454,8 @@ nothing reaches the trade server:
 1. **Idempotency**: a request `id` that is already in the reply cache gets the cached reply
    (see below). Nothing else runs.
 2. **Shape**: argument types, required arguments, `comment` length, price rules per order type,
-   negative sl/tp, deviation range. Failure: `retcode -1`.
+   negative sl/tp, deviation range, and for `order_send` the volume cap `InpMaxLot` (it needs no
+   account or market state). Failure: `retcode -1`.
 3. **Safety gate**: failure: `retcode -3`.
 4. **Market state and ticket checks**: symbol, volume, price format, stops, ticket exists.
    Failure: `retcode -1`.
@@ -486,6 +487,7 @@ EA **rejects, never rounds**: the caller rounds volumes and prices first (using 
 |---|---|
 | symbol | must exist and have quotes (`unknown symbol: X`); `trade_allowed` must be true; a long-only symbol rejects sells and a short-only symbol rejects buys |
 | volume | finite, within `volume_min..=volume_max`, and a whole multiple of `volume_step` (tolerance `1e-8`) |
+| volume cap | `order_send` only: the volume must not exceed the EA input `InpMaxLot` (default `1.0`, `0` turns the cap off; tolerance `1e-8`). Error: `volume exceeds the EA's InpMaxLot (1)`. It is a second line of defence behind the gate's `max_lot` and applies to each order on its own, not to the total open volume. `position_close`, `position_close_partial`, `position_modify` and `order_cancel` are never capped. A negative or non-finite `InpMaxLot` stops the EA from starting |
 | prices | `price`, `sl`, `tp` finite, positive and expressed in at most `digits` decimals |
 | stops | buy: `sl` below and `tp` above the reference price; sell: the reverse; each at least `max(stops_level, 1)` points away. Reference price: market order: the close-side price (bid for a buy, ask for a sell); pending order: its own `price` |
 | pending price | buy limit below the ask, buy stop above the ask, sell limit above the bid, sell stop below the bid, each at least `max(stops_level, 1)` points away |

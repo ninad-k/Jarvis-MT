@@ -298,6 +298,34 @@ string FindTradableSymbol()
    return "";
   }
 
+//--- the per-order cap g_jarvisMaxLot (EA input InpMaxLot). The cap is restored afterwards.
+void TestMaxLot()
+  {
+   //--- every request here names a symbol that does not exist, so even if the cap were broken the
+   //--- request would still be rejected (unknown symbol or the safety gate) and nothing could trade
+   const double saved=g_jarvisMaxLot;
+   g_jarvisMaxLot=1.0;
+   ExpectError("maxlot: order above the cap is refused",BuildOrder("ml1","NOPE_X","buy","market",1.01,-1,-1,-1),-1,"ml1","volume exceeds the EA's InpMaxLot (1)");
+   ExpectError("maxlot: far above the cap is refused",BuildOrder("ml2","NOPE_X","sell","market",50,-1,-1,-1),-1,"ml2","InpMaxLot");
+   ExpectError("maxlot: a pending order above the cap is refused",BuildOrder("ml3","NOPE_X","buy","limit",2.5,1.0,-1,-1),-1,"ml3","InpMaxLot");
+   //--- exactly at the cap is allowed past the cap check: whatever answers next must not be the cap
+   JarvisResult r;
+   CJson rep;
+   if(Run(BuildOrder("ml4","NOPE_X","buy","market",1.0,-1,-1,-1),r,rep))
+      Check(StringFind(rep.Str(rep.Get(rep.Root(),"error")),"InpMaxLot")<0,"maxlot: an order exactly at the cap passes the cap check",r.reply);
+   g_jarvisMaxLot=0.5;
+   ExpectError("maxlot: a lower cap applies",BuildOrder("ml5","NOPE_X","buy","market",0.6,-1,-1,-1),-1,"ml5","InpMaxLot (0.5)");
+   //--- 0 disables the cap
+   g_jarvisMaxLot=0.0;
+   if(Run(BuildOrder("ml6","NOPE_X","buy","market",50,-1,-1,-1),r,rep))
+      Check(StringFind(rep.Str(rep.Get(rep.Root(),"error")),"InpMaxLot")<0,"maxlot: 0 disables the cap",r.reply);
+   //--- closes are never capped: a partial close of 5 lots on a ticket that cannot exist fails on the ticket, not on the cap
+   g_jarvisMaxLot=1.0;
+   if(Run("{\"id\":\"ml7\",\"cmd\":\"position_close_partial\",\"args\":{\"ticket\":9000000000000000,\"volume\":5}}",r,rep))
+      Check(StringFind(rep.Str(rep.Get(rep.Root(),"error")),"InpMaxLot")<0,"maxlot: position_close_partial is not capped",r.reply);
+   g_jarvisMaxLot=saved;
+  }
+
 void TestWrites()
   {
    //--- structurally invalid requests: rejected with -1 on every account, before the safety gate
@@ -318,6 +346,10 @@ void TestWrites()
    ExpectError("write: order_cancel ticket as string","{\"id\":\"ws11\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":\"7\"}}",-1,"ws11","ticket");
    ExpectError("write: position_close_partial without volume","{\"id\":\"ws12\",\"cmd\":\"position_close_partial\",\"args\":{\"ticket\":5}}",-1,"ws12","volume");
    ExpectError("write: position_close bad deviation","{\"id\":\"ws13\",\"cmd\":\"position_close\",\"args\":{\"ticket\":5,\"deviation_points\":-1}}",-1,"ws13","deviation");
+
+   //--- InpMaxLot cap (EA-1): answered with -1 before the safety gate and before any market lookup,
+   //--- so these run on every account and trade nothing
+   TestMaxLot();
 
    //--- everything below depends on the account and the market: demo accounts only
    string mode="";
