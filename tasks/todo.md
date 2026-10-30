@@ -91,4 +91,26 @@ and `cargo test --workspace` pass.
 ### Checkpoint C — end of Sprint 1 (stop for review)
 - [x] Demo script in plan.md passes end to end on the demo account
 - [x] fmt, clippy, tests all clean
-- [ ] Questions for Sprint 2 (intent parser scope, voice token timing) answered
+- [x] Questions for Sprint 2 (intent parser scope, voice token timing) answered (defaults accepted 2026-10-30; ADR-0006, 0007, 0008, 0009)
+
+---
+
+# Sprints 2–5 status
+
+Plan and decisions: [plan-sprints-2-5.md](plan-sprints-2-5.md).
+
+- [x] Sprint 2: EA write commands with validation and reply cache; action gate (limits, previews, tokens, batch double confirmation, kill switch, intent parser); propose tools; confirm, cancel and read-back endpoints; close and cancel previews from the UI; audit API.
+- [x] Sprint 3: Whisper speech-to-text and Piper text-to-speech; HUD confirmation modal with countdown; voice turns with read-back timing; WebSocket events.
+- [x] Sprint 4: password + TOTP login, JWT session cookie, rate limits, HTTPS, security headers, persisted kill switch, Windows service, operations docs.
+- [x] Sprint 5: installable PWA; Tauri 2 desktop shell (Windows installers); mobile build configuration (not built on Windows).
+- [x] Open-source project setup: CI, security scanning, release workflow, Dependabot, templates, community docs, ADRs.
+- [x] Security review and fixes (docs/security/audit-2026-10-30.md), including BR-1 (authenticated bridge, protocol 2) and BR-2 (libzmq 4.3.5).
+- [x] Live verification on a demo account: read, propose, confirm, close and kill switch through the full stack over the signed bridge.
+
+## Open
+
+- [ ] Remaining Low/Info audit findings (see the audit's Findings table for status).
+- [ ] Code-sign the Windows installer (needs a signing certificate).
+- [ ] GitHub settings: private vulnerability reporting, branch protection on `main`, tag protection for `v*`, a `release` environment with a required reviewer, secret scanning with push protection.
+- [ ] Android and iOS builds (scaffolded; need the Android SDK or macOS).
+- [ ] First tagged release (`v0.2.0`) once the above are settled.

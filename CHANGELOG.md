@@ -33,14 +33,19 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 
 ### Changed
 
-- The `JarvisBridge` EA reports `ea_version` 0.3.0 and accepts write commands. Version 0.1.0 was read-only.
+- The `JarvisBridge` EA reports `ea_version` 0.3.1 and accepts write commands. Version 0.1.0 was read-only.
 - Bridge protocol version 2: signed two-frame messages. EA 0.1.x/0.2.x and clients older than this release cannot talk to each other; reinstall the EA with `scripts/install-ea.ps1` and set `[bridge] key_file`.
 - `config/jarvis.example.toml` has new `[limits]`, `[trading]`, `[auth]` and `[voice]` sections. `.env.example` has `JARVIS_JWT_SECRET`.
 - The HTTP API gained confirm, cancel, read-back, close, kill switch, audit, authentication, voice and WebSocket endpoints. See [docs/api.md](docs/api.md).
+- `service install` registers the service as the virtual account `NT SERVICE\JarvisMT` instead of LocalSystem and prints the `icacls` commands that give it its files. `--account <name>` (with `--password-stdin` for an account that needs a password) and `--local-system` (with a warning) override it. A service that is already installed as LocalSystem stays that way until you move it (see [docs/windows-service.md](docs/windows-service.md)).
+- `[server]` has new keys, all with defaults: `header_read_timeout_secs` (10), `request_timeout_secs` (30), `long_request_timeout_secs` (200), `max_connections` (256), `chat_rate_limit_per_minute` (20) and `transcribe_rate_limit_per_minute` (20). See [docs/configuration.md](docs/configuration.md).
+- New API behaviour: `408 request_timeout`, `429 rate_limited` on `POST /api/chat` and `POST /api/voice/transcribe`, and `422 gate_rejected` on `POST /api/confirm/{token}` when the checks run again at confirmation refuse the order.
+- A new order needs an order with a side in the user's latest message. A bare "sell", or "yes, the first one, buy", is no longer enough for the model to open a trade; it asks you to state it.
+- `JARVIS_JWT_SECRET` must now hold at least 16 different byte values and no repeated block; the server says so and prints the command that generates a good one. Secrets made by the command in `.env.example` are unaffected.
 
 ### Security
 
-- Login: Argon2id password hashing, TOTP codes accepted once per 30-second step, TOTP secrets encrypted at rest, 5 login attempts per minute per client address, and a 15-minute lockout after 10 failed attempts on an account.
+- Login: Argon2id password hashing, TOTP codes accepted once per 30-second step, TOTP secrets encrypted at rest, 5 login attempts per minute per client address, and a 15-minute lockout after 10 failed attempts from one client address on an account (see AUTH-1 below).
 - Binds off loopback are refused unless TLS and login are both on.
 - Account login, name and server are not part of any data sent to the model or the browser.
 - Limits, tokens and the kill switch are checked before every bridge write. A write that gets no reply is never retried.
@@ -53,7 +58,18 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 - pnpm's minimum release age (one week) now takes effect: it is set in `pnpm-workspace.yaml`, where pnpm reads it.
 - The bridge is authenticated (BR-1): every request and reply is signed with HMAC-SHA256 under a per-install key, requests older than 30 s or with a repeated id are refused, and the client rejects unsigned or forged replies. Other local processes can no longer send orders to the EA.
 - The EA's ZeroMQ library is libzmq 4.3.5, built from the official source with a pinned checksum by `scripts/build-libzmq.ps1` (BR-2; fixes CVE-2019-6250 and CVE-2020-15166 in 4.2.1). `libsodium.dll` is no longer shipped.
+- Limits are checked again when a new order is confirmed (TRD-2): another session's confirmed order, a daily loss, the end of trading hours or a market that moved can no longer slip an order past a limit that the preview passed. The order that was confirmed is sent unchanged or not at all, and a close or cancel needs only its tickets to exist.
+- Confirmed actions are sent one at a time, the kill switch is checked once the turn comes and again right before the bridge call, and the bridge client serves writes before queued reads (TRD-1). The remaining window is the one exchange already in flight, at most `bridge.timeout_ms`.
+- The model cannot open a trade after a message that is not an order (LLM-1), and cannot close several positions after one (a close that can hit more than one position needs a close request).
+- Login lockout is per client address and account instead of per account, so a stranger who knows the user name can no longer lock the owner out; failures from many addresses slow the account down (2 s per attempt after 50 in 15 minutes) instead of locking it (AUTH-1).
+- The session signing secret is checked for randomness, not only length (AUTH-2).
+- The server has time and connection limits (NET-1): headers within 10 s (which also ends idle keep-alive connections), 30 s per request (200 s for chat, voice and confirm, none on the WebSocket), 256 connections. Chat and voice transcription have a per-session request budget (NET-2).
+- The Content-Security-Policy no longer allows WebSocket connections to any host: `connect-src` is `'self'` (CSP-1).
+- The Windows service no longer runs as LocalSystem by default (SVC-1).
 - Security review: see [docs/security/threat-model.md](docs/security/threat-model.md) and [docs/security/audit-2026-10-30.md](docs/security/audit-2026-10-30.md).
+- The EA has its own per-order volume cap, the input `InpMaxLot` (default 1.0 lot, 0 turns it off): a larger `order_send` is refused with retcode -1 (EA-1, defence in depth behind the gate's `max_lot`). Closing positions is never capped. Reinstall and re-attach the EA to get the input.
+- The release workflow pins the CMake and LLVM versions it installs from Chocolatey, and its publish job runs in the `release` environment, which needs an approving reviewer (REL-1).
+- The production web build no longer contains the mock backend, and the service worker no longer caches it (WEB-1).
 
 ## [0.1.0] - 2026-10-30
 

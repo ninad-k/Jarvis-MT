@@ -160,8 +160,8 @@ service runs from. It also needs `JARVIS_JWT_SECRET` to be set.
 
 ```powershell
 cargo run -p jarvis-api -- user add <name>          # asks for the password twice, shows a QR code and the key
-cargo run -p jarvis-api -- user list                 # name, created time, last login, LOCKED flag
-cargo run -p jarvis-api -- user reset-totp <name>    # new authenticator secret (lost phone); ends their sessions, clears a lockout
+cargo run -p jarvis-api -- user list                 # name, created time, last login, LOCKED flag (kill-switch release lock only)
+cargo run -p jarvis-api -- user reset-totp <name>    # new authenticator secret (lost phone); ends their sessions, clears the kill-switch release lock
 cargo run -p jarvis-api -- user remove <name>        # asks you to type the name; -y skips the question
 ```
 
@@ -199,7 +199,7 @@ Without it, any program on the PC could send `order_send` straight to the EA and
    32 random bytes from the system's cryptographic generator, as 64 hex characters. It prints the path and never the key.
    An existing key is never changed, and a damaged one stops the script.
 2. In `config\jarvis.toml` set `key_file` under `[bridge]` to the printed path (a TOML literal string, single quotes), or put the key in `.env` as `JARVIS_BRIDGE_KEY`.
-3. Compile and attach the EA (see the install script's next steps). The Experts log must say `JarvisBridge 0.3.0 listening on ... (protocol 2, authenticated, ...)`.
+3. Compile and attach the EA (see the install script's next steps). The Experts log must say `JarvisBridge 0.3.1 listening on ... (protocol 2, authenticated, ...)`.
    An EA without a usable key does not start; the log says `cannot open the key file` or `the key file ... is not usable`.
 4. Start the API. `bridge_cli --key-file <path> ping` checks the link on its own.
 
@@ -273,10 +273,19 @@ After MT5 restarts, check that JarvisBridge is still attached. The chart shows t
 an EA is running. The Experts tab should show the listening line:
 
 ```text
-JarvisBridge 0.3.0 listening on 127.0.0.1:5555 (protocol 2, authenticated, libzmq 4.3.5, writes only on request, real accounts refused)
+JarvisBridge 0.3.1 listening on 127.0.0.1:5555 (protocol 2, authenticated, libzmq 4.3.5, writes only on request, real accounts refused, max order 1 lots)
 ```
 
-With `InpAllowReal` set to `true`, the last part reads `real accounts ALLOWED (InpAllowReal=true)`.
+With `InpAllowReal` set to `true`, the real-accounts part reads `real accounts ALLOWED (InpAllowReal=true)`. The last part shows the order cap (`InpMaxLot`).
+
+EA inputs (set on the Inputs tab when attaching; changing one needs the EA to be re-attached):
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpEndpoint` | `tcp://127.0.0.1:5555` | ZeroMQ endpoint. Must be `tcp://127.0.0.1:<port>` and match `bridge.endpoint`. |
+| `InpVerbose` | `false` | Log one line per request. |
+| `InpAllowReal` | `false` | Allow writes on a real account. |
+| `InpMaxLot` | `1.0` | Largest volume of one `order_send`, in lots; `0` turns the cap off. A larger order is refused with `volume exceeds the EA's InpMaxLot (...)` (retcode -1). Closing positions is never capped. This is a second line of defence: keep `[limits] max_lot` in the API config at or below it. |
 
 If the line is missing, attach the EA again:
 
@@ -339,7 +348,7 @@ to Jarvis, so treat it like the secrets it is. Test a restore on another folder 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `refusing to start: login is enabled but the session key is unusable` | `JARVIS_JWT_SECRET` is missing or shorter than 32 bytes | Set it in `.env` in the working directory (see [configuration.md](configuration.md)). |
+| `refusing to start: login is enabled but the session key is unusable` | `JARVIS_JWT_SECRET` is missing, shorter than 32 bytes, or guessable (fewer than 16 different byte values, or a repeated block) | Generate one with the command in the message (the same as in `.env.example`) and set it in `.env` in the working directory (see [configuration.md](configuration.md)). |
 | `refusing to start: config mode is 'demo' but the MT5 account reports trade_mode 'Real'` | The terminal is logged into a real account | Log MT5 into the demo account. Do not change `mode` to `live`. |
 | `409 mode_mismatch` on chat, `"mode_mismatch": true` in `/api/status` | Same, detected while running | Same fix. The flag clears on the next successful bridge call. |
 | `/api/status` shows `"connected": false`, or chat says MT5 is not reachable | The EA is not attached, or MT5 is closed | Start MT5, attach JarvisBridge, and check the listening line. No restart of the server is needed. |
@@ -347,6 +356,7 @@ to Jarvis, so treat it like the secrets it is. Test a restore on another folder 
 | `unknown symbol: XAUUS` or `unknown symbol` in the watchlist errors | The broker's name differs (`XAUUSD.m`, `XAUUSD_`, `GOLD`, `US100`, `NAS100`) | Find the exact name in Market Watch (Ctrl+M). Set `[symbols] suffix` (for example `".m"`), or an alias under `[symbols.aliases]`. Restart. |
 | `writes refused: Algo Trading is disabled in the terminal` or `... trading is not allowed for this EA` | The Algo Trading button is off, or the EA's Allow Algo Trading is not ticked | Turn on the Algo Trading button and tick Allow Algo Trading on the EA's Common tab. |
 | `writes refused on a real account (InpAllowReal is false)` | The MT5 account is real and the EA input is off | Expected while on a real account. Set `InpAllowReal` only if you have decided to trade real money. |
+| `volume exceeds the EA's InpMaxLot (1)` | The order is larger than the EA's own cap | Expected. Lower the order, or raise `InpMaxLot` on the EA's Inputs tab (and re-attach it) if the larger size is intended. |
 | `cannot open the key file` / `the key file ... is not usable` in the EA log; `refusing to start: ... no bridge key` from the API | The bridge key is missing or damaged | Run `pwsh scripts\install-ea.ps1` and set `[bridge] key_file`. See [The bridge key](#the-bridge-key). |
 | `authentication failed` (retcode -4) or `reply authentication failed` | The API and the EA use different keys, the clock is off by more than 30 s, or another program uses the port | See [When requests are refused](#when-requests-are-refused). |
 | `the EA speaks protocol version 1 but this client speaks 2` | The EA is the old 0.2.0 build | Run `scripts\install-ea.ps1`, `scripts\compile-ea.ps1`, and re-attach the EA. |
@@ -362,9 +372,12 @@ to Jarvis, so treat it like the secrets it is. Test a restore on another folder 
 | Browser console shows `Refused to execute inline script` after `pnpm -C web build` | The server hashes the inline script once at startup and still has the old hash | Restart the API (or the service) after every web rebuild. |
 | Login succeeds, but the next request is unauthorized, when the page is opened over `http://` while TLS is on | The session cookie is `Secure` and is not sent over plain HTTP | Open the `https://` address. |
 | `401 unauthorized` with "code not accepted" when releasing the kill switch | Wrong, reused or late code | Wait for the next 30-second code and enter it. |
-| `401 unauthorized` with "invalid username, password or code" | Wrong password, code, or a locked account | Re-check the code. After 10 failed attempts the account is locked for 15 minutes. `user reset-totp` also clears a lock. |
+| `401 unauthorized` with "invalid username, password or code" | Wrong password, code, or this address is locked out | Re-check the code. After 10 failed attempts from one address that address is locked out of the account for 15 minutes; other addresses are not affected. Restarting the server clears it. After 50 failures from many addresses every attempt on the account waits 2 s for 15 minutes. |
 | `429 rate_limited` on login | More than 5 login attempts in a minute from one client IP | Wait for the `Retry-After` time. Behind a reverse proxy all users share one IP. |
 | `429 rate_limited` on confirm | More than 10 confirmations per minute in one session | Wait, then confirm again. Each preview still expires after 15 seconds. |
+| `429 rate_limited` on chat or voice transcription | More than `chat_rate_limit_per_minute` (20) chat requests, or `transcribe_rate_limit_per_minute` (20) transcriptions, in a minute in one session | Wait for the `Retry-After` time. Raise the limit under `[server]` if you really need more. |
+| `408 request_timeout` | A request took longer than `request_timeout_secs` (30 s), or `long_request_timeout_secs` (200 s) for chat, voice and confirm | For chat: a slow model, so use a faster one or raise `long_request_timeout_secs` above the provider's `timeout_secs`. After a timeout on confirm, check the positions before trying again: the trade keeps running. |
+| `422 gate_rejected`, "The checks were run again at confirmation ..." | Between the preview and your confirmation a limit was reached (for example another preview was confirmed and `max_positions` is full), the day's loss limit was hit, the trading hours ended, or the market moved so that SL or TP no longer fits | Nothing was sent and the confirmation is spent. Look at the message, then ask for the order again if you still want it. |
 | `403 origin not allowed` on the live-update connection, behind a reverse proxy | The proxy changed the `Host` header, so the `Origin` does not match | Make the proxy pass `Host $host` (or the public host), and keep the `Upgrade` headers. See the [VPS guide](vps.md). |
 | `config file not found at config/jarvis.toml` | Config not copied, or started from another folder | Copy `config\jarvis.example.toml` to `config\jarvis.toml`, start from the repository root, or set `JARVIS_CONFIG`. |
 | `install-ea.ps1`: `SHA-256 mismatch` or `has no SHA-256 entry` | A DLL in `mql5\Libraries` changed, or the table in `mql5\THIRD_PARTY.md` does not match | Restore the DLL from Git, or rebuild it with `scripts/build-libzmq.ps1`. Do not edit a hash to match a file you do not recognise. |

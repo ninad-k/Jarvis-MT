@@ -106,7 +106,7 @@ Then attach the EA to a chart: **Navigator > Expert Advisors > JarvisMT > Jarvis
 **Allow Algo Trading**. Keep the global option under Tools > Options > Expert Advisors off. The **Algo Trading** button on the toolbar must be on,
 because writes are refused while it is off.
 
-The Experts tab should show a line that starts with `JarvisBridge 0.3.0 listening on 127.0.0.1:5555`.
+The Experts tab should show a line that starts with `JarvisBridge 0.3.1 listening on 127.0.0.1:5555`.
 
 Check the bridge from the repository root:
 
