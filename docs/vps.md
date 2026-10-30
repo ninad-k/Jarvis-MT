@@ -53,7 +53,7 @@ service need access. See the [Windows service](windows-service.md) notes on file
   does. Block everything else, in particular `5555` (the bridge) and `11434` (Ollama). Both are meant to be loopback-only.
 - Restrict Remote Desktop (3389): allow it only from your own IP addresses or over a VPN, or disable it from the internet.
   Use Network Level Authentication, and do not use the built-in Administrator account for daily work.
-- Use the provider's firewall as well as Windows Firewall, if it has one.
+- Use the provider's firewall as well as Windows Firewall, if it has one. `scripts\firewall.ps1` creates the scoped allow rule and the bridge block rule (see "Firewall rules with a script").
 
 **Accounts**
 
@@ -127,6 +127,50 @@ Points to get right with a proxy:
 
 Do not expose the plain HTTP port directly on the network. Loopback binding is what keeps it private in this setup.
 
+## Firewall rules with a script
+
+`scripts\firewall.ps1` (elevated prompt; a `-WhatIf` preview works without one) manages two inbound rules:
+
+```powershell
+scripts\firewall.ps1 -RemoteAddress 203.0.113.7,198.51.100.0/24 -WhatIf     # preview
+scripts\firewall.ps1 -RemoteAddress 203.0.113.7,198.51.100.0/24             # create or update
+scripts\firewall.ps1 -RemoteAddress 203.0.113.7 -Ports 443                  # the port a reverse proxy listens on
+scripts\firewall.ps1 -Remove
+```
+
+- **"Arc MT API (HTTPS, restricted)"** allows the API port (the port of `[server] bind`, 8787 by default; `-Ports` overrides it) only from the addresses in `-RemoteAddress`.
+  The list is required. "Any", `*`, `0.0.0.0/0` and `::/0` are refused: the rule exists to keep the port closed to everyone else.
+  The script warns when the config has no `tls_cert` (the API would speak plain HTTP), when login is off, or when `bind` is still loopback (no rule can matter then).
+- **"Arc MT Bridge (block inbound)"** blocks port 5555 on all profiles. The EA binds loopback anyway, and Windows Firewall does not filter loopback traffic, so the API still reaches it.
+  A block rule wins over any allow rule, so a careless "allow 5555" elsewhere cannot open the order channel.
+
+The script changes only these two rules. It lists, and never edits, other enabled inbound allow rules that name the same ports, above all ones that allow them from any address,
+because those make the scoped rule pointless. Check from outside the machine afterwards: an address that is not on the list must time out, and port 5555 must never answer.
+Mobile-carrier addresses change often, so for a phone prefer a VPN with a fixed address, or the tunnel below.
+
+## Phone access through a Cloudflare quick tunnel
+
+For occasional access from a phone, with no open port, `scripts\remote-start.ps1` runs `cloudflared` as a quick tunnel to the loopback API and prints a random
+`https://....trycloudflare.com` address. Install `cloudflared` first (`winget install --id Cloudflare.cloudflared`), start the API (`scripts\run.ps1`), then:
+
+```powershell
+scripts\remote-start.ps1 -SetCookieSecure    # once: adds  cookie_secure = true  to [auth]; then restart the API
+scripts\remote-start.ps1                     # open the tunnel; Ctrl+C closes it
+scripts\remote-stop.ps1                      # close it from another window
+```
+
+This puts a UI that can place trades on the internet, so the script refuses to start unless all of these hold: `[auth] enabled = true` in the config and in the running API,
+`[auth] cookie_secure = true` (the tunnel ends TLS before the API, so Jarvis cannot see it and would not mark the session cookie `Secure`), at least one login user exists,
+`JARVIS_JWT_SECRET` is strong, the API is running with the config you edited, and `cloudflared` is installed.
+
+Caveats:
+
+- The address is public and changes every time. The only things between a stranger and your account are the password, the authenticator code, and behind them the limits and the kill switch.
+  Do not post it. If it leaks, engage the kill switch, then close the tunnel; the address dies with it.
+- Everything arrives from `127.0.0.1` as far as Jarvis can tell, so all remote users share the login rate limit and the lockout, and the audit log records `127.0.0.1` as the client (the same effect as a reverse proxy, see the notes under TLS).
+- A quick tunnel has no uptime guarantee and no access policy. For a permanent address use a reverse proxy with your own certificate.
+- The tunnel is found by its command line (a `--logfile` inside this repository's `.local\` folder), so `remote-stop.ps1`, `stop.ps1` and `status.ps1` never touch another `cloudflared` on the machine.
+
 ## Starting after a reboot
 
 The Jarvis service starts at boot (delayed automatic start, see [windows-service.md](windows-service.md)). MT5 does not, because MT5 is a desktop program that
@@ -138,6 +182,9 @@ Choose one approach:
   Autologon, which stores the password encrypted, not in plain text in the registry. Lock the account down: it can then reach MT5 and
   the Jarvis folder without anyone typing a password.
 - **Manual logon after a reboot.** Keep it simple, and check the VPS after every maintenance window.
+
+With auto-logon you can also start Arc MT itself in that session with `scripts\install-autostart.ps1` (a Task Scheduler logon task that runs `run.ps1` hidden) instead of the Windows service.
+Choose one of the two: the script refuses to register the task while the service is installed. The service needs file grants for its virtual account and runs without a session; the task needs the session but no grants.
 
 With either approach, make MT5 start when the user logs on: put a shortcut to the terminal in that user's Startup folder, or create a
 scheduled task that runs at logon. Then check:

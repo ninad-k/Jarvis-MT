@@ -39,7 +39,7 @@ Stop the mock before you attach the real EA, because both use port 5555. See the
 | `mql5/` | `JarvisBridge` EA, JSON and protocol headers, vendored mql-zmq ([THIRD_PARTY.md](mql5/THIRD_PARTY.md)) |
 | `web/` | SvelteKit web app (the HUD) |
 | `config/` | `jarvis.example.toml`, the non-secret settings template |
-| `scripts/` | `install-ea.ps1` and `compile-ea.ps1` |
+| `scripts/` | Operations scripts (`setup.ps1`, `run.ps1`, `stop.ps1`, `status.ps1`, `install-autostart.ps1`, `firewall.ps1`, `remote-start.ps1`, `remote-stop.ps1`, shared `lib/common.ps1`), `install-ea.ps1`, `compile-ea.ps1`, `fetch-models.ps1`, `build-libzmq.ps1` and `check.ps1` |
 | `docs/` | Architecture, API, protocol and runbook docs, plus [docs/adr/](docs/adr/README.md) |
 | `tasks/` | Sprint plans and task lists |
 
@@ -69,6 +69,7 @@ A `Signed-off-by:` line (Developer Certificate of Origin) is optional. It is not
 
 - **Rust:** format with `cargo fmt --all`. Lint with `cargo clippy --workspace --all-targets -- -D warnings`. Warnings fail the build. Library crates return typed errors (`thiserror`). Only the `api` binary uses `anyhow`. No `unwrap()` or `expect()` outside tests and startup config.
 - **Money and volume:** values are rounded to the symbol's volume step and digits before any write to MT5.
+- **PowerShell scripts:** they must parse in Windows PowerShell 5.1, stay ASCII, support `-WhatIf` wherever they change state, and never print a secret. `pwsh scripts/check.ps1` parses every `scripts\*.ps1` under 5.1. New operations scripts reuse `scripts\lib\common.ps1`.
 - **MQL5:** the EA must compile with zero errors and zero warnings in our code (`pwsh scripts/compile-ea.ps1`).
 - **Web:** TypeScript and Svelte, checked with `pnpm -C web check`. The repo has no Prettier configuration yet. If one is added, format with it.
 - **Protocol and HTTP contracts:** change [docs/protocol.md](docs/protocol.md) and [docs/api.md](docs/api.md) in the same pull request as the code, and update the golden fixtures.
@@ -82,6 +83,7 @@ A `Signed-off-by:` line (Developer Certificate of Origin) is optional. It is not
 | Lints | `cargo clippy --workspace --all-targets -- -D warnings` | Nothing |
 | Formatting | `cargo fmt --all --check` | Nothing |
 | EA compile | `pwsh scripts/compile-ea.ps1` | MT5 installed |
+| Script syntax | Part of `pwsh scripts/check.ps1` (Windows PowerShell 5.1 parse of `scripts\*.ps1`) | Windows PowerShell 5.1 |
 | Web checks | `pnpm -C web check` and `pnpm -C web build` | `pnpm -C web install` |
 | Live demo tests (opt-in) | `cargo test -p jarvis-bridge-client --features mock -- --ignored --test-threads=1` | MT5 demo account with the EA attached |
 

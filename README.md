@@ -65,6 +65,26 @@ Marked **(local)** when the feature runs entirely on your PC, with no cloud serv
    - **Ollama** with the default model: `ollama pull qwen3.5:9b`. This is the `local` provider.
    - or an **Anthropic** or **OpenAI** API key, kept in `.env` and selected in `config\jarvis.toml` or in the web UI.
 
+### Fast path: the scripts
+
+`scripts\setup.ps1` does steps 1, 2 and 5 below for you, and `scripts\run.ps1` starts everything. From the repository root:
+
+```powershell
+scripts\setup.ps1 -WhatIf              # preview: toolchain checks, config, .env, models, web build, release build, EA, Ollama
+scripts\setup.ps1                      # run it (add -DataFolder <32-character-id> to install the EA; see below)
+target\release\jarvis-api.exe user add <name>      # the first login user (asks for a password, shows the QR code)
+scripts\run.ps1                        # start the API and web UI; Ctrl+C stops everything
+scripts\status.ps1                     # health check (exit code 0 = the API is healthy)
+scripts\stop.ps1                       # fallback: stop this repository's processes if run.ps1 did not clean up
+```
+
+`setup.ps1` is safe to run twice: it never overwrites `config\jarvis.toml` or `.env`, fills `JARVIS_JWT_SECRET` only when it is empty (the value is never printed),
+and skips what is already done. Skip parts with `-SkipModels`, `-SkipEa`, `-SkipWeb` or `-SkipBuild`; `-Whisper` builds speech-to-text (needs the MSVC build tools, CMake and LLVM).
+It installs the EA only when you pass `-DataFolder`, or when exactly one MT5 terminal is running and its data folder can be found. `run.ps1 -Dev` adds the Vite dev server, and `-StartOllama` starts `ollama serve`.
+To start Arc MT at Windows logon, use `scripts\install-autostart.ps1`. For phone access and firewall rules see [docs/vps.md](docs/vps.md), and for all the scripts the [runbook](docs/runbook.md#scripts).
+
+The steps below are the same thing done by hand. Step 3 (attach JarvisBridge in MT5) and step 4 (the first user) are yours in either case.
+
 ### 1. Create your config and secrets
 
 From the repository root:
@@ -224,7 +244,7 @@ The default backend address is `https://127.0.0.1:8787`. For plain HTTP on loopb
 | `cargo fmt --all --check` | Rust | Formatting |
 | `pnpm -C web check` and `pnpm -C web test` | `pnpm -C web install` | Svelte and TypeScript checks, unit tests |
 | `pnpm -C web test:e2e` | Browsers for Playwright | End-to-end tests of the web UI |
-| `pwsh scripts/check.ps1` | Everything below | All of the above, the whisper feature, the desktop shell, web build and security scans |
+| `pwsh scripts/check.ps1` | Everything below | All of the above, the whisper feature, the desktop shell, web build, security scans and a Windows PowerShell 5.1 syntax check of `scripts\*.ps1` |
 | `cargo test -p jarvis-bridge-client --features mock --test live -- --ignored --test-threads=1` | Demo terminal with the EA attached | Read-only live tests against the EA |
 | `cargo test -p jarvis-bridge-client --features mock --test live_trading -- --ignored --test-threads=1` | Demo terminal with the EA attached | **Places and closes 0.01-lot demo orders and positions.** Run only on a demo account. |
 
@@ -250,7 +270,7 @@ pwsh scripts/check.ps1 -SkipWeb -SkipSecurity -SkipWhisper -SkipDesktop
 | `web/` | SvelteKit web app: the HUD, login, audit page, PWA |
 | `apps/desktop/` | Tauri 2 desktop shell |
 | `config/` | `jarvis.example.toml`, the settings template |
-| `scripts/` | `install-ea.ps1`, `compile-ea.ps1`, `build-libzmq.ps1`, `fetch-models.ps1`, `check.ps1` |
+| `scripts/` | `setup.ps1`, `run.ps1`, `stop.ps1`, `status.ps1`, `install-autostart.ps1`, `firewall.ps1`, `remote-start.ps1`, `remote-stop.ps1` (with `lib/common.ps1`), `install-ea.ps1`, `compile-ea.ps1`, `build-libzmq.ps1`, `fetch-models.ps1`, `check.ps1` |
 | `docs/` | Architecture, runbook, configuration, API, protocol and user docs (see below) |
 | `tasks/`, `SPEC.md` | Product spec and sprint plans |
 | `.github/` | CI, security, Scorecard, Whisper and release workflows |

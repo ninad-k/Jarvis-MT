@@ -10,6 +10,21 @@ service before you start `jarvis-api` by hand on the same port.
 MetaTrader 5 is not part of the service. The MT5 terminal, with the JarvisBridge EA attached, still needs to run in a
 logged-in user session. See the [VPS guide](vps.md) for how to start it after a reboot.
 
+## Service or logon task?
+
+There are two ways to have Arc MT start by itself. Use one of them, not both, because each starts a server on the same port.
+
+| | Windows service (this page) | Logon task (`scripts\install-autostart.ps1`) |
+|---|---|---|
+| Runs | At boot, with nobody logged in | After you log on, hidden, in your session |
+| Account | The virtual account `NT SERVICE\JarvisMT`, which has no rights until you grant them with `icacls` (see below) | You, with your own file rights, so there is nothing to grant |
+| Ollama | Cannot start Ollama's per-user tray app | `-StartOllama` is part of the task |
+| Stops | At shutdown, or `service stop` | At log off, or `scripts\stop.ps1` |
+| Best for | A VPS or a machine that restarts unattended | A PC you work at, next to MT5 |
+
+MT5 and the EA need a logged-in session either way. `install-autostart.ps1` refuses to register the task while this service is installed (`-Force` overrides),
+and `scripts\run.ps1` refuses to start while the service is running. `scripts\status.ps1` shows the service state, and `scripts\stop.ps1 -IncludeService` stops it (elevated).
+
 ## Before you install
 
 1. Build the release binary from the repository root:

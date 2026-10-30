@@ -22,10 +22,76 @@ server at the wrong files.
 Only one process can bind a port. If `bind(...) failed` appears in the EA log, or `binding 127.0.0.1:8787 ... is
 another jarvis-api running?` appears in the server log, something else holds the port. Stop the other process first.
 
+## Scripts
+
+The scripts in `scripts\` cover installing, starting, stopping and checking Arc MT on Windows. They run in Windows PowerShell 5.1
+(`powershell`, or `pwsh`), from any folder: each one finds the repository from its own location. They share `scripts\lib\common.ps1` and the same habits:
+coloured step output, preflight checks before anything starts, `-WhatIf` wherever they change state, no PID files (processes are found by
+command line or path, and only the ones that belong to this repository), and no secret is ever printed.
+
+| Script | What it does |
+|---|---|
+| `setup.ps1` | First-time setup, safe to repeat. Checks Rust, Node, pnpm; copies `config\jarvis.toml` and `.env` from the examples only when missing; fills an empty `JARVIS_JWT_SECRET`; fetches the voice models; builds the web UI and the release binary; installs and compiles the EA; reports Ollama. |
+| `run.ps1` | Starts the API (and the Vite dev server with `-Dev`, Ollama with `-StartOllama`) attached to the console. Ctrl+C, or any essential child dying, stops everything. |
+| `stop.ps1` | Stops the Arc MT processes of this repository: the API, the Vite dev server and the remote tunnel. The fallback when `run.ps1` did not clean up. |
+| `status.ps1` | Fast health check: API, processes, ports, Ollama, the Windows service, the remote tunnel. Exit code 0 when the API is healthy. `-Json` for monitors. |
+| `install-autostart.ps1` | Registers a Task Scheduler task "Arc MT" that runs `run.ps1` hidden at logon. |
+| `firewall.ps1` | Elevated. An allow rule for the API port restricted to the addresses you list, and a block rule for the bridge port 5555. |
+| `remote-start.ps1`, `remote-stop.ps1` | Phone access through a Cloudflare quick tunnel to the loopback API, with safety checks. |
+| `install-ea.ps1`, `compile-ea.ps1`, `fetch-models.ps1`, `build-libzmq.ps1`, `check.ps1` | EA install and compile (and the bridge key), voice models, the libzmq build, and every local check. |
+
+**Common commands**
+
+```powershell
+scripts\setup.ps1 -WhatIf              # preview the first-time setup
+scripts\setup.ps1                      # run it (add -DataFolder <id> to install the EA, -Whisper for speech-to-text)
+scripts\run.ps1                        # start; http://127.0.0.1:8787; Ctrl+C stops everything
+scripts\run.ps1 -Dev -StartOllama      # hot-reload UI on http://127.0.0.1:5173, and ollama serve as a child
+scripts\status.ps1                     # is it healthy? (exit code 0 = yes)
+scripts\status.ps1 -Json               # the same, for a monitor
+scripts\stop.ps1 -WhatIf               # what would be stopped?
+scripts\stop.ps1                       # stop this repository's API, dev server and tunnel
+```
+
+**`run.ps1`**
+
+- It refuses to start while another `jarvis-api.exe` is running or the Windows service is running (two servers would fight over the port, the database and the EA). This check cannot be skipped.
+- The preflight (skip with `-SkipChecks`) checks the config and `.env`, the JWT secret (read to check it, never printed), the bridge key, the ports, `web\build` and the `static_dir` setting, the binary, and Ollama. A missing release binary falls back to `cargo run --release -p jarvis-api`, then to a debug build.
+- `-Config <path>` uses another config file (otherwise `JARVIS_CONFIG`, then `config\jarvis.toml`). `-NoBrowser` does not open the browser.
+- Logs go to `logs\api-<date>.log` (the API's own log, plus an empty `.err` unless it crashes), `logs\web-<date>.log` with `-Dev`, and `logs\ollama-<date>.log` when it started Ollama. `logs\` is gitignored.
+- With login on, `/api/status` needs a session, so the start-up summary shows the config's mode and persona and asks the EA directly only if you built the `bridge_cli` example (`cargo build --release -p jarvis-bridge-client --example bridge_cli`). With login off it prints the live numbers.
+
+**`stop.ps1`** never stops Ollama (unless `-IncludeOllama`), the Windows service (unless `-IncludeService`, from an elevated prompt; it runs `jarvis-api service stop`), MetaTrader 5, or anything of another project. If the service is installed and running it says so.
+
+**`install-autostart.ps1`** versus the Windows service: use the logon task on a PC you work at (it runs in your session next to MT5 and Ollama's tray app, with your own file rights), and the service on a VPS or a box that must come up unattended
+(it needs file grants for its virtual account). Choose one: the script refuses to register the task while the service is installed (`-Force` overrides). See [windows-service.md](windows-service.md). Options: `-Remove`, `-NoOllama`, `-Config <path>`, `-WhatIf`.
+
+**`firewall.ps1`** needs an elevated prompt to change anything (a `-WhatIf` preview works without one). Examples:
+
+```powershell
+scripts\firewall.ps1 -RemoteAddress 203.0.113.7,198.51.100.0/24 -WhatIf
+scripts\firewall.ps1 -RemoteAddress 203.0.113.7 -Ports 443       # the port a reverse proxy listens on
+scripts\firewall.ps1 -Remove
+```
+
+`-RemoteAddress` is required and "Any" is refused. Other enabled inbound allow rules that already open the same ports are listed, never changed.
+
+**`remote-start.ps1`** refuses to open a public tunnel unless login is on (in the config and in the running API), `[auth] cookie_secure = true` is set (`-SetCookieSecure` writes it, with a backup in `.local\`, and then you restart the API), at least one user exists, the API is running and `cloudflared` is installed.
+It prints the `https://....trycloudflare.com` address, saves it to `.local\remote-url.txt`, and stays attached; Ctrl+C or `remote-stop.ps1` closes it. The address is public and protected only by the password and the authenticator code. If it leaks, engage the kill switch, then close the tunnel.
+See [vps.md](vps.md) for the caveats.
+
 ## Starting
 
 Start in this order: MT5 (logged in, with the EA attached), then Ollama if you use it, then the API, then
 the web UI if you use the Vite dev server.
+
+**With the scripts (console)**
+
+```powershell
+scripts\run.ps1                       # API + web UI from web\build; add -Dev for the Vite dev server
+```
+
+See [Scripts](#scripts). The manual commands below do the same thing.
 
 **Development (console, Vite dev server)**
 
@@ -59,7 +125,10 @@ The server starts even when MT5 is down, and the bridge is checked again on ever
 ## Stopping
 
 - **Console:** Ctrl+C. The log shows `Ctrl+C received`, then `shut down cleanly`. Open WebSockets are closed and
-  other connections get 10 seconds to finish.
+  other connections get 10 seconds to finish. When the stack was started with `scripts\run.ps1`, Ctrl+C in its window stops
+  every child it started.
+- **Stray processes:** `scripts\stop.ps1 -WhatIf` lists, and `scripts\stop.ps1` stops, the API, Vite dev server and remote tunnel of this
+  repository (see [Scripts](#scripts)).
 - **Service:** `Stop-Service JarvisMT`.
 - **EA:** remove it from the chart (right-click the chart, Expert Advisors, Remove). The Experts log shows
   `JarvisBridge stopped (reason N, M requests served).`
@@ -77,6 +146,9 @@ Invoke-RestMethod http://127.0.0.1:8787/api/health
 ```
 
 With TLS on, use the `https://` address. The certificate must be trusted by Windows, for example one made by mkcert.
+
+`scripts\status.ps1` does the health check, plus processes, ports, Ollama, the service and the tunnel, and exits with code 0 only when the
+API is healthy (`-Json` prints a document instead). It reads `/api/status` when it can (login off); with login on only the health answer is available to a script.
 
 `GET /api/status` needs a session when login is on, so it is not a monitor target. Use it from the web UI, or after
 logging in. It reports the MT5 bridge (`connected`, `latency_ms`, `trade_mode`, `terminal_connected`), the

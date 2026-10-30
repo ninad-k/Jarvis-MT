@@ -37,6 +37,7 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 - Per-persona voices: each persona speaks with its own Piper voice. `scripts/fetch-models.ps1` pins and verifies `en_GB-alan-medium` for Jarvis, next to `en_US-lessac-medium` for Friday.
 - The audit log records the persona that was active on each row (`persona` column).
 - The product is named Arc MT in the desktop app and the documentation. Repository, crate, binary and EA names (`jarvis-*`, `JarvisBridge`) are unchanged.
+- Operations scripts for Windows (`scripts/`, Windows PowerShell 5.1, shared helpers in `scripts/lib/common.ps1`): `setup.ps1` (idempotent first-time setup with `-WhatIf`; fills an empty `JARVIS_JWT_SECRET` and never overwrites the config or `.env`), `run.ps1` (the stack attached to the console; Ctrl+C or a dying child stops everything; refuses a second instance), `stop.ps1` (stops only this repository's processes), `status.ps1` (health check with an exit code and `-Json`), `install-autostart.ps1` (Task Scheduler logon task "Arc MT"), `firewall.ps1` (scoped API allow rule and bridge-port block rule), and `remote-start.ps1` / `remote-stop.ps1` (Cloudflare quick tunnel for phone access, refused unless login, secure cookies and a user are in place). `scripts/check.ps1` now also parses every script under Windows PowerShell 5.1.
 
 ### Changed
 
