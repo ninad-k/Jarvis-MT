@@ -561,11 +561,22 @@ async fn live_invalid_requests_are_rejected_with_minus_one() {
         spec.volume_max + spec.volume_step,
         &comment,
     );
-    expect_minus_one(
-        "volume above maximum",
-        client.order_send(too_big).await,
-        "above the maximum",
-    );
+    // The EA's own cap (InpMaxLot, EA-1) is checked before the broker maximum, so with
+    // the default cap this is refused by InpMaxLot; with the cap disabled, by the
+    // symbol's volume_max. Either way: retcode -1 and nothing sent to the broker.
+    match client.order_send(too_big).await {
+        Err(BridgeError::Remote {
+            retcode: -1,
+            message,
+        }) => {
+            assert!(
+                message.contains("above the maximum") || message.contains("InpMaxLot"),
+                "volume above maximum: {message:?} should mention the maximum or InpMaxLot"
+            );
+            println!("volume above maximum: rejected: {message}");
+        }
+        other => panic!("volume above maximum: expected retcode -1, got {other:?}"),
+    }
 
     let mut market_with_price = market_order(&spec, Side::Buy, spec.volume_min, &comment);
     market_with_price.price = Some(1.0);
