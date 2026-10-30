@@ -14,6 +14,8 @@
 //|   MQL5\Files\JarvisMT\bridge.key. A wrong or missing MAC, a stale|
 //|   ts or a reused id is refused with retcode -4 and nothing is    |
 //|   executed. Without a usable key file the EA does not start.     |
+//| - get_broker / list_symbols (0.4.0) read the broker's identity   |
+//|   and its full symbol catalog; they never change Market Watch.   |
 //| Wire format: crates/bridge-client/src/protocol.rs                |
 //|                                                                  |
 //| Requires "Allow DLL imports" for this EA (libzmq.dll).           |

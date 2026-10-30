@@ -79,6 +79,17 @@ enum Cmd {
     },
     /// Trading specification of a symbol (lot step, tick value, stops level, ...).
     Symbol { symbol: String },
+    /// Which broker and server the terminal is logged into.
+    Broker,
+    /// The broker's whole symbol catalog (every page); --filter keeps names or descriptions
+    /// containing the text (case-insensitive).
+    Symbols {
+        #[arg(long)]
+        filter: Option<String>,
+        /// Print only the number of symbols and how many are visible in Market Watch.
+        #[arg(long)]
+        count: bool,
+    },
     /// Open a long position, or a buy limit/stop order. Needs --yes and a demo account.
     Buy(OrderArgs),
     /// Open a short position, or a sell limit/stop order. Needs --yes and a demo account.
@@ -220,6 +231,26 @@ async fn run(cli: Cli) -> Result<(), BridgeError> {
     let client = BridgeClient::new(BridgeConfig::new(cli.endpoint, timeout, key))?;
     match cli.command {
         Cmd::Symbol { symbol } => print(&client.get_symbol(&symbol).await?),
+        Cmd::Broker => print(&client.get_broker().await?),
+        Cmd::Symbols { filter, count } => {
+            let all = client.list_all_symbols().await?;
+            if count {
+                let visible = all.iter().filter(|s| s.visible).count();
+                println!("{} symbols, {visible} visible in Market Watch", all.len());
+                return Ok(());
+            }
+            let needle = filter.map(|f| f.to_lowercase());
+            let shown: Vec<_> = all
+                .iter()
+                .filter(|s| {
+                    needle.as_ref().is_none_or(|n| {
+                        s.name.to_lowercase().contains(n)
+                            || s.description.to_lowercase().contains(n)
+                    })
+                })
+                .collect();
+            print(&shown)
+        }
         Cmd::Buy(a) => order(&client, Side::Buy, a).await,
         Cmd::Sell(a) => order(&client, Side::Sell, a).await,
         Cmd::Modify {

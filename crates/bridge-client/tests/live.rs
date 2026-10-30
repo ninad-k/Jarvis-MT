@@ -111,3 +111,30 @@ async fn live_positions_orders_and_history_decode() {
         history.truncated
     );
 }
+
+#[tokio::test]
+#[ignore = "needs MT5 demo terminal with the JarvisBridge EA running"]
+async fn live_get_broker_reports_company_and_server() {
+    let info = client().get_broker().await.expect("get_broker");
+    assert!(
+        !info.company.is_empty() && !info.server.is_empty(),
+        "{info:?}"
+    );
+    println!("{info:#?}");
+}
+
+#[tokio::test]
+#[ignore = "needs MT5 demo terminal with the JarvisBridge EA running"]
+async fn live_list_all_symbols_pages_through_the_whole_server_catalog() {
+    let client = client();
+    let started = std::time::Instant::now();
+    let all = client.list_all_symbols().await.expect("list_all_symbols");
+    println!("{} symbols in {:?}", all.len(), started.elapsed());
+    assert!(!all.is_empty());
+    assert!(
+        all.windows(2).all(|w| w[0].name <= w[1].name),
+        "catalog is not in name order"
+    );
+    let visible = all.iter().filter(|s| s.visible).count();
+    println!("{visible} visible in Market Watch");
+}

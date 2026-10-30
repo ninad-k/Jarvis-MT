@@ -19,6 +19,7 @@
 #include "Auth.mqh"
 #include "Json.mqh"
 #include "ReadHandlers.mqh"
+#include "SymbolCatalog.mqh"
 #include "TradeHandlers.mqh"
 
 #define JARVIS_MAX_ID_LEN     128
@@ -280,10 +281,16 @@ void Jarvis_Process(const string raw,JarvisResult &r,const bool checkFresh)
                      if(cmd=="get_symbol")
                         rc=Jarvis_CmdGetSymbol(req,args,data,err);
                      else
-                       {
-                        Jarvis_SetError(r,"unknown command: "+cmd,JARVIS_RC_UNKNOWN_CMD);
-                        return;
-                       }
+                        if(cmd=="get_broker")
+                           rc=Jarvis_CmdGetBroker(req,args,data,err);
+                        else
+                           if(cmd=="list_symbols")
+                              rc=Jarvis_CmdListSymbols(req,args,data,err);
+                           else
+                             {
+                              Jarvis_SetError(r,"unknown command: "+cmd,JARVIS_RC_UNKNOWN_CMD);
+                              return;
+                             }
 
    if(rc!=0)
      {

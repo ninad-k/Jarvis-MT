@@ -24,19 +24,24 @@ use zeromq::{RepSocket, Socket, SocketRecv, SocketSend};
 use crate::auth::{self, AUTH_ERROR_TEXT, BridgeKey, ReplayGuard};
 use crate::client::BridgeConfig;
 use crate::error::BridgeError;
+pub use crate::mock_catalog::{default_catalog, generated_catalog};
 use crate::mock_trade::Engine;
 use crate::protocol::{
-    Account, Command, Deal, DealEntry, DealType, HISTORY_LIMIT_DEFAULT, HISTORY_LIMIT_MAX, History,
-    HistoryQuery, Order, OrderType, Orders, PingInfo, Position, Positions, Price,
-    RETCODE_AUTH_FAILED, RETCODE_INVALID_REQUEST, RETCODE_UNKNOWN_COMMAND, Reply, Request, Side,
+    Account, BrokerInfo, CatalogSymbol, Command, Deal, DealEntry, DealType, HISTORY_LIMIT_DEFAULT,
+    HISTORY_LIMIT_MAX, History, HistoryQuery, LIST_SYMBOLS_LIMIT_MAX, ListSymbolsQuery, Order,
+    OrderType, Orders, PingInfo, Position, Positions, Price, RETCODE_AUTH_FAILED,
+    RETCODE_INVALID_REQUEST, RETCODE_UNKNOWN_COMMAND, Reply, Request, Side, SymbolCatalogPage,
     SymbolInfo, TradeMode,
 };
 
 /// MT5 `ERR_MARKET_UNKNOWN_SYMBOL`.
 const RETCODE_UNKNOWN_SYMBOL: i64 = 4301;
 
+/// `list_symbols` page size when the request gives none (same as the EA).
+const LIST_SYMBOLS_LIMIT_DEFAULT: u32 = 500;
+
 /// Every command name the mock (and protocol version 1) knows.
-const KNOWN_COMMANDS: [&str; 12] = [
+const KNOWN_COMMANDS: [&str; 14] = [
     "ping",
     "get_price",
     "get_account",
@@ -44,6 +49,8 @@ const KNOWN_COMMANDS: [&str; 12] = [
     "get_orders",
     "get_history",
     "get_symbol",
+    "get_broker",
+    "list_symbols",
     "order_send",
     "position_modify",
     "position_close",
@@ -80,6 +87,12 @@ pub struct MockState {
     /// The next write that passes validation fails with this trade retcode (for example
     /// `10019` no money, `10018` market closed) and changes nothing. Consumed by that write.
     pub fail_next_write: Option<i64>,
+    /// `get_broker` reply: the company and server the mock pretends to be logged into.
+    /// Default: company "Mock Broker Ltd.", server "Mock-Demo", a demo account.
+    pub broker: BrokerInfo,
+    /// The broker's full symbol catalog served by `list_symbols`, in any order (the mock sorts
+    /// by name, byte-wise, as the EA's list is ordered). Default: [`default_catalog`].
+    pub catalog: Vec<CatalogSymbol>,
 }
 
 impl Default for MockState {
@@ -265,6 +278,12 @@ impl Default for MockState {
             refuse_writes: false,
             allow_real: false,
             fail_next_write: None,
+            broker: BrokerInfo {
+                company: "Mock Broker Ltd.".to_owned(),
+                server: "Mock-Demo".to_owned(),
+                trade_mode: TradeMode::Demo,
+            },
+            catalog: default_catalog(),
         }
     }
 }
@@ -511,6 +530,15 @@ impl MockBridge {
         change(&mut self.shared.lock().state);
     }
 
+    /// Pretend the MT5 user logged into another account: from now on `get_broker` answers
+    /// `info` and `list_symbols` serves `catalog`. Nothing else (prices, positions...) changes.
+    /// A client in the middle of `list_all_symbols` sees the catalog change under it.
+    pub fn set_broker(&self, info: BrokerInfo, catalog: Vec<CatalogSymbol>) {
+        let mut inner = self.shared.lock();
+        inner.state.broker = info;
+        inner.state.catalog = catalog;
+    }
+
     /// Make every write answer `-3` (a real account without `InpAllowReal`) until switched off.
     pub fn refuse_writes(&self, refuse: bool) {
         self.shared.lock().state.refuse_writes = refuse;
@@ -697,6 +725,8 @@ fn handle(
         return engine.write(state, id, request.command);
     }
     match request.command {
+        Command::GetBroker {} => ok_reply(id, &state.broker),
+        Command::ListSymbols(query) => list_symbols(state, id, &query),
         Command::GetSymbol { symbol } => match state.symbols.iter().find(|s| s.symbol == symbol) {
             Some(info) => ok_reply(id, info),
             None => unknown_symbol(id, &symbol),
@@ -738,6 +768,34 @@ fn handle(
         }
         Command::GetHistory(query) => history(state, id, &query),
     }
+}
+
+/// `list_symbols`: one page of the catalog, ordered byte-wise by name.
+fn list_symbols(state: &MockState, id: &str, query: &ListSymbolsQuery) -> Reply {
+    let limit = query.limit.unwrap_or(LIST_SYMBOLS_LIMIT_DEFAULT);
+    if !(1..=LIST_SYMBOLS_LIMIT_MAX).contains(&limit) {
+        return err_reply(
+            id,
+            RETCODE_INVALID_REQUEST,
+            &format!("'limit' must be between 1 and {LIST_SYMBOLS_LIMIT_MAX}"),
+        );
+    }
+    let mut sorted: Vec<&CatalogSymbol> = state.catalog.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let symbols = sorted
+        .into_iter()
+        .skip(query.offset as usize)
+        .take(limit as usize)
+        .cloned()
+        .collect();
+    ok_reply(
+        id,
+        &SymbolCatalogPage {
+            symbols,
+            total: u32::try_from(state.catalog.len()).unwrap_or(u32::MAX),
+            offset: query.offset,
+        },
+    )
 }
 
 fn history(state: &MockState, id: &str, query: &HistoryQuery) -> Reply {

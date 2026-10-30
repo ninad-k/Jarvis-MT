@@ -16,7 +16,7 @@
 #include "Json.mqh"
 
 #define JARVIS_PROTOCOL_VERSION   2
-#define JARVIS_EA_VERSION         "0.3.1"
+#define JARVIS_EA_VERSION         "0.4.0"
 
 #define JARVIS_RC_INVALID         (-1)
 #define JARVIS_RC_UNKNOWN_CMD     (-2)

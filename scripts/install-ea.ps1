@@ -215,7 +215,7 @@ Next steps
   4. Write commands (order_send, ...) need the Algo Trading button ON and "Allow Algo Trading"
      for this EA. Without them the EA answers writes with retcode -3. Reads work either way.
   5. Real accounts are refused unless you set the EA input InpAllowReal = true (default false).
-  6. The Experts journal should show: JarvisBridge 0.3.1 listening on 127.0.0.1:5555 (protocol 2, authenticated, ..., max order 1 lots)
+  6. The Experts journal should show: JarvisBridge 0.4.0 listening on 127.0.0.1:5555 (protocol 2, authenticated, ..., max order 1 lots)
   7. Tell the Jarvis API where the key is. In config\jarvis.toml:
 
          [bridge]

@@ -26,9 +26,10 @@ use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend};
 use crate::auth::{self, AuthFailure, BridgeKey};
 use crate::error::BridgeError;
 use crate::protocol::{
-    Account, Command, History, HistoryQuery, OrderCancelArgs, OrderSendArgs, Orders,
-    PROTOCOL_VERSION, PingInfo, PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs,
-    Positions, Price, RETCODE_AUTH_FAILED, Reply, Request, SymbolInfo, TradeResult,
+    Account, BrokerInfo, CatalogSymbol, Command, History, HistoryQuery, LIST_SYMBOLS_LIMIT_MAX,
+    ListSymbolsQuery, OrderCancelArgs, OrderSendArgs, Orders, PROTOCOL_VERSION, PingInfo,
+    PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs, Positions, Price,
+    RETCODE_AUTH_FAILED, Reply, Request, SymbolCatalogPage, SymbolInfo, TradeResult,
 };
 
 /// Calls that may wait for the actor at the same time before `call` starts to back-pressure.
@@ -203,6 +204,89 @@ impl BridgeClient {
         self.call(Command::GetHistory(query)).await
     }
 
+    pub async fn get_broker(&self) -> Result<BrokerInfo, BridgeError> {
+        self.call(Command::GetBroker {}).await
+    }
+
+    pub async fn list_symbols(
+        &self,
+        query: ListSymbolsQuery,
+    ) -> Result<SymbolCatalogPage, BridgeError> {
+        self.call(Command::ListSymbols(query)).await
+    }
+
+    /// The broker's whole symbol catalog, fetched in pages of [`LIST_SYMBOLS_LIMIT_MAX`] and
+    /// returned in the EA's name order.
+    ///
+    /// The catalog can change while it is being read (the broker adds a symbol, or the user
+    /// switches account in MT5). A page whose `total` differs from the first page of the pass,
+    /// or an unexpectedly empty page, makes the pass start again from offset 0; this is
+    /// tolerated twice. A third inconsistent pass fails with [`BridgeError::Protocol`], as does
+    /// a catalog of more than [`LIST_ALL_SYMBOLS_CAP`] symbols. Transport errors, timeouts and
+    /// `Remote` errors of any page are returned as they are.
+    pub async fn list_all_symbols(&self) -> Result<Vec<CatalogSymbol>, BridgeError> {
+        let mut changes = 0_u32;
+        loop {
+            match self.list_all_symbols_pass().await? {
+                Pass::Complete(symbols) => return Ok(symbols),
+                Pass::Changed => {
+                    changes += 1;
+                    if changes > LIST_ALL_SYMBOLS_RESTARTS {
+                        return Err(BridgeError::Protocol(format!(
+                            "the broker's symbol catalog kept changing while it was being read                              ({changes} attempts)"
+                        )));
+                    }
+                    tracing::debug!(changes, "symbol catalog changed while paging; restarting");
+                }
+            }
+        }
+    }
+
+    /// One pass over all pages from offset 0.
+    async fn list_all_symbols_pass(&self) -> Result<Pass, BridgeError> {
+        let mut symbols: Vec<CatalogSymbol> = Vec::new();
+        let mut expected_total: Option<u32> = None;
+        loop {
+            let offset = u32::try_from(symbols.len()).map_err(|_| catalog_too_large())?;
+            let page = self
+                .list_symbols(ListSymbolsQuery {
+                    offset,
+                    limit: Some(LIST_SYMBOLS_LIMIT_MAX),
+                })
+                .await?;
+            let total = *expected_total.get_or_insert(page.total);
+            if page.total as usize > LIST_ALL_SYMBOLS_CAP {
+                return Err(catalog_too_large());
+            }
+            if page.total != total || page.offset != offset {
+                return Ok(Pass::Changed);
+            }
+            if offset >= total {
+                // Past the end: done, unless symbols vanished and the list is now short.
+                return Ok(if symbols.len() == total as usize {
+                    Pass::Complete(symbols)
+                } else {
+                    Pass::Changed
+                });
+            }
+            if page.symbols.is_empty() {
+                // The EA lists fewer symbols than it promised: the catalog shrank.
+                return Ok(Pass::Changed);
+            }
+            symbols.extend(page.symbols);
+            if symbols.len() > LIST_ALL_SYMBOLS_CAP {
+                return Err(catalog_too_large());
+            }
+            if symbols.len() >= total as usize {
+                return Ok(if symbols.len() == total as usize {
+                    Pass::Complete(symbols)
+                } else {
+                    Pass::Changed
+                });
+            }
+        }
+    }
+
     pub async fn get_symbol(&self, symbol: &str) -> Result<SymbolInfo, BridgeError> {
         self.call(Command::GetSymbol {
             symbol: symbol.to_owned(),
@@ -243,6 +327,26 @@ impl BridgeClient {
     pub async fn order_cancel(&self, args: OrderCancelArgs) -> Result<TradeResult, BridgeError> {
         self.call(Command::OrderCancel(args)).await
     }
+}
+
+/// Most symbols [`BridgeClient::list_all_symbols`] will collect. Real brokers have up to
+/// about 12,000.
+pub const LIST_ALL_SYMBOLS_CAP: usize = 100_000;
+
+/// How many times a catalog read that was overtaken by a change is started again.
+const LIST_ALL_SYMBOLS_RESTARTS: u32 = 2;
+
+/// Result of one pass of [`BridgeClient::list_all_symbols`].
+enum Pass {
+    Complete(Vec<CatalogSymbol>),
+    /// The catalog changed under the reader; start again.
+    Changed,
+}
+
+fn catalog_too_large() -> BridgeError {
+    BridgeError::Protocol(format!(
+        "the broker's symbol catalog is larger than {LIST_ALL_SYMBOLS_CAP} symbols"
+    ))
 }
 
 fn actor_stopped() -> BridgeError {

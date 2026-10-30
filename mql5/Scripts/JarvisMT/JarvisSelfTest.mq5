@@ -9,6 +9,9 @@
 //| (bad arguments, unknown tickets, wrong-side stops, cached ids);  |
 //| they run on demo accounts only, and the script verifies that the |
 //| number of positions and orders did not change.                   |
+//| get_broker and list_symbols are checked for argument bounds,     |
+//| paging, order, JSON escaping and caching; Market Watch must stay |
+//| unchanged.                                                       |
 //| Live-data replies (ping, account, positions, ...) are printed so |
 //| they can be compared with the terminal by eye.                   |
 //+------------------------------------------------------------------+
@@ -252,6 +255,258 @@ void TestLive()
             rep.Type(rep.Get(d,"trade_allowed"))==JV_BOOL && rep.Type(rep.Get(d,"description"))==JV_STRING &&
             rep.Type(rep.Get(d,"currency_profit"))==JV_STRING && rep.IsWhole(rep.Get(d,"digits")),"live: get_symbol fields");
      }
+  }
+
+//+------------------------------------------------------------------+
+//| get_broker and list_symbols. No network, no trades, and nothing  |
+//| is added to Market Watch (checked).                              |
+//+------------------------------------------------------------------+
+int CountOccurrences(const string text,const string needle)
+  {
+   int count=0,pos=0;
+   while((pos=StringFind(text,needle,pos))>=0)
+     {
+      count++;
+      pos+=StringLen(needle);
+     }
+   return count;
+  }
+
+//--- run list_symbols{offset,limit} and parse the reply; false (and a FAIL line) if it is not ok
+bool ListPage(const string id,const long offset,const long limit,CJson &rep,int &data)
+  {
+   JarvisResult r;
+   string req=StringFormat("{\"id\":\"%s\",\"cmd\":\"list_symbols\",\"args\":{\"offset\":%I64d,\"limit\":%I64d}}",id,offset,limit);
+   if(!Run(req,r,rep))
+      return false;
+   int root=rep.Root();
+   data=rep.Get(root,"data");
+   bool ok=rep.Bool(rep.Get(root,"ok")) && rep.IsObject(data) && rep.IsWhole(rep.Get(data,"total")) &&
+           rep.IsWhole(rep.Get(data,"offset")) && rep.Type(rep.Get(data,"symbols"))==JV_ARRAY;
+   Check(ok,"catalog: page reply shape ("+id+")",StringSubstr(r.reply,0,300));
+   return ok;
+  }
+
+void TestCatalogSort()
+  {
+   string a[]={"US100_Spot","XAUUSD_","EURUSD_","EURUSD","eurusd","A","Z","XAUUSD","EURUSD"};
+   Check(Jarvis_SortNames(a,ArraySize(a)) && Jarvis_NamesSorted(a,ArraySize(a)),"catalog: sort orders names");
+   Check(a[0]=="A" && StringCompare("EURUSD","EURUSD_",true)<0,"catalog: sort is ascending and case-sensitive");
+   int pEur=-1,pEurU=-1;
+   for(int i=0; i<ArraySize(a); i++)
+     {
+      if(a[i]=="EURUSD" && pEur<0)
+         pEur=i;
+      if(a[i]=="EURUSD_")
+         pEurU=i;
+     }
+   Check(pEur>=0 && pEurU>pEur,"catalog: EURUSD sorts before EURUSD_");
+
+   string empty[];
+   Check(Jarvis_SortNames(empty,0) && Jarvis_NamesSorted(empty,0),"catalog: sort of an empty list");
+   string one[]={"X"};
+   Check(Jarvis_SortNames(one,1) && one[0]=="X","catalog: sort of one name");
+
+   //--- 777 pseudo-random names with duplicates: sorted, and nothing lost or invented
+   const int n=777;
+   string names[],orig[];
+   ArrayResize(names,n);
+   ArrayResize(orig,n);
+   uint x=12345;
+   for(int i=0; i<n; i++)
+     {
+      x=x*1664525+1013904223;
+      uint pick=(x>>24)%3;
+      string suffix=(pick==0)?"_":((pick==1)?".pro":"");
+      orig[i]="S"+IntegerToString((int)((x>>8)%400))+suffix;
+      names[i]=orig[i];
+     }
+   bool sortedOk=Jarvis_SortNames(names,n) && Jarvis_NamesSorted(names,n);
+   Check(sortedOk,"catalog: sort of 777 names");
+   bool used[];
+   ArrayResize(used,n);
+   ArrayInitialize(used,false);
+   bool permutation=true;
+   for(int i=0; i<n && permutation; i++)
+     {
+      bool found=false;
+      for(int j=0; j<n; j++)
+         if(!used[j] && orig[j]==names[i])
+           {
+            used[j]=true;
+            found=true;
+            break;
+           }
+      permutation=found;
+     }
+   Check(permutation,"catalog: sort keeps every name exactly once");
+  }
+
+void TestCatalogEscaping()
+  {
+   //--- a path contains backslashes, a description may hold quotes and non-ASCII text
+   string path="FX Gold Elite\\XAUUSD_";
+   string desc="Gold \"spot\" vs US Dollar "+ShortToString(0x20AC)+"\t";
+   CJsonWriter w;
+   w.BeginObject();
+   w.Key("symbols");
+   w.BeginArray();
+   Jarvis_PutCatalogEntry(w,"XAUUSD_",desc,path,"full",true,2,"XAU","USD");
+   w.EndArray();
+   w.PutInt("total",1);
+   w.PutInt("offset",0);
+   w.EndObject();
+   string text=w.ToString();
+   Check(StringFind(text,"FX Gold Elite\\\\XAUUSD_")>=0 && StringFind(text,"\\\"spot\\\"")>=0,"catalog: backslash and quote are escaped in the text",text);
+   CJson j;
+   bool parsed=j.Parse(text);
+   Check(parsed,"catalog: escaped entry is valid JSON",j.Error());
+   if(!parsed)
+      return;
+   int e=j.At(j.Get(j.Root(),"symbols"),0);
+   Check(j.Str(j.Get(e,"path"))==path && j.Str(j.Get(e,"description"))==desc && j.Str(j.Get(e,"name"))=="XAUUSD_" &&
+         j.Str(j.Get(e,"trade_mode"))=="full" && j.Bool(j.Get(e,"visible")) && j.Int(j.Get(e,"digits"))==2 &&
+         j.Str(j.Get(e,"currency_base"))=="XAU" && j.Str(j.Get(e,"currency_profit"))=="USD" && j.Count(e)==8,
+         "catalog: path with backslashes and awkward description survive the round trip");
+   Check(Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_FULL)=="full" && Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_LONGONLY)=="long_only" &&
+         Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_SHORTONLY)=="short_only" && Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_CLOSEONLY)=="close_only" &&
+         Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_DISABLED)=="disabled" && Jarvis_SymbolTradeModeName(99)=="disabled",
+         "catalog: trade modes map to the wire names");
+  }
+
+void TestCatalogArguments()
+  {
+   const string pre="{\"id\":\"";
+   ExpectError("catalog: limit 0",pre+"c-l0\",\"cmd\":\"list_symbols\",\"args\":{\"limit\":0}}",-1,"c-l0","limit");
+   ExpectError("catalog: limit 1001",pre+"c-l1\",\"cmd\":\"list_symbols\",\"args\":{\"limit\":1001}}",-1,"c-l1","limit");
+   ExpectError("catalog: limit -5",pre+"c-l2\",\"cmd\":\"list_symbols\",\"args\":{\"limit\":-5}}",-1,"c-l2","limit");
+   ExpectError("catalog: limit as string",pre+"c-l3\",\"cmd\":\"list_symbols\",\"args\":{\"limit\":\"10\"}}",-1,"c-l3","limit");
+   ExpectError("catalog: fractional limit",pre+"c-l4\",\"cmd\":\"list_symbols\",\"args\":{\"limit\":1.5}}",-1,"c-l4","limit");
+   ExpectError("catalog: offset -1",pre+"c-o1\",\"cmd\":\"list_symbols\",\"args\":{\"offset\":-1}}",-1,"c-o1","offset");
+   ExpectError("catalog: offset as string",pre+"c-o2\",\"cmd\":\"list_symbols\",\"args\":{\"offset\":\"0\"}}",-1,"c-o2","offset");
+   ExpectError("catalog: fractional offset",pre+"c-o3\",\"cmd\":\"list_symbols\",\"args\":{\"offset\":0.5}}",-1,"c-o3","offset");
+   ExpectError("catalog: absurd offset",pre+"c-o4\",\"cmd\":\"list_symbols\",\"args\":{\"offset\":99999999999}}",-1,"c-o4","offset");
+  }
+
+void TestCatalogLive()
+  {
+   CJson rep;
+   int d=-1;
+
+   //--- get_broker: company, server and trade mode only
+   string tmode="";
+   if(!Jarvis_TradeMode(tmode))
+     {
+      ExpectError("catalog: get_broker without account fails cleanly","{\"id\":\"b0\",\"cmd\":\"get_broker\"}",JARVIS_RC_INTERNAL,"b0");
+     }
+   else
+     {
+      ExpectOk("catalog: get_broker","{\"id\":\"b1\",\"cmd\":\"get_broker\",\"args\":{}}",rep,true);
+      d=rep.Get(rep.Root(),"data");
+      Check(rep.Count(d)==3 && rep.Str(rep.Get(d,"company"))==AccountInfoString(ACCOUNT_COMPANY) &&
+            rep.Str(rep.Get(d,"server"))==AccountInfoString(ACCOUNT_SERVER) && rep.Str(rep.Get(d,"trade_mode"))==tmode &&
+            rep.Get(d,"login")<0 && rep.Get(d,"name")<0,"catalog: get_broker has company, server, trade_mode and no identity");
+     }
+
+   //--- list_symbols against the real server catalog
+   int serverTotal=SymbolsTotal(false);
+   if(serverTotal<=0)
+     {
+      Print("      no symbols on the server list: live list_symbols checks skipped");
+      return;
+     }
+   int watchBefore=SymbolsTotal(true);
+   Jarvis_CatalogInvalidate();
+   int buildsBefore=g_jarvisCatBuilds;
+   ulong t0=GetTickCount64();
+
+   if(!ListPage("c-p0",0,100,rep,d))
+      return;
+   ulong firstMs=GetTickCount64()-t0;
+   int total=(int)rep.Int(rep.Get(d,"total"));
+   int shown=rep.Count(rep.Get(d,"symbols"));
+   Check(total==serverTotal && shown==MathMin(100,total) && rep.Int(rep.Get(d,"offset"))==0,
+         "catalog: first page: total matches the server list",StringFormat("total=%d server=%d shown=%d",total,serverTotal,shown));
+   PrintFormat("      server catalog: %d symbols, first page (includes building the sorted list) took %I64u ms",total,firstMs);
+
+   //--- entries: eight fields each, ascending names, known trade modes
+   int syms=rep.Get(d,"symbols");
+   bool shapeOk=true,orderOk=true;
+   for(int i=0; i<rep.Count(syms); i++)
+     {
+      int e=rep.At(syms,i);
+      string mode=rep.Str(rep.Get(e,"trade_mode"));
+      if(rep.Count(e)!=8 || rep.Str(rep.Get(e,"name"))=="" || rep.Type(rep.Get(e,"description"))!=JV_STRING ||
+         rep.Type(rep.Get(e,"path"))!=JV_STRING || rep.Type(rep.Get(e,"visible"))!=JV_BOOL || !rep.IsWhole(rep.Get(e,"digits")) ||
+         rep.Type(rep.Get(e,"currency_base"))!=JV_STRING || rep.Type(rep.Get(e,"currency_profit"))!=JV_STRING ||
+         (mode!="full" && mode!="long_only" && mode!="short_only" && mode!="close_only" && mode!="disabled"))
+         shapeOk=false;
+      if(i>0 && StringCompare(rep.Str(rep.Get(rep.At(syms,i-1),"name")),rep.Str(rep.Get(e,"name")),true)>0)
+         orderOk=false;
+     }
+   Check(shapeOk,"catalog: every entry has the eight fields and a known trade_mode");
+   Check(orderOk,"catalog: entries are in ascending name order");
+
+   //--- paging: two small pages equal one page of the same span; the last page is partial
+   if(total>=14)
+     {
+      CJson p1,p2,p3;
+      int d1,d2,d3;
+      if(ListPage("c-p1",0,7,p1,d1) && ListPage("c-p2",7,7,p2,d2) && ListPage("c-p3",0,14,p3,d3))
+        {
+         int s1=p1.Get(d1,"symbols"),s2=p2.Get(d2,"symbols"),s3=p3.Get(d3,"symbols");
+         bool same=(p1.Count(s1)==7 && p2.Count(s2)==7 && p3.Count(s3)==14);
+         for(int i=0; i<14 && same; i++)
+           {
+            string a=(i<7)?p1.Str(p1.Get(p1.At(s1,i),"name")):p2.Str(p2.Get(p2.At(s2,i-7),"name"));
+            string b=p3.Str(p3.Get(p3.At(s3,i),"name"));
+            if(a!=b)
+               same=false;
+           }
+         Check(same && p2.Int(p2.Get(d2,"offset"))==7,"catalog: two pages of 7 equal one page of 14");
+        }
+     }
+   CJson last,end,beyond;
+   int dl,de,db;
+   if(ListPage("c-p4",total-1,5,last,dl))
+      Check(last.Count(last.Get(dl,"symbols"))==1 && last.Int(last.Get(dl,"total"))==total,"catalog: last page holds the remaining symbol");
+   if(ListPage("c-p5",total,5,end,de))
+      Check(end.Count(end.Get(de,"symbols"))==0 && end.Int(end.Get(de,"total"))==total && end.Int(end.Get(de,"offset"))==total,
+            "catalog: offset == total gives an empty page");
+   if(ListPage("c-p6",total+5000,5,beyond,db))
+      Check(beyond.Count(beyond.Get(db,"symbols"))==0 && beyond.Int(beyond.Get(db,"total"))==total && beyond.Int(beyond.Get(db,"offset"))==total+5000,
+            "catalog: offset past the end gives an empty page, not an error");
+
+   //--- default page (500) and the largest page (1000): checked on the text, as the test parser caps nodes
+   JarvisResult r;
+   Jarvis_Process("{\"id\":\"c-d\",\"cmd\":\"list_symbols\"}",r,false);
+   int nDefault=CountOccurrences(r.reply,"\"name\":\"");
+   Check(r.ok && nDefault==MathMin(JARVIS_LIST_SYMBOLS_DEFAULT,total) && StringFind(r.reply,"\"offset\":0")>0,
+         "catalog: default page is 500 symbols",StringFormat("n=%d ok=%s",nDefault,r.ok?"true":"false"));
+   PrintFormat("      default page: %d symbols, reply %d characters",nDefault,StringLen(r.reply));
+   ulong t1=GetTickCount64();
+   Jarvis_Process("{\"id\":\"c-m\",\"cmd\":\"list_symbols\",\"args\":{\"limit\":1000}}",r,false);
+   ulong pageMs=GetTickCount64()-t1;
+   int nMax=CountOccurrences(r.reply,"\"name\":\"");
+   Check(r.ok && nMax==MathMin(JARVIS_LIST_SYMBOLS_MAX,total),"catalog: largest page is 1000 symbols",StringFormat("n=%d",nMax));
+   uchar bytes[];
+   Jarvis_Utf8(r.reply,bytes);
+   PrintFormat("      page of %d symbols: %d bytes on the wire, %I64u ms (sorted list cached)",nMax,ArraySize(bytes),pageMs);
+   Check(ArraySize(bytes)<1500000,"catalog: a full page stays well under 1.5 MB");
+
+   //--- the sorted list was built once for all of the above, and Market Watch is untouched
+   Check(g_jarvisCatBuilds-buildsBefore<=2,"catalog: the sorted list is cached between requests",
+         StringFormat("%d builds",g_jarvisCatBuilds-buildsBefore));
+   Check(SymbolsTotal(true)==watchBefore,"catalog: Market Watch unchanged by list_symbols",
+         StringFormat("before %d, after %d",watchBefore,SymbolsTotal(true)));
+  }
+
+void TestCatalog()
+  {
+   TestCatalogSort();
+   TestCatalogEscaping();
+   TestCatalogArguments();
+   TestCatalogLive();
   }
 
 //+------------------------------------------------------------------+
@@ -794,6 +1049,7 @@ void OnStart()
    TestJson();
    TestProtocol();
    TestLive();
+   TestCatalog();
    TestWrites();
    PrintFormat("=== JarvisSelfTest done: %d passed, %d failed ===",g_pass,g_fail);
   }

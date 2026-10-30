@@ -15,6 +15,8 @@ pub mod protocol;
 #[cfg(feature = "mock")]
 pub mod mock;
 #[cfg(feature = "mock")]
+mod mock_catalog;
+#[cfg(feature = "mock")]
 mod mock_trade;
 
 pub use auth::BridgeKey;

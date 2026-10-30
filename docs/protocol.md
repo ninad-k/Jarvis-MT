@@ -2,8 +2,11 @@
 
 Wire contract between the Rust backend (`jarvis-bridge-client`) and the MQL5 EA `JarvisBridge`.
 Read commands (`ping`, `get_price`, `get_account`, `get_positions`, `get_orders`, `get_history`,
-`get_symbol`) and write commands (`order_send`, `position_modify`, `position_close`,
-`position_close_partial`, `order_cancel`) are specified below. EA 0.3.x implements both (0.3.1 adds the `InpMaxLot` volume cap; the protocol is unchanged).
+`get_symbol`, `get_broker`, `list_symbols`) and write commands (`order_send`, `position_modify`,
+`position_close`, `position_close_partial`, `order_cancel`) are specified below. EA 0.3.x implements
+the first set of both (0.3.1 adds the `InpMaxLot` volume cap). **EA 0.4.0 adds `get_broker` and
+`list_symbols`** for per-broker symbol mapping. Both are new commands only: the protocol stays at
+version 2, and an older EA answers them with `retcode -2` (unknown command).
 
 **Version 2 (EA 0.3.0) is not compatible with version 1.** Every message is now authenticated
 (finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)): it travels as two ZeroMQ
@@ -33,8 +36,9 @@ that the Rust tests and the MQL5 self-test both check.
   frame 2 is a UTF-8 JSON object. One reply is likewise two frames. See
   [Authentication](#authentication). No ZeroMQ-specific extensions: plain REQ, plain REP,
   ZMTP 3.x with the NULL mechanism (this is what libzmq 4.x and the pure-Rust `zeromq` crate both speak).
-- Maximum message size: no hard limit in the protocol, but `get_history` is capped at 500 deals
-  (about 150 KB) to keep replies small.
+- Maximum message size: no hard limit in the protocol, but replies are kept small by paging:
+  `get_history` is capped at 500 deals (about 150 KB) and `list_symbols` at 1000 symbols per page
+  (about 250 KB).
 
 ## Authentication
 
@@ -179,7 +183,7 @@ poll loop within a few milliseconds. It must never send an unsolicited message.
 
 ## Commands
 
-Read commands first, then `get_symbol`, then the write commands.
+Read commands first, then `get_symbol`, `get_broker` and `list_symbols`, then the write commands.
 
 ### `ping`
 
@@ -439,6 +443,105 @@ risk. The symbol is added to Market Watch if needed. Unknown symbol: `4301`.
 | `stops_level` | `SYMBOL_TRADE_STOPS_LEVEL` | minimum SL/TP/pending distance, in points |
 | `trade_allowed` | `SYMBOL_TRADE_MODE` | `true` for full, long-only and short-only symbols; `false` for close-only and disabled ones. `order_send` enforces the direction of long-only and short-only symbols. |
 | `currency_profit` | `SYMBOL_CURRENCY_PROFIT` | |
+
+### `get_broker`
+
+Args: none (`{}`). Which broker and server the terminal is logged into. The backend keys its
+per-broker symbol map by `company` and re-detects the map when `company` changes (the user
+switched to another broker in MT5). A change of `server` alone (for example demo to real at
+the same broker) keeps the map but still invalidates open previews. Needs a connected trading account: without one the EA answers
+`4001` like `ping`. It never includes the login or the account name.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1020", "cmd": "get_broker", "args": {}}
+```
+
+```json
+{
+  "id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1020",
+  "ok": true,
+  "data": {
+    "company": "CFI Financial Markets L.L.C",
+    "server": "CFI3-Demo",
+    "trade_mode": "demo"
+  },
+  "retcode": 0
+}
+```
+
+| data field | MT5 property | notes |
+|---|---|---|
+| `company` | `ACCOUNT_COMPANY` | the broker's registered name; the key of a symbol map |
+| `server` | `ACCOUNT_SERVER` | the trade server, e.g. `CFI3-Demo`; differs between a broker's demo and live servers |
+| `trade_mode` | `ACCOUNT_TRADE_MODE` | `"demo"` \| `"contest"` \| `"real"`, as in `ping` |
+
+### `list_symbols`
+
+Args: `offset` (integer, optional, default `0`, at least `0`) and `limit` (integer, optional,
+default `500`, `1` to `1000`; anything else is `-1`). One page of the broker's **whole symbol
+catalog**: every symbol the trade server offers (`SymbolsTotal(false)` / `SymbolName(i, false)`),
+not only the ones in Market Watch, ordered by `name` ascending (a case-sensitive string
+comparison, so `EURUSD` comes before `EURUSD_`; do not rely on any finer collation). Reading the
+catalog never changes Market Watch: the EA does not call `SymbolSelect` for it.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1021", "cmd": "list_symbols", "args": {"offset": 0, "limit": 3}}
+```
+
+```json
+{
+  "id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1021",
+  "ok": true,
+  "data": {
+    "symbols": [
+      {"name": "EURUSD", "description": "Euro vs US Dollar", "path": "Forex\\EURUSD",
+       "trade_mode": "full", "visible": false, "digits": 5,
+       "currency_base": "EUR", "currency_profit": "USD"},
+      {"name": "EURUSD_", "description": "Euro vs US Dollar", "path": "FX Elite\\EURUSD_",
+       "trade_mode": "full", "visible": true, "digits": 5,
+       "currency_base": "EUR", "currency_profit": "USD"},
+      {"name": "NAS0926", "description": "Nasdaq 100 \"Sep 2026\" future (expired)",
+       "path": "Futures\\NAS0926", "trade_mode": "close_only", "visible": false, "digits": 1,
+       "currency_base": "USD", "currency_profit": "USD"}
+    ],
+    "total": 1834,
+    "offset": 0
+  },
+  "retcode": 0
+}
+```
+
+| data field | meaning |
+|---|---|
+| `symbols` | at most `limit` entries starting at `offset` of the name-ordered catalog |
+| `total` | size of the whole catalog (all pages) |
+| `offset` | the requested `offset`, echoed |
+
+An `offset` at or beyond `total` is not an error: the reply has an empty `symbols` array and the
+current `total`.
+
+| entry field | MT5 property | notes |
+|---|---|---|
+| `name` | `SymbolName(i, false)` | the broker's exact symbol name |
+| `description` | `SYMBOL_DESCRIPTION` | free text, may contain quotes and non-ASCII characters |
+| `path` | `SYMBOL_PATH` | the broker's folder tree, `\` separated, e.g. `FX Elite\EURUSD_`. Each backslash is `\\` in the JSON text |
+| `trade_mode` | `SYMBOL_TRADE_MODE` | `"full"` \| `"long_only"` \| `"short_only"` \| `"close_only"` \| `"disabled"` (an unknown value is reported as `"disabled"`) |
+| `visible` | `SYMBOL_VISIBLE` | shown in Market Watch: a strong hint of what the user trades. A symbol the terminal selected on its own (a cross rate for margin calculation) is not visible. `SYMBOL_SELECT` is the fallback only if the property cannot be read |
+| `digits` | `SYMBOL_DIGITS` | |
+| `currency_base`, `currency_profit` | `SYMBOL_CURRENCY_BASE`, `SYMBOL_CURRENCY_PROFIT` | empty string when the broker leaves them out |
+
+**Paging.** Brokers offer up to about 12,000 symbols (MetaQuotes-Demo: 12,224), far more than fits
+one reply, so a client reads the catalog in pages. The EA builds the sorted name list once and
+caches it for 30 seconds (rebuilt early when the symbol count, the account or the server changes),
+so a full read is one sort plus one cheap slice per page. The catalog can still change between two
+pages (the broker adds a symbol; the user switches account). A client detects this by `total`
+changing from one page to the next and starts again from offset 0;
+`BridgeClient::list_all_symbols` does exactly that, see
+[Client behaviour](#client-behaviour-bridgeclient). A full page of 1000 symbols is about 200 to
+250 KB of JSON.
+
+Errors: `-1` for a bad `offset` or `limit`. The EA answers `4001` if the terminal cannot produce
+the symbol list at all.
 
 ## Write commands
 
@@ -706,6 +809,13 @@ Unknown command:
   reconnects once and re-sends within the same call. Nothing was delivered in that case, so
   this is safe even for write commands. A failure after the request was sent (including a
   timeout) is never retried; for a write the outcome is then unknown, see above.
+- **Reading the whole symbol catalog** (`list_all_symbols`). Loops `list_symbols` with
+  `limit` 1000 from offset 0 until every symbol is read (about 13 requests for 12,224 symbols).
+  If a page reports a different `total` than the first page of the pass, or is unexpectedly empty
+  before the end, the catalog changed underneath; the pass restarts from offset 0. Two restarts are
+  tolerated; a third inconsistent pass returns `BridgeError::Protocol`. A catalog of more than
+  100,000 symbols is also a `Protocol` error. Timeouts, transport errors and `Remote` errors of any
+  page are returned unchanged. The result is in the EA's name order.
 - **Logging** (`tracing`): per call `id`, `cmd`, `duration_ms`, `ok`, `retcode` at `debug`;
   failures and `ok: false` replies at `warn`.
 
@@ -725,8 +835,11 @@ Unknown command:
 4. Authenticate first (frames, MAC, `ts`, replay; see [Authentication](#authentication)) and do
    nothing else for a request that fails. Validate every field (types, ranges, symbol) before using
    it. Never crash or hang on bad input.
-5. Never include login, name, server or company in any reply.
-6. Frames larger than 64 KB are dropped by ZeroMQ (`ZMQ_MAXMSGSIZE`), so the client sees a timeout, not a reply.
+5. Never include the login or the account name in any reply. The broker's company and server
+   appear only in `get_broker`.
+6. Request frames larger than 64 KB are dropped by ZeroMQ (`ZMQ_MAXMSGSIZE`), so the client sees a
+   timeout, not a reply. The limit is on what the EA receives; replies may be larger (a
+   `list_symbols` page is up to about 250 KB).
 7. Answer every unknown command with `retcode -2`.
 8. Write commands: validate before touching `CTrade`, apply the safety gate (`-3`), execute only on
    request, cache the last 64 replies by `id`, log every write (command, id, retcode) and every
@@ -759,6 +872,18 @@ sl/tp, closes remove or reduce positions and realise profit into the account and
 | `auth_failures()` | requests refused with `-4` |
 | `allow_replays(true)` | stops refusing a repeated id (the `ts` window still applies); only to exercise the write cache, which the replay guard otherwise hides |
 
+`get_broker` and `list_symbols` are served from `MockState::broker` (default company
+"Mock Broker Ltd.", server "Mock-Demo") and `MockState::catalog` (default
+`mock::default_catalog()`: a CFI-like catalog where `EURUSD_`, `XAUUSD_`, `US100_Spot` and the
+other traded instruments are visible, a plain `EURUSD` set is hidden, and dated futures such as
+`NAS1226` are hidden too). Pages are ordered by name and validated like the EA's.
+
+| hook | effect |
+|---|---|
+| `set_broker(info, catalog)` | switch broker mid-test, as if the MT5 user logged into another account: `get_broker` and `list_symbols` change at once |
+| `mock::default_catalog()` | the default catalog |
+| `mock::generated_catalog(n)` | a synthetic, name-ordered catalog of exactly `n` symbols (`SYM00000`...), e.g. 2,345 for a three-page read or 12,224 for a MetaQuotes-Demo sized one |
+
 `MockState::symbols` holds realistic trading specifications for the six mock symbols.
-`bridge_cli` offers `symbol`, `buy`, `sell`, `modify`, `close` and `cancel`; each write needs `--yes`
+`bridge_cli` offers `broker`, `symbols [--filter text] [--count]`, `symbol`, `buy`, `sell`, `modify`, `close` and `cancel`; each write needs `--yes`
 and refuses unless `ping` reports a demo account.

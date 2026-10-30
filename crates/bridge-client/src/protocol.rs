@@ -55,6 +55,12 @@ pub enum Command {
     GetSymbol {
         symbol: String,
     },
+    /// Which broker and server the terminal is logged into (for per-broker symbol
+    /// maps). Never includes the login, the account name or any credential.
+    GetBroker {},
+    /// One page of the broker's FULL symbol catalog (all symbols the server offers,
+    /// not only Market Watch), ordered by name.
+    ListSymbols(ListSymbolsQuery),
 
     // ---- Write commands (Sprint 2). Only `gate`-approved, user-confirmed requests
     // ---- may produce these. The EA refuses them on real accounts unless its
@@ -78,6 +84,8 @@ impl Command {
             Command::GetOrders { .. } => "get_orders",
             Command::GetHistory(_) => "get_history",
             Command::GetSymbol { .. } => "get_symbol",
+            Command::GetBroker {} => "get_broker",
+            Command::ListSymbols(_) => "list_symbols",
             Command::OrderSend(_) => "order_send",
             Command::PositionModify(_) => "position_modify",
             Command::PositionClose(_) => "position_close",
@@ -192,6 +200,64 @@ pub struct TradeResult {
     pub volume: f64,
     pub price: f64,
     pub comment: String,
+}
+
+/// `get_broker` reply data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerInfo {
+    /// `ACCOUNT_COMPANY`, e.g. "CFI Financial Markets L.L.C". The key of a symbol map.
+    pub company: String,
+    /// `ACCOUNT_SERVER`, e.g. "CFI3-Demo".
+    pub server: String,
+    pub trade_mode: TradeMode,
+}
+
+/// Maximum page size of `list_symbols`.
+pub const LIST_SYMBOLS_LIMIT_MAX: u32 = 1000;
+
+/// `list_symbols` arguments: `offset` 0-based into the name-ordered catalog, `limit`
+/// 1..=1000 (default 500).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListSymbolsQuery {
+    #[serde(default)]
+    pub offset: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// How a symbol may be traded (`SYMBOL_TRADE_MODE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolTradeMode {
+    Full,
+    LongOnly,
+    ShortOnly,
+    CloseOnly,
+    Disabled,
+}
+
+/// One entry of the broker's symbol catalog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogSymbol {
+    pub name: String,
+    pub description: String,
+    /// `SYMBOL_PATH`, e.g. "FX Gold Elite\\XAUUSD_".
+    pub path: String,
+    pub trade_mode: SymbolTradeMode,
+    /// Shown in Market Watch (`SYMBOL_VISIBLE`/selected): a strong hint of what is traded.
+    pub visible: bool,
+    pub digits: u32,
+    pub currency_base: String,
+    pub currency_profit: String,
+}
+
+/// `list_symbols` reply data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SymbolCatalogPage {
+    pub symbols: Vec<CatalogSymbol>,
+    /// Total symbols in the catalog (all pages).
+    pub total: u32,
+    pub offset: u32,
 }
 
 /// `get_symbol` reply data.
