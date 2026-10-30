@@ -2,7 +2,7 @@
 	"name": "jarvis-desktop",
 	"private": true,
 	"version": "0.1.0",
-	"description": "Jarvis MT desktop shell (Tauri 2)",
+	"description": "Arc MT desktop shell (Tauri 2)",
 	"license": "Apache-2.0",
 	"type": "module",
 	"scripts": {

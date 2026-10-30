@@ -36,7 +36,7 @@ async function connect(url) {
 
 async function start() {
 	if (!window.__TAURI_INTERNALS__) {
-		statusEl.textContent = 'This page only works inside the Jarvis MT desktop app.';
+		statusEl.textContent = 'This page only works inside the Arc MT desktop app.';
 		return;
 	}
 	const saved = await invoke('get_backend_url');

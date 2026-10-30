@@ -6,6 +6,7 @@
     Fetches, verifies (SHA-256) and installs:
       - Piper (Windows build)            -> models/piper/piper.exe (+ DLLs, espeak-ng-data)
       - Piper voice en_US-lessac-medium  -> models/piper/en_US-lessac-medium.onnx(.json)
+      - Piper voice en_GB-alan-medium    -> models/piper/en_GB-alan-medium.onnx(.json)
       - Whisper ggml-base.en             -> models/whisper/ggml-base.en.bin
 
     Sources are the official upstream projects at pinned versions: rhasspy/piper
@@ -52,7 +53,10 @@ $PiperZip = @{
 }
 
 $VoicesRevision = '5041a7a49ae5b3a0f30e6837769eb03fdbb231bd'
+# Friday's voice (en_US-lessac-medium) and Jarvis's voice (en_GB-alan-medium), both from the
+# same pinned revision of rhasspy/piper-voices.
 $VoiceBase = "https://huggingface.co/rhasspy/piper-voices/resolve/$VoicesRevision/en/en_US/lessac/medium"
+$AlanVoiceBase = "https://huggingface.co/rhasspy/piper-voices/resolve/$VoicesRevision/en/en_GB/alan/medium"
 $VoiceFiles = @(
     @{
         Name   = 'en_US-lessac-medium.onnx'
@@ -63,6 +67,16 @@ $VoiceFiles = @(
         Name   = 'en_US-lessac-medium.onnx.json'
         Url    = "$VoiceBase/en_US-lessac-medium.onnx.json"
         Sha256 = 'efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0'
+    },
+    @{
+        Name   = 'en_GB-alan-medium.onnx'
+        Url    = "$AlanVoiceBase/en_GB-alan-medium.onnx"
+        Sha256 = '0a309668932205e762801f1efc2736cd4b0120329622adf62be09e56339d3330'
+    },
+    @{
+        Name   = 'en_GB-alan-medium.onnx.json'
+        Url    = "$AlanVoiceBase/en_GB-alan-medium.onnx.json"
+        Sha256 = 'c0f0d124e5895c00e7c03b35dcc8287f319a6998a365b182deb5c8e752ee8c1e'
     }
 )
 
@@ -157,4 +171,6 @@ Write-Host ''
 Write-Host 'Voice models are ready:'
 Write-Host ("  whisper_model = ""models/whisper/{0}""" -f $WhisperModel.Name)
 Write-Host '  piper_exe     = "models/piper/piper.exe"'
-Write-Host '  piper_voice   = "models/piper/en_US-lessac-medium.onnx"'
+Write-Host '  piper_voice   = "models/piper/en_US-lessac-medium.onnx"  (default voice in config)'
+Write-Host '  voice_model   = "models/piper/en_GB-alan-medium.onnx"   (persona Jarvis, personas/jarvis.toml)'
+Write-Host '  voice_model   = "models/piper/en_US-lessac-medium.onnx"  (persona Friday, personas/friday.toml)'

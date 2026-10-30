@@ -82,7 +82,7 @@ fn describe(err: &reqwest::Error, url: &Url) -> String {
     }
 }
 
-/// Checks that `base` answers like a Jarvis MT server (`GET /api/health`).
+/// Checks that `base` answers like an Arc MT server (`GET /api/health`).
 pub async fn probe(base: &Url) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -106,7 +106,7 @@ pub async fn probe(base: &Url) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Reached {} but it did not answer like Jarvis MT (HTTP {})",
+            "Reached {} but it did not answer like Arc MT (HTTP {})",
             base.host_str().unwrap_or("the server"),
             status.as_u16()
         ))

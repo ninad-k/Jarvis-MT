@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Jarvis MT",
+  "productName": "Arc MT",
   "version": "0.1.0",
   "identifier": "com.ninadk.jarvismt",
   "build": {
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Jarvis MT",
+        "title": "Arc MT",
         "url": "index.html",
         "width": 1280,
         "height": 800,

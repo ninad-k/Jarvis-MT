@@ -1,4 +1,4 @@
-//! Jarvis MT desktop shell.
+//! Arc MT desktop shell.
 //!
 //! The window starts on a tiny bundled launcher page (`ui/`). The launcher asks
 //! this crate to connect to the configured backend, and on success the window
@@ -88,7 +88,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let reload = MenuItem::with_id(app, "reload", "Reload", true, Some("CmdOrCtrl+R"))?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = PredefinedMenuItem::quit(app, Some("Quit"))?;
-    let file = Submenu::with_items(app, "Jarvis MT", true, &[&settings, &reload, &sep, &quit])?;
+    let file = Submenu::with_items(app, "Arc MT", true, &[&settings, &reload, &sep, &quit])?;
     Menu::with_items(app, &[&file])
 }
 
@@ -158,5 +158,5 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Jarvis MT");
+        .expect("error while running Arc MT");
 }
