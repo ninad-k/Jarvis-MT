@@ -1,6 +1,6 @@
 # Glossary
 
-Terms used in the Jarvis MT docs, in alphabetical order. Terms marked "(planned)" are not in v0.1.0.
+Terms used in the Arc MT docs, in alphabetical order. Terms marked "(planned)" are not in v0.1.0.
 
 **Action gate.** The part of the backend (the `gate` crate, planned) that checks limits, builds previews and issues confirmation tokens. It is the only route from a trade request to a write. See [SPEC.md](../SPEC.md).
 
@@ -30,7 +30,7 @@ Terms used in the Jarvis MT docs, in alphabetical order. Terms marked "(planned)
 
 **DLL import.** An MT5 permission that lets an EA call functions in a DLL. `JarvisBridge` needs it for its own EA only. Do not turn it on for all EAs.
 
-**EA (Expert Advisor).** A program that runs inside MT5 and is attached to a chart. In Jarvis MT, `JarvisBridge` is the EA.
+**EA (Expert Advisor).** A program that runs inside MT5 and is attached to a chart. In Arc MT, `JarvisBridge` is the EA.
 
 **est_pnl.** The estimated profit or loss shown in a preview. For a close, it is the floating profit or loss being realised. For a new order, it is the estimate at the stop loss and the take profit (planned). See [ADR-0009](adr/0009-est-pnl-definition.md).
 

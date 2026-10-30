@@ -1,6 +1,6 @@
 # Threat model
 
-Scope: Jarvis MT as of the security review of 2026-10-30 (see
+Scope: Arc MT as of the security review of 2026-10-30 (see
 [audit-2026-10-30.md](audit-2026-10-30.md) for the findings and their status). The product rules
 being protected are in [SPEC.md](../../SPEC.md) (core rules 1 to 10); the reporting policy is
 [SECURITY.md](../../SECURITY.md).
@@ -95,7 +95,7 @@ Attackers considered:
 | 7. DEMO by default, refuse real | `ModeMonitor` (`state.rs:74`) is fed by every ping and account read; `propose`, `confirm` and `execute` all refuse on a mismatch. `startup_check` refuses to start. The EA refuses writes on a real account unless `InpAllowReal` (`TradeHandlers.mqh:162`). | `startup_refuses_demo_config_against_real_account`, `real_account_blocks_ui_proposals_and_demo_config_blocks_confirm`, `live_mode_on_a_real_account_is_allowed`, the mock-bridge write tests |
 | 8. Credentials stay in MT5 | `Account` has no login, name or server field (`bridge-client/src/protocol.rs`), so there is nothing to redact. `comment` fields from MT5 are filtered before they reach the model (`tools.rs:1092`). | `account_and_positions`, `free_text_comments_from_mt5_never_reach_the_model`, `the_database_never_holds_the_plain_totp_secret_or_password` |
 | 9. Ambiguity means ask | System prompt, plus the deterministic parser: `cross_check` rejects a proposal that contradicts side, symbol, volume, price, SL, TP or selector that the user said (`gate/src/intent.rs:1073`). A **new order** also needs the latest message to be an order with a side (LLM-1): after a question, chit-chat or a bare "yes" the model cannot open a trade, and a close that can hit several positions needs a close request. | `proposal_that_contradicts_the_utterance_is_rejected`, `wrong_symbol_or_volume_is_rejected_but_unstated_facts_are_not_checked`, `confirm_wording_in_chat_does_not_create_a_new_proposal`, `a_new_order_after_a_question_is_refused_and_the_model_is_told_to_ask`, `a_new_order_after_a_message_that_is_not_an_order_is_refused`, `spoken_and_hinglish_order_phrases_still_pass`, 100+ phrase corpus in `gate/tests` |
-| 10. Audit everything | `Audit::record` (`audit.rs`), append-only by SQLite triggers (`migrations/0001_audit.sql`). Rows: utterance, intent, preview, confirm, bridge request and reply, trade result, kill switch, login. | `buy_gold_full_flow_preview_confirm_position_and_audit`, `audit_endpoint_pages_newest_first` |
+| 10. Audit everything | `Audit::record` (`audit.rs`), append-only by SQLite triggers (`migrations/0001_audit.sql`). Rows: utterance, intent, preview, confirm, bridge request and reply, trade result, kill switch, login, and replies withheld by the grounding check (LLM-2). | `buy_gold_full_flow_preview_confirm_position_and_audit`, `audit_endpoint_pages_newest_first` |
 
 ## 5. STRIDE by boundary
 
@@ -135,6 +135,7 @@ Attackers considered:
 |---|---|---|---|---|
 | E | **Prompt injection makes the model trade** (OWASP LLM01, LLM06) | The model has no write tool. A proposal only creates a preview. The token goes to the browser, never into the model's context. Limits and the kill switch apply to proposals. The preview text comes from the gate, not from the model | `tools.rs`, `trading.rs`, `gate` | A model manipulated into a *proposal* still shows the user a preview they must confirm. A new order is refused unless the user's latest message was an order with a side (LLM-1); the parser reads "should I buy gold?" as an order, so a question phrased that way still passes the cross-check and only the user's confirmation stops it. |
 | T | Injection through tool results (position, order or deal comments, OWASP LLM01) | Only `jarvis:<8 hex>` and the broker's `[sl ...]`, `[tp ...]`, `[so ...]` markers reach the model; all other comment text is dropped | `tools.rs:1092` | Symbol names are sanitised by the resolver. Other MT5 text is not sent. |
+| T | **The model states a figure it did not get from a tool** (OWASP LLM09). A small local model answered a price question from memory ("gold is 2654.80" when it was near 3980), whatever the prompt said | The agent loop checks every final reply. Each figure (a decimal, a whole number of 100 or more, a smaller one with a currency, percent or lot context) must match a number in a tool result of the session, in a user message of the session or in the clock strings of the system prompt, allowing for rounding and sign. Otherwise the reply is audited as `ungrounded_reply`, withheld, and the model gets one retry with a correction. A second miss is replaced by a fixed text and audited as `ungrounded_reply_blocked`, so neither the user nor text-to-speech gets the invented text. The check is in code and does not read the persona, so it is the same for every persona | `grounding.rs`, `agent.rs` (`run_turn`) | A figure that appears in an older tool result of the same session passes even when the market has moved. Arithmetic the model does itself (a percentage, a total) is treated as ungrounded unless a tool reported it. Numbers written as words are not checked. This limits what a wrong answer can say; it is not a substitute for the confirmation step, which still decides what is traded. |
 | I | Secrets in the model's context (LLM02/LLM06) | `Account` has no login, name or server. API keys are never put into prompts. The system prompt holds only time and the alias list | `bridge-client/src/protocol.rs`, `agent.rs:290` | Account balances and positions are sent to a cloud provider if the user picks one. Ollama keeps them local. |
 | I | API key sent in clear text | Providers that carry a key must use `https` (loopback `http` is allowed) | `llm/src/util.rs:31` | None. |
 | D | Unbounded model use (LLM10) | At most 5 model rounds per message, 40 messages of history, 100 sessions, 2000-character input, 64 KB body | `agent.rs`, `routes.rs` (`spend_budget`) | At most 20 chat requests per minute per session (NET-2). No per-session token budget. |
@@ -172,7 +173,7 @@ Attackers considered:
 ## 6. Out of scope and assumptions
 
 - One trader, one machine. Multi-user isolation is not a goal.
-- The Windows account that runs Jarvis MT, MT5 and the browser is trusted. Anything that can read
+- The Windows account that runs Arc MT, MT5 and the browser is trusted. Anything that can read
   `.env`, `data/jarvis.db` or process memory can act as the user.
 - MT5, the broker and the LLM providers are trusted to do their own jobs.
 - Demo accounts are the supported default. Live trading is a deliberate, documented opt-in.

@@ -1,12 +1,12 @@
 # Desktop app (Tauri 2)
 
-`apps/desktop` is a small native shell around the Jarvis MT web UI. It gives you a normal
+`apps/desktop` is a small native shell around the Arc MT web UI. It gives you a normal
 Windows application (installer, Start menu entry, its own window) without a browser tab.
 It contains no trading logic. All trading, auth and the action gate stay in `jarvis-api`
 (ADR 0015).
 
 - Tauri 2.12.5 (`tauri-cli` 2.12.4), Rust 2024 edition, WebView2 on Windows.
-- Identifier: `com.ninadk.jarvismt`. Product name: `Jarvis MT`.
+- Identifier: `com.ninadk.jarvismt`. Product name: `Arc MT`.
 - Plugins: `store` (saves the backend URL), `single-instance`, `window-state` (desktop only).
 
 ## How it works
@@ -14,11 +14,11 @@ It contains no trading logic. All trading, auth and the action gate stay in `jar
 The window opens a tiny bundled **launcher page** (`apps/desktop/ui`, plain HTML, CSS and JS,
 no framework). The launcher asks the Rust side to connect to the saved backend URL
 (default `https://127.0.0.1:8787`). Rust checks `GET /api/health`, and if the server answers
-like Jarvis MT the window navigates to that origin. `jarvis-api` serves the SPA there
+like Arc MT the window navigates to that origin. `jarvis-api` serves the SPA there
 (`[server] static_dir = "web/build"`), so the UI loads from the backend itself.
 
 If the server is down, or its certificate is not trusted, the launcher stays open, shows the
-reason and lets you fix the URL. Menu `Jarvis MT > Backend settings...` (Ctrl+,) returns to
+reason and lets you fix the URL. Menu `Arc MT > Backend settings...` (Ctrl+,) returns to
 that page at any time. `Reload` is Ctrl+R.
 
 ### Why the UI is loaded from the backend
@@ -74,8 +74,8 @@ Output goes to `apps/desktop/src-tauri/target/<debug|release>/bundle/`:
 
 | Artifact | Release size (v0.1.0) |
 |---|---|
-| `nsis/Jarvis MT_0.1.0_x64-setup.exe` | 1.75 MiB |
-| `msi/Jarvis MT_0.1.0_x64_en-US.msi` | 2.45 MiB |
+| `nsis/Arc MT_0.1.0_x64-setup.exe` | 1.75 MiB |
+| `msi/Arc MT_0.1.0_x64_en-US.msi` | 2.45 MiB |
 | `release/jarvis-desktop.exe` (portable, needs WebView2) | 4.8 MiB |
 
 `apps/desktop/src-tauri` is **not** part of the root Cargo workspace (it is listed under

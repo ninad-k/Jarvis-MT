@@ -1,6 +1,6 @@
 # Configuration
 
-Jarvis reads two places at startup:
+Arc MT reads two places at startup:
 
 - **`config/jarvis.toml`**: non-secret settings. It is gitignored, so start from the template:
   `Copy-Item config\jarvis.example.toml config\jarvis.toml`.
@@ -31,6 +31,7 @@ The server refuses to start, and says why, when:
 - `[auth] enabled = true` and `JARVIS_JWT_SECRET` is missing, shorter than 32 bytes, or guessable: fewer than 16 different byte values, a run of 8 equal bytes, or a block that repeats (`abcdabcd...`). Base64 or hex text is judged on the bytes it decodes to. The message prints the command that generates a good one (the same as in `.env.example`).
 - `llm.providers` is empty, two providers share a name, or `llm.default` names no provider.
 - `[trading]` or `[limits]` values are out of range (see below).
+- The persona folder in `[personas] dir` cannot be read, holds no valid persona pack, has two packs with the same `id`, or `[personas] default` names no pack. A pack that breaks a rule in [Persona packs](#persona-packs) is reported by file name.
 
 A bridge that is down, a missing voice model, or a missing LLM key only logs a warning. The server still starts.
 
@@ -161,6 +162,49 @@ The whole section is optional. Without it, voice is off. If the section is prese
 
 A broken engine does not stop the server. Speech-to-text and text-to-speech are switched off separately, and
 the reason is written to the log. `GET /api/status` reports `voice.stt` and `voice.tts`.
+
+Each persona speaks with the voice named in its own pack (`voice_model`), see [Persona packs](#persona-packs).
+
+## `[personas]`
+
+| Key | Type | Default | Effect and safety |
+|---|---|---|---|
+| `dir` | path | `"personas"` | Folder that holds the persona packs, relative to the working directory or absolute. Every `*.toml` file directly in it is one persona; subfolders are not read. The folder is read at startup. |
+| `default` | persona id | `"jarvis"` | The persona used by a user who has not chosen one. Must be the `id` of a pack in `dir`. |
+
+A persona changes its name, personality, voice, wake phrase and colours. It never changes the tools, limits, confirmations or safety rules, which are shared by all personas. See [ADR-0017](adr/0017-personas.md).
+
+## Persona packs
+
+Each pack is one TOML file. The file name without `.toml` must equal `id`. The shipped packs are `personas/jarvis.toml` and `personas/friday.toml`.
+
+| Key | Type | Rules |
+|---|---|---|
+| `id` | string | Required. 1 to 32 characters, each `a-z`, `0-9`, `_` or `-`. Must equal the file name without `.toml`. Unique in the folder. |
+| `name` | string | Required. 1 to 32 characters. The display name, also used in the identity line of the system prompt. |
+| `description` | string | Required. One line, shown in the persona list. |
+| `system_prompt` | multi-line string | Required. The personality only, at most 4000 characters. It is placed inside the fixed system prompt, after the identity line and before the shared rules, and it cannot override those rules. Write tone and wording here, not rules, limits or tool names. |
+| `voice_model` | path | Required. Piper voice file (`.onnx`), relative to the working directory or absolute. Its `.onnx.json` must sit next to it. The file is not checked at startup. If it is missing, voice is off for that persona (`voice_available` is `false` in `GET /api/personas`). |
+| `wake_word` | string | Required. Lower case, 2 to 4 words, for example `"hey friday"`. Used by hands-free mode. Give each persona its own phrase: two personas with the same phrase make the match ambiguous. |
+| `[theme]` | table | Required. HUD colours as `#rrggbb` (a `#` and six hex digits): `accent` (buttons, borders, highlights), `accent_soft`, `orb_core` and `orb_glow` (the orb). |
+
+Rules for the whole file:
+
+- **Unknown keys are rejected**, in the top level and in `[theme]`. A pack cannot add settings of its own, so it cannot change limits, tools or safety behaviour.
+- A pack that breaks any rule fails the load, and the error names the file and the reason.
+- All packs in the folder are loaded and checked together, so one broken file stops the server rather than being skipped.
+- Packs are loaded in order of `id`.
+
+## Adding a persona
+
+No code change is needed.
+
+1. Copy `personas/friday.toml` to `personas/<id>.toml`, for example `personas/ops.toml`. The new `id` must match the file name.
+2. Set `id`, `name`, `description`, `system_prompt`, `wake_word` and the four `[theme]` colours. Write only the personality in `system_prompt`.
+3. For a voice, download a Piper voice from `rhasspy/piper-voices` on Hugging Face: the `.onnx` file and its `.onnx.json`. Put both in `models\piper\` and set `voice_model` to the `.onnx` path. To have `scripts/fetch-models.ps1` download it, add it to that script with its SHA-256 hashes, as the existing entries do. Without a voice file the persona still works, with voice off.
+4. Restart `jarvis-api`, because the folder is read at startup. Check the new persona in `GET /api/personas`.
+
+The persona then appears in the persona toggle and in Settings, and can be chosen as `[personas] default`.
 
 ## `.env` and environment variables
 

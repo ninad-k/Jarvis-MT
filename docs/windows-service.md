@@ -1,6 +1,6 @@
 # Windows service
 
-`jarvis-api` can run as a Windows service named **JarvisMT** (display name "Jarvis MT"). The service starts
+`jarvis-api` can run as a Windows service named **JarvisMT** (display name "Arc MT"). The service starts
 the server at boot without a logged-in user, restarts it after a crash, and writes its log to a file. The
 service is for Windows only. On other systems, use the console or your own service manager.
 
@@ -72,7 +72,7 @@ You can also use the standard Windows tools (`services.msc`, `sc.exe start Jarvi
 | Setting | Value |
 |---|---|
 | Service name | `JarvisMT` |
-| Display name | `Jarvis MT` |
+| Display name | `Arc MT` |
 | Description | One line naming the product and MetaTrader 5, as set in the code |
 | Executable | The `jarvis-api.exe` you ran `install` with (its absolute path) |
 | Arguments | `--config <absolute config path> service run --workdir <absolute folder you ran install from>` |

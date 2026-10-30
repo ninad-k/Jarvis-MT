@@ -1,15 +1,18 @@
-# Jarvis MT
+# Arc MT
 
 [![CI](https://github.com/ninad-k/Jarvis-MT/actions/workflows/ci.yml/badge.svg)](https://github.com/ninad-k/Jarvis-MT/actions/workflows/ci.yml)
 [![Security](https://github.com/ninad-k/Jarvis-MT/actions/workflows/security.yml/badge.svg)](https://github.com/ninad-k/Jarvis-MT/actions/workflows/security.yml)
 [![OpenSSF Scorecard](https://github.com/ninad-k/Jarvis-MT/actions/workflows/scorecard.yml/badge.svg)](https://github.com/ninad-k/Jarvis-MT/actions/workflows/scorecard.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Jarvis MT is a voice and chat trading tool for MetaTrader 5 (MT5). You type or say a request such as "what's gold at?"
+Arc MT is a voice and chat trading tool for MetaTrader 5 (MT5). You type or say a request such as "what's gold at?"
 or "buy 0.01 gold", and a language model reads live data from your terminal or proposes an order. Nothing is sent to MT5 until
 you confirm a short-lived preview, by button or by voice. It is built for one trader running MT5 on a Windows PC or a VPS.
+You can talk to it as **Jarvis** or **Friday**, two personas that differ in voice and manner but not in what they are allowed to do.
 
-> **Disclaimer.** Jarvis MT is not financial advice and comes without warranty (see [LICENSE](LICENSE)). Trade only on demo accounts
+The repository, the crates and the binaries keep their `jarvis-*` names.
+
+> **Disclaimer.** Arc MT is not financial advice and comes without warranty (see [LICENSE](LICENSE)). Trade only on demo accounts
 > until you have tested the whole flow. You are responsible for every trade you confirm.
 
 ## Safety model
@@ -36,11 +39,14 @@ Marked **(local)** when the feature runs entirely on your PC, with no cloud serv
 - **Market data and account (local):** bid and ask prices, account summary, open positions, pending orders and closed deals with totals
   that the backend computes. Totals are never estimated by the model.
 - **Chat (Ollama is local; Anthropic and OpenAI are cloud):** typed questions in English and Hinglish, with tool calls shown in the transcript.
+- **Personas (local):** two built-in personas. **Jarvis** has a male British voice and speaks calmly and formally. **Friday** has a female US voice and is warm and casual.
+  Switch with the persona toggle, or say "Hey Jarvis" or "Hey Friday" in hands-free mode. A persona changes the name, the wording, the voice, the wake phrase and the colours. Tools, limits, confirmations and safety rules are the same for both. See [ADR-0017](docs/adr/0017-personas.md) and the [user guide](docs/user-guide.md#personas-available-from-v020).
+- **Settings page (local):** persona, language model, voice input and output, watchlist, symbol aliases and trading limits. The UI can only make the limits stricter than the config file, and changing them needs an authenticator code. See the [user guide](docs/user-guide.md#settings-available-from-v020).
 - **Trading with confirmation (local):** market and pending orders, stop loss and take profit changes, closes (full or partial) and cancels.
   Each one is a preview with a 15-second token. Batch actions need two confirmations.
 - **Limits and kill switch (local):** `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols`, trading hours, and a kill switch that blocks writes.
 - **Login (local):** password (Argon2id) with an authenticator code (TOTP), a session cookie, rate limits and lockout. Users are created on the machine itself.
-- **Voice (local):** speech-to-text with Whisper and text-to-speech with Piper. Confirmations are read back aloud, and the 15-second window starts when reading finishes.
+- **Voice (local):** speech-to-text with Whisper and text-to-speech with Piper, with one Piper voice per persona. Confirmations are read back aloud, and the 15-second window starts when reading finishes. Optional hands-free wake-word mode listens for a persona's wake phrase.
 - **Audit (local):** a SQLite log of every step, with an audit page in the web UI and an API.
 - **Web UI and PWA:** a HUD with an orb, watchlist, positions, transcript, confirm modal, kill switch and audit page. Installable on a phone.
 - **Desktop app (local):** a Tauri 2 window around the same web UI. It contains no trading logic.
@@ -166,8 +172,8 @@ Voice needs local models and a build with the `whisper` feature.
 pwsh scripts/fetch-models.ps1
 ```
 
-This downloads Piper, a Piper voice and the Whisper `base.en` model into `models\`, checks their SHA-256 hashes, and skips files that already match.
-The `[voice]` section of the example config already points at these paths and has `enabled = true`. Restart the API after fetching the models.
+This downloads Piper, the two Piper voices (`en_US-lessac-medium` for Friday and `en_GB-alan-medium` for Jarvis, both from `rhasspy/piper-voices` at one pinned revision) and the Whisper `base.en` model into `models\`. It checks their SHA-256 hashes and skips files that already match.
+The `[voice]` section of the example config already points at the Piper and Whisper paths and has `enabled = true`. Each persona's voice is set in its pack under `personas\`. Restart the API after fetching the models.
 
 Text-to-speech works with the default build. Speech-to-text needs the `whisper` feature, which compiles whisper.cpp. Install these first:
 
@@ -236,6 +242,8 @@ pwsh scripts/check.ps1 -SkipWeb -SkipSecurity -SkipWhisper -SkipDesktop
 | `crates/api` | `jarvis-api`: HTTP and WebSocket API, login, trading service, voice routes, audit log, `user` and `service` commands |
 | `crates/gate` | `jarvis-gate`: limits, intent parser, previews, confirmation tokens, kill switch |
 | `crates/llm` | `jarvis-llm`: provider trait with tool calling; Ollama, Anthropic and OpenAI clients |
+| `crates/persona` | `jarvis-persona`: persona packs, their validation, wake-phrase matching and the system prompt frame |
+| `personas/` | Persona packs, one TOML file each: `jarvis.toml` and `friday.toml` |
 | `crates/voice` | `jarvis-voice`: Whisper speech-to-text (feature `whisper`) and Piper text-to-speech |
 | `crates/bridge-client` | `jarvis-bridge-client`: wire types, ZeroMQ client, mock bridge, `bridge_cli` and `mock_server` examples |
 | `mql5/` | `JarvisBridge` EA, protocol headers, vendored mql-zmq and a libzmq 4.3.5 DLL built from source by `scripts/build-libzmq.ps1` ([THIRD_PARTY.md](mql5/THIRD_PARTY.md)) |

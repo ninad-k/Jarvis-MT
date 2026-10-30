@@ -1,10 +1,10 @@
 # Security policy
 
-Jarvis MT sits between a language model and a trading terminal, so security reports are taken seriously. Thank you for helping to keep users' accounts safe.
+Arc MT sits between a language model and a trading terminal, so security reports are taken seriously. Thank you for helping to keep users' accounts safe.
 
 ## Supported versions
 
-Jarvis MT is pre-1.0. Only the latest release gets security fixes.
+Arc MT is pre-1.0. Only the latest release gets security fixes.
 
 | Version | Supported |
 |---|---|
@@ -62,10 +62,10 @@ Out of scope:
 - Bugs or outages in MetaTrader 5, your broker, or your VPS provider.
 - Losses caused by settings the user chose, such as generous limits, a real account, or a confirmation the user gave.
 - Mistakes by a language model that never reach the confirmation step (a wrong answer is not a vulnerability; a wrong trade without confirmation is).
-- Attacks that need an already compromised machine, a stolen unlocked device, or administrator access to the PC that runs Jarvis MT.
+- Attacks that need an already compromised machine, a stolen unlocked device, or administrator access to the PC that runs Arc MT.
 - Denial of service by a client that already holds a valid session.
 - Findings from automated scanners without a demonstrated impact, and missing security headers on a loopback-only deployment.
-- Issues in third-party services (Anthropic, OpenAI, Ollama) or in the vendored mql-zmq and libzmq libraries that are not specific to how Jarvis MT uses them. Please report those upstream.
+- Issues in third-party services (Anthropic, OpenAI, Ollama) or in the vendored mql-zmq and libzmq libraries that are not specific to how Arc MT uses them. Please report those upstream.
 
 ## Safe harbour
 

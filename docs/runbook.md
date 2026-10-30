@@ -1,6 +1,6 @@
 # Runbook
 
-Day-to-day operation of Jarvis MT on a Windows PC or VPS: starting and stopping, health checks, logs, the
+Day-to-day operation of Arc MT on a Windows PC or VPS: starting and stopping, health checks, logs, the
 audit log, users, the kill switch, recovery and backups. For first-time setup see the [README](../README.md).
 For the Windows service see [windows-service.md](windows-service.md). For settings see
 [configuration.md](configuration.md).

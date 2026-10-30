@@ -1,6 +1,6 @@
-# Contributing to Jarvis MT
+# Contributing to Arc MT
 
-Thanks for your interest in Jarvis MT, a voice and chat tool for trading on MetaTrader 5. Bug reports, documentation fixes, tests and features are all welcome. This guide explains how to set up the project, what we expect in a change, and how changes are reviewed.
+Thanks for your interest in Arc MT, a voice and chat tool for trading on MetaTrader 5. Bug reports, documentation fixes, tests and features are all welcome. This guide explains how to set up the project, what we expect in a change, and how changes are reviewed.
 
 Before you start, read [SPEC.md](SPEC.md) (the product rules) and [docs/architecture.md](docs/architecture.md). Questions go to [GitHub Discussions](https://github.com/ninad-k/Jarvis-MT/discussions); see [SUPPORT.md](SUPPORT.md).
 
@@ -8,7 +8,7 @@ Please follow the [Code of Conduct](CODE_OF_CONDUCT.md) in all project spaces.
 
 ## Ground rules
 
-Jarvis MT can place real orders in MetaTrader 5, so safety comes before features.
+Arc MT can place real orders in MetaTrader 5, so safety comes before features.
 
 - **The core rules in [SPEC.md](SPEC.md) are non-negotiable.** The LLM only reads data and proposes previews. A trade reaches MT5 only after a user confirms a short-lived preview. The kill switch blocks every write. Demo is the default. Account credentials never reach the LLM or the browser. Every step is written to the audit log.
 - **Changes to the safety path need tests and an ADR.** This covers the action gate, confirmation tokens, the kill switch, authentication, and the code that writes to MT5 (the bridge write commands and the `JarvisBridge` EA). Such a change needs automated tests that fail if the rule is broken, and an accepted ADR in [docs/adr/](docs/adr/README.md).

@@ -28,13 +28,15 @@ flowchart LR
     WSM["WebSocket events"]
     STATIC["Static site from static_dir"]
     AUDITW["Audit writer"]
+    SETTINGSM["Settings: preferences, persona choice, tighten-only limit overrides"]
   end
 
   GATE["jarvis-gate: limits, intent parser, previews, tokens, kill switch"]
   BRC["jarvis-bridge-client: ZeroMQ REQ, one request in flight"]
   LLMC["jarvis-llm: Ollama, Anthropic, OpenAI"]
   VOICEC["jarvis-voice: Whisper STT, Piper TTS"]
-  DB[("SQLite data/jarvis.db: audit, users, revoked_sessions, kill_switch")]
+  PERSONA["jarvis-persona: persona packs, prompt frame, wake phrases, voices"]
+  DB[("SQLite data/jarvis.db: audit, users, revoked_sessions, kill_switch, user_settings, limit_overrides")]
   OLLAMA["Ollama on loopback"]
   CLOUD["Anthropic or OpenAI over HTTPS"]
   EA["JarvisBridge EA: ZeroMQ REP on loopback, inside MT5"]
@@ -67,6 +69,12 @@ flowchart LR
   CHAT --> AUDITW
   TRADE --> AUDITW
   VOICEM --> AUDITW
+  ROUTES --> SETTINGSM
+  CHAT --> PERSONA
+  VOICEM --> PERSONA
+  SETTINGSM --> PERSONA
+  SETTINGSM --> GATE
+  SETTINGSM --> DB
 ```
 
 Outside the runtime, GitHub Actions builds and checks the project (CI, security scans, OpenSSF Scorecard, the optional
@@ -80,14 +88,15 @@ Whisper build, and tagged releases). See "Build and release pipeline" below.
 | `jarvis-llm` (`crates/llm`) | `LlmProvider` trait with tool calling, `build_provider`, and the Ollama, Anthropic and OpenAI clients. Reads API keys from the variable named in config. | `src/lib.rs`, `src/types.rs`, `src/ollama.rs`, `src/anthropic.rs`, `src/openai.rs`, `src/util.rs` |
 | `jarvis-gate` (`crates/gate`) | The action gate: limit checks, the deterministic intent parser (English and Hinglish), previews, one-time confirmation tokens with their stages and timing, and the kill switch. No I/O, so it is tested on its own. | `src/limits.rs`, `src/intent.rs`, `src/preview.rs`, `src/tokens.rs`, `src/killswitch.rs` |
 | `jarvis-voice` (`crates/voice`) | WAV decoding, transcript clean-up and corrections, Whisper STT (feature `whisper`), Piper TTS as a child process. | `src/audio.rs`, `src/stt.rs`, `src/text.rs`, `src/tts.rs` |
-| `jarvis-api` (`crates/api`) | The binary. Config and validation, HTTP and WebSocket routes, `AppState` and startup checks, the chat turn loop and read/propose tools, the trading service (confirm, execute, batch, kill switch), login and sessions, voice routes, events, security headers, static files, the SQLite audit log, the `user` CLI and the Windows service. | `src/config.rs`, `routes.rs`, `state.rs`, `serve.rs`, `symbols.rs`, `tools.rs`, `trading.rs`, `voice.rs`, `ws.rs`, `events.rs`, `security.rs`, `static_site.rs`, `ratelimit.rs`, `audit.rs`, `clock.rs`, `users.rs`, `cli.rs`, `service.rs`, `auth/{mod,http,store,crypto}.rs`; migrations `0001_audit.sql`, `0002_users.sql`, `0003_kill_switch.sql` |
+| `jarvis-persona` (`crates/persona`) | Persona packs from `personas/*.toml`: loading and validation, the registry, wake-phrase matching, and `compose_system_prompt`, which places a persona's personality inside the fixed prompt frame. It holds no tools, limits or safety rules. | `src/lib.rs` |
+| `jarvis-api` (`crates/api`) | The binary. Config and validation, HTTP and WebSocket routes, `AppState` and startup checks, the chat turn loop and read/propose tools, the trading service (confirm, execute, batch, kill switch), login and sessions, user settings and tighten-only limit overrides, persona selection, voice routes, events, security headers, static files, the SQLite audit log, the `user` CLI and the Windows service. | `src/config.rs`, `routes.rs`, `state.rs`, `serve.rs`, `symbols.rs`, `tools.rs`, `trading.rs`, `voice.rs`, `ws.rs`, `events.rs`, `security.rs`, `static_site.rs`, `ratelimit.rs`, `audit.rs`, `clock.rs`, `users.rs`, `cli.rs`, `service.rs`, `auth/{mod,http,store,crypto}.rs`; migrations `0001_audit.sql`, `0002_users.sql`, `0003_kill_switch.sql` |
 | `JarvisBridge` EA (`mql5/`) | ZeroMQ REP socket on loopback, polled from `OnTimer` (20 ms, at most 10 requests per tick). Validates each request before doing anything. Read commands, plus five write commands that run only on request. | `Experts/JarvisMT/JarvisBridge.mq5`; `Include/Jarvis/{Json,Protocol,ReadHandlers,TradeHandlers}.mqh`; self-test `Scripts/JarvisMT/JarvisSelfTest.mq5` |
 | Vendored mql-zmq | ZeroMQ binding for MQL5, with a local patch and its DLLs (checksums in `mql5/THIRD_PARTY.md`) | `Include/Zmq/`, `Include/Mql/`, `Libraries/*.dll` |
 | `web` | SvelteKit single-page app (adapter-static, fallback `index.html`). Typed client for the HTTP contract, state stores, components (HUD, orb, confirm modal, kill switch, audit page, login), PWA service worker, mock mode. | `src/lib/api.ts`, `src/lib/state/*.svelte.ts`, `src/lib/components/*.svelte`, `src/routes/`, `src/service-worker/`, `static/manifest.webmanifest`; `vite.config.ts` |
 | `apps/desktop` | Tauri 2 shell. A bundled launcher page asks for the backend URL, checks `/api/health`, then navigates to that origin. No trading logic. Not in the Cargo workspace. | `src-tauri/`, `ui/`, `src-tauri/tauri.conf.json` |
 | `scripts/` | Install and compile the EA (SHA-256 checks), download voice models with pinned hashes, and run every local check. | `install-ea.ps1`, `compile-ea.ps1`, `fetch-models.ps1`, `check.ps1` |
 
-Dependencies point one way. `jarvis-api` depends on the four library crates. The EA and the web app depend only on the wire contracts
+Dependencies point one way. `jarvis-api` depends on the five library crates (gate, llm, voice, bridge-client and persona). The EA and the web app depend only on the wire contracts
 (`docs/protocol.md`, `docs/api.md`). Library crates return typed errors. Only the binary uses `anyhow`.
 
 ## Request flow 1: a read question
@@ -260,21 +269,25 @@ Other enforced controls:
   transcription in `routes.rs` and `state.rs`.
 - **Between preview and write:** `Trading::execute` takes a write lock, checks the kill switch, and runs the gate again for a new order
   (`Trading::recheck`) before the first bridge write; the bridge client serves its write lane before its read lane.
+- **Personas:** `crates/persona/src/lib.rs` (`compose_system_prompt`) places the personality inside a fixed frame: an identity line, the personality, then the shared rules verbatim, then a line that says the shared rules take precedence. Unknown keys are rejected in a pack, so a persona cannot add tools, limits or safety exceptions. Each audit row records the persona ([ADR-0017](adr/0017-personas.md)).
+- **Tighten-only limits:** a limit override from Settings must be at least as strict as the configuration, or it is refused with `422 limit_not_stricter`. Saving or resetting overrides needs a TOTP code when login is on. The gate checks the effective limits each time.
 
 ## Data stores
 
 | Store | Location | Contents | Lifetime |
 |---|---|---|---|
-| SQLite `audit` | `data/jarvis.db` (WAL mode) | Every step of every turn, trade and login event. `id, ts, session_id, kind, payload` (JSON text). | Append-only. Insert triggers only. Never trimmed by the server. |
+| SQLite `audit` | `data/jarvis.db` (WAL mode) | Every step of every turn, trade and login event. `id, ts, session_id, persona, kind, payload` (JSON text). `persona` is the id of the persona that was active. | Append-only. Insert triggers only. Never trimmed by the server. |
 | SQLite `users` | `data/jarvis.db` | Username (case-insensitive), Argon2id PHC hash, TOTP secret encrypted with ChaCha20-Poly1305 (key from `JARVIS_JWT_SECRET` through HKDF-SHA256), last used TOTP step, failed attempts, lock time, `tokens_valid_after`. | Managed with the `user` commands. |
 | SQLite `revoked_sessions` | `data/jarvis.db` | `jti` of logged-out sessions, kept until the token would have expired. | Pruned by expiry. |
 | SQLite `kill_switch` | `data/jarvis.db` | One row: whether the kill switch is engaged, why, and when it changed. Read at startup. | Rewritten on every engage and release. A switch that is engaged stays engaged across restarts; an unreadable row engages it. |
+| SQLite `user_settings` | `data/jarvis.db` | The signed-in user's preferences: persona, language model, voice options, watchlist and symbol aliases. | Changed through `PUT /api/settings`. Kept across restarts. |
+| SQLite `limit_overrides` | `data/jarvis.db` | The tighten-only trading limit overrides set from Settings. They are checked against the configured limits and apply to every persona. | Changed through `PUT` or `DELETE /api/settings/limits`, which need a TOTP code when login is on. Kept across restarts. |
 | In memory | Process | Chat sessions (at most 100, history capped at 40 messages), confirmation tokens, rate limit counters, open WebSockets. | Lost on restart. |
-| Files | `config/jarvis.toml`, `.env` | Settings and secrets. | Edited by hand. |
+| Files | `config/jarvis.toml`, `.env`, `personas/*.toml` | Settings, secrets and persona packs. | Edited by hand. Persona packs are read at startup. |
 | Files | `models/` | Whisper and Piper models, pinned and hash-checked by `fetch-models.ps1`. | Replace by re-running the script. |
 | Files | `logs/` | Daily log of the service (`jarvis-api.log.<date>`). Console runs log to the console. | Not rotated by count. Delete old files yourself. |
 | Files | `web/build/` | The built UI served from `static_dir`. | Rebuild with `pnpm -C web build`, then restart the server. |
-| MT5 | The terminal's own data | Account, positions, orders, history. Jarvis reads and writes through the EA only. | MT5's own store. |
+| MT5 | The terminal's own data | Account, positions, orders, history. Arc MT reads and writes through the EA only. | MT5's own store. |
 
 ## Ports
 

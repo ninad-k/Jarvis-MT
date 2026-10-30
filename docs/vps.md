@@ -1,6 +1,6 @@
 # Running on a Windows VPS
 
-Running Jarvis MT on a Windows VPS keeps MetaTrader 5 online while your PC is off, and lets you reach the web UI
+Running Arc MT on a Windows VPS keeps MetaTrader 5 online while your PC is off, and lets you reach the web UI
 from a phone or another computer. The whole stack goes on the same VPS: MT5 with the JarvisBridge EA, `jarvis-api`
 and, if you use it, Ollama. The EA listens on loopback only, so MT5 and the API must share one machine.
 

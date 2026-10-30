@@ -1,10 +1,12 @@
-# Spec: Jarvis MT
+# Spec: Arc MT
 
-Voice + chat trading assistant on top of MetaTrader 5. The user talks or types; an LLM
-reads market/account state through tools and can only *propose* trades. A trade reaches
-MT5 only after the user confirms a short-lived preview.
+Voice + chat trading assistant on top of MetaTrader 5, with selectable personas (Jarvis
+and Friday). The user talks or types; an LLM reads market/account state through tools and
+can only *propose* trades. A trade reaches MT5 only after the user confirms a short-lived
+preview. (Code, crates and the EA keep their `jarvis` names.)
 
-Status: **draft, awaiting review.** Sprint 1 plan: [tasks/plan.md](tasks/plan.md).
+Status: Sprints 1–5 built; personas and settings added. Plans: [tasks/plan.md](tasks/plan.md),
+[tasks/plan-sprints-2-5.md](tasks/plan-sprints-2-5.md).
 
 ---
 
@@ -17,6 +19,7 @@ Status: **draft, awaiting review.** Sprint 1 plan: [tasks/plan.md](tasks/plan.md
 | `llm` | Rust crate: provider-agnostic chat + tool-calling trait; Anthropic, OpenAI, Ollama | — |
 | `gate` | Rust crate: limits, ActionPreview, one-time confirm tokens (15 s), batch double-confirm, kill switch, intent parser | `bridge-client` (types) |
 | `voice` | Rust crate: whisper-rs STT with trading prompt, Piper TTS process | — |
+| `persona` | Rust crate: persona packs from `personas/*.toml`, validation, wake-phrase matching, system prompt composition | — |
 | `api` | Rust binary: Axum HTTP/WS, tool registry, agent loop, auth, audit log (SQLite) | all crates above |
 | `web` | SvelteKit HUD (orb, watchlist, positions, transcript, confirm modal), PWA, later Tauri | `api` (HTTP/WS contract) |
 
@@ -42,7 +45,26 @@ text, with a hard guarantee that nothing executes without their explicit, timed 
 7. Default mode is DEMO. LIVE needs an explicit setting plus a UI banner. The backend also refuses to start in DEMO mode if the account reports `trade_mode = real`.
 8. Account credentials stay in MT5. The backend never sends them to the LLM or the browser. `get_account` returns no login, name or server to the LLM.
 9. On ambiguous intent the assistant asks a clarifying question and never guesses.
-10. Every step is written to the audit table: utterance, intent, preview, confirmation, bridge request, retcode.
+10. Every step is written to the audit table: persona, utterance, intent, preview, confirmation, bridge request, retcode.
+
+## Personas (ADR-0017)
+
+- Two personas ship: **Jarvis** (male voice, calm, formal, concise) and **Friday** (female
+  voice, warmer and more casual). Each is a TOML pack in `personas/` (`id`, `name`,
+  `description`, `system_prompt`, `voice_model`, `wake_word`, `[theme]`); adding a pack adds
+  a persona without code changes.
+- A persona changes only the name, personality text, Piper voice, wake phrase ("Hey
+  Jarvis" / "Hey Friday") and HUD colours (Jarvis blue, Friday gold). Memory, tools,
+  limits, previews, tokens, the kill switch and all core rules are shared and identical; a
+  persona can never change confirmation behaviour. The personality is placed inside a
+  fixed system prompt frame whose shared rules always win. Parity tests prove both personas
+  produce identical confirmation behaviour.
+- Users switch persona with the top-bar toggle, in Settings, or by saying another
+  persona's wake phrase in hands-free mode. One settings store and one audit log serve all
+  personas.
+- Settings page: persona, voice (read aloud, input mode, language), LLM provider,
+  watchlist, symbol aliases, and trading limits that can only be **tightened** from the UI
+  (with a TOTP code); loosening a limit needs the config file.
 
 ## Tech stack
 

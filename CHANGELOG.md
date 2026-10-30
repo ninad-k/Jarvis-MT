@@ -30,12 +30,19 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 - Continuous integration (Rust, web, desktop and documentation checks), security scanning (cargo-deny, cargo-audit, pnpm audit, gitleaks, semgrep, CodeQL), OpenSSF Scorecard, a Whisper build job, and a release workflow for version tags.
 - `scripts/check.ps1` runs every local check.
 - Documentation: configuration reference, Windows service guide, VPS guide, runbook and architecture.
+- Personas (`jarvis-persona`, `personas/`): two built-in persona packs, Jarvis (male British voice, calm and formal) and Friday (female US voice, warm and casual). A persona changes only its name, personality text, voice, wake phrase and colours. Tools, limits, confirmations and safety rules are shared. Adding a persona needs a TOML file and no code change. See [ADR-0017](docs/adr/0017-personas.md).
+- Settings page and user settings (`GET` and `PUT /api/settings`): persona, language model, voice input and output, watchlist and symbol aliases.
+- Tighten-only trading limits from the UI: overrides can make `max_lot`, `max_positions`, `max_daily_loss`, `allowed_symbols` and trading hours stricter, never looser. Saving or resetting them needs a TOTP code when login is on.
+- Wake-word mode: hands-free voice input that acts only on speech that starts with a persona's wake phrase ("hey jarvis" or "hey friday").
+- Per-persona voices: each persona speaks with its own Piper voice. `scripts/fetch-models.ps1` pins and verifies `en_GB-alan-medium` for Jarvis, next to `en_US-lessac-medium` for Friday.
+- The audit log records the persona that was active on each row (`persona` column).
+- The product is named Arc MT in the desktop app and the documentation. Repository, crate, binary and EA names (`jarvis-*`, `JarvisBridge`) are unchanged.
 
 ### Changed
 
 - The `JarvisBridge` EA reports `ea_version` 0.3.1 and accepts write commands. Version 0.1.0 was read-only.
 - Bridge protocol version 2: signed two-frame messages. EA 0.1.x/0.2.x and clients older than this release cannot talk to each other; reinstall the EA with `scripts/install-ea.ps1` and set `[bridge] key_file`.
-- `config/jarvis.example.toml` has new `[limits]`, `[trading]`, `[auth]` and `[voice]` sections. `.env.example` has `JARVIS_JWT_SECRET`.
+- `config/jarvis.example.toml` has new `[limits]`, `[trading]`, `[auth]`, `[voice]` and `[personas]` sections. `.env.example` has `JARVIS_JWT_SECRET`.
 - The HTTP API gained confirm, cancel, read-back, close, kill switch, audit, authentication, voice and WebSocket endpoints. See [docs/api.md](docs/api.md).
 - `service install` registers the service as the virtual account `NT SERVICE\JarvisMT` instead of LocalSystem and prints the `icacls` commands that give it its files. `--account <name>` (with `--password-stdin` for an account that needs a password) and `--local-system` (with a warning) override it. A service that is already installed as LocalSystem stays that way until you move it (see [docs/windows-service.md](docs/windows-service.md)).
 - `[server]` has new keys, all with defaults: `header_read_timeout_secs` (10), `request_timeout_secs` (30), `long_request_timeout_secs` (200), `max_connections` (256), `chat_rate_limit_per_minute` (20) and `transcribe_rate_limit_per_minute` (20). See [docs/configuration.md](docs/configuration.md).
@@ -66,6 +73,7 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 - The server has time and connection limits (NET-1): headers within 10 s (which also ends idle keep-alive connections), 30 s per request (200 s for chat, voice and confirm, none on the WebSocket), 256 connections. Chat and voice transcription have a per-session request budget (NET-2).
 - The Content-Security-Policy no longer allows WebSocket connections to any host: `connect-src` is `'self'` (CSP-1).
 - The Windows service no longer runs as LocalSystem by default (SVC-1).
+- The agent loop checks the figures in every final reply against the tool results and the user's messages of the session and the clock strings of the system prompt (LLM-2). A local model had answered "what is gold trading at?" with an invented price and no tool call. A reply with figures that no source reports is withheld, audited as `ungrounded_reply` and sent back to the model once with a correction; a second miss is replaced by a fixed text and audited as `ungrounded_reply_blocked`. The check is in code and is the same for every persona.
 - Security review: see [docs/security/threat-model.md](docs/security/threat-model.md) and [docs/security/audit-2026-10-30.md](docs/security/audit-2026-10-30.md).
 - The EA has its own per-order volume cap, the input `InpMaxLot` (default 1.0 lot, 0 turns it off): a larger `order_send` is refused with retcode -1 (EA-1, defence in depth behind the gate's `max_lot`). Closing positions is never capped. Reinstall and re-attach the EA to get the input.
 - The release workflow pins the CMake and LLVM versions it installs from Chocolatey, and its publish job runs in the `release` environment, which needs an approving reviewer (REL-1).

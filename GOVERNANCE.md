@@ -1,10 +1,10 @@
 # Governance
 
-This document describes how Jarvis MT is run: who decides, how decisions are made, how to take on more responsibility, how versions are numbered, and how security fixes are released.
+This document describes how Arc MT is run: who decides, how decisions are made, how to take on more responsibility, how versions are numbered, and how security fixes are released.
 
 ## Model
 
-Jarvis MT is **maintainer-led** (a "benevolent dictator" model). The lead maintainer, Ninad K ([@ninad-k](https://github.com/ninad-k)), has the final decision on scope, merges, releases and security response. Input from contributors is welcome and carries weight, especially on design questions, but the lead maintainer decides when there is no consensus.
+Arc MT is **maintainer-led** (a "benevolent dictator" model). The lead maintainer, Ninad K ([@ninad-k](https://github.com/ninad-k)), has the final decision on scope, merges, releases and security response. Input from contributors is welcome and carries weight, especially on design questions, but the lead maintainer decides when there is no consensus.
 
 Roles:
 
@@ -31,7 +31,7 @@ To be considered, open a discussion or ask an existing maintainer. The lead main
 
 ## Versioning
 
-Jarvis MT follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
+Arc MT follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
 - **While the version is 0.x**, any release may contain breaking changes. This covers the HTTP API, the configuration format, the bridge wire protocol and the EA inputs. Every breaking change is listed in [CHANGELOG.md](CHANGELOG.md).
 - **From 1.0.0**, breaking changes happen only in major releases.
