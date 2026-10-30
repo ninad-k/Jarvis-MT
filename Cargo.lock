@@ -1539,6 +1539,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf 0.13.0",
  "http-body-util",
+ "hyper-util",
  "jarvis-bridge-client",
  "jarvis-gate",
  "jarvis-llm",
