@@ -1,6 +1,8 @@
 //+------------------------------------------------------------------+
 //| JarvisSelfTest.mq5                                               |
-//| Offline checks of the JSON module and the request dispatcher.    |
+//| Offline checks of the JSON module, the request dispatcher and the|
+//| message authentication (HMAC-SHA256 against RFC 4231, the golden |
+//| vector shared with the Rust tests, wrong key / replay / stale ts).|
 //| No ZeroMQ, no DLLs, no trades: it calls Jarvis_Process() with    |
 //| canned requests and prints PASS/FAIL to the Experts journal.     |
 //| The write-command tests send ONLY requests that must be rejected |
@@ -40,7 +42,7 @@ void Check(const bool cond,const string name,const string detail="")
 //--- run a request; verify the reply is valid JSON with the expected envelope
 bool Run(const string request,JarvisResult &r,CJson &rep)
   {
-   Jarvis_Process(request,r);
+   Jarvis_Process(request,r,false);
    if(!rep.Parse(r.reply))
      {
       PrintFormat("FAIL  reply is not valid JSON: %s | %s",rep.Error(),StringSubstr(r.reply,0,200));
@@ -68,7 +70,7 @@ void ExpectError(const string name,const string request,const int rc,const strin
    int root=rep.Root();
    bool ok=!rep.Bool(rep.Get(root,"ok")) && rep.Int(rep.Get(root,"retcode"))==rc &&
            rep.Str(rep.Get(root,"id"))==expectId && rep.Str(rep.Get(root,"error"))!="" &&
-           StringFind(rep.Str(rep.Get(root,"error")),errPart)>=0 && rep.Get(root,"data")<0;
+           (errPart=="" || StringFind(rep.Str(rep.Get(root,"error")),errPart)>=0) && rep.Get(root,"data")<0;
    Check(ok,name,r.reply);
   }
 
@@ -214,7 +216,7 @@ void TestLive()
      }
    ExpectOk("live: ping","{\"id\":\"l1\",\"cmd\":\"ping\"}",rep,true);
    int d=rep.Get(rep.Root(),"data");
-   Check(rep.Int(rep.Get(d,"protocol_version"))==1 && rep.Str(rep.Get(d,"ea_version"))==JARVIS_EA_VERSION &&
+   Check(rep.Int(rep.Get(d,"protocol_version"))==JARVIS_PROTOCOL_VERSION && rep.Str(rep.Get(d,"ea_version"))==JARVIS_EA_VERSION &&
          rep.Type(rep.Get(d,"terminal_connected"))==JV_BOOL && rep.Type(rep.Get(d,"trade_allowed"))==JV_BOOL &&
          rep.IsWhole(rep.Get(d,"server_time")),"live: ping fields");
 
@@ -411,33 +413,352 @@ void TestWrites()
    //--- reply cache: a repeated id returns the first reply verbatim and executes nothing
    JarvisResult r1,r2,r3;
    string firstReq=BuildOrder("dup-1",sym,"buy","market",0.0,-1,-1,-1);                 // rejected: volume 0
-   Jarvis_Process(firstReq,r1);
+   Jarvis_Process(firstReq,r1,false);
    ulong hits=g_jarvisCacheHits;
    string otherReq="{\"id\":\"dup-1\",\"cmd\":\"position_close\",\"args\":{\"ticket\":999999999999}}";   // other command, same id
-   Jarvis_Process(otherReq,r2);
+   Jarvis_Process(otherReq,r2,false);
    Check(!r1.ok && !r1.cached && r2.reply==r1.reply && r2.cached && g_jarvisCacheHits==hits+1,
          "write cache: a repeated id returns the cached reply, nothing runs again",r2.reply);
-   Jarvis_Process(firstReq,r3);
+   Jarvis_Process(firstReq,r3,false);
    Check(r3.reply==r1.reply && r3.cached && g_jarvisCacheHits==hits+2,"write cache: still cached on the third request");
    //--- the ring holds 64 replies: after 64 other ids the first one is forgotten
    for(int i=0; i<JARVIS_CACHE_SIZE; i++)
      {
       JarvisResult rx;
-      Jarvis_Process(StringFormat("{\"id\":\"ring-%d\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":999999999999}}",i),rx);
+      Jarvis_Process(StringFormat("{\"id\":\"ring-%d\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":999999999999}}",i),rx,false);
      }
-   Jarvis_Process(otherReq,r2);
+   Jarvis_Process(otherReq,r2,false);
    Check(!r2.cached && r2.reply!=r1.reply,"write cache: the oldest reply is evicted after 64 newer ones");
    ulong h2=g_jarvisCacheHits;
    JarvisResult r4;
-   Jarvis_Process("{\"id\":\"ring-63\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":999999999999}}",r4);
+   Jarvis_Process("{\"id\":\"ring-63\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":999999999999}}",r4,false);
    Check(r4.cached && g_jarvisCacheHits==h2+1,"write cache: a recent id is still cached");
 
    Check(PositionsTotal()==posBefore && OrdersTotal()==ordBefore,"write: no position or order was created or changed by the rejected requests");
   }
 
+//+------------------------------------------------------------------+
+//| Authentication (BR-1): HMAC-SHA256 against the RFC 4231 vectors, |
+//| the golden vector shared with the Rust tests, and the request    |
+//| pipeline Jarvis_HandleSigned() with wrong keys, tampering,       |
+//| replays and stale timestamps. Nothing is traded.                 |
+//+------------------------------------------------------------------+
+//--- golden vector: crates/bridge-client/tests/fixtures/auth.golden.json (checked by a Rust test)
+#define GOLDEN_KEY            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+#define GOLDEN_REQUEST        "{\"id\":\"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001\",\"ts\":1793341200000,\"cmd\":\"ping\",\"args\":{}}"
+#define GOLDEN_REQUEST_MAC    "bc45b3fc8bc3cef210abe4efff32897c8ca52cf7a0da1d0366707923cd1ca581"
+#define GOLDEN_REPLY          "{\"id\":\"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001\",\"ok\":true,\"data\":{\"protocol_version\":2,\"ea_version\":\"0.3.0\",\"trade_mode\":\"demo\",\"terminal_connected\":true,\"trade_allowed\":true,\"server_time\":1793341200},\"retcode\":0,\"ts\":1793341200012}"
+#define GOLDEN_REPLY_MAC      "63b14665d262978eb9983b937d78ed251299d1ea085472b1b66628e94717c80b"
+#define OTHER_KEY             "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+#define NOW_MS                1793341200000
+
+void FillBytes(uchar &b[],const int n,const uchar v)
+  {
+   ArrayResize(b,n);
+   for(int i=0; i<n; i++)
+      b[i]=v;
+  }
+
+void HmacCase(const string name,const uchar &key[],const uchar &data[],const string want)
+  {
+   string got=Jarvis_HmacHex(key,data);
+   Check(got==want,name,got);
+  }
+
+void TestHmac()
+  {
+   uchar k[],d[];
+   //--- SHA-256("abc")
+   uchar abc[],h[];
+   Jarvis_Utf8("abc",abc);
+   Check(Jarvis_Sha256(abc,h) && Jarvis_HexEncode(h)=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","sha256: abc");
+
+   //--- RFC 4231 section 4 (case 5 is a truncated output and is not applicable)
+   FillBytes(k,20,0x0b);
+   Jarvis_Utf8("Hi There",d);
+   HmacCase("hmac: RFC 4231 case 1",k,d,"b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+
+   Jarvis_Utf8("Jefe",k);
+   Jarvis_Utf8("what do ya want for nothing?",d);
+   HmacCase("hmac: RFC 4231 case 2",k,d,"5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+
+   FillBytes(k,20,0xaa);
+   FillBytes(d,50,0xdd);
+   HmacCase("hmac: RFC 4231 case 3",k,d,"773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe");
+
+   ArrayResize(k,25);
+   for(int i=0; i<25; i++)
+      k[i]=(uchar)(i+1);
+   FillBytes(d,50,0xcd);
+   HmacCase("hmac: RFC 4231 case 4",k,d,"82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b");
+
+   FillBytes(k,131,0xaa);
+   Jarvis_Utf8("Test Using Larger Than Block-Size Key - Hash Key First",d);
+   HmacCase("hmac: RFC 4231 case 6 (key longer than the block)",k,d,"60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+
+   Jarvis_Utf8("This is a test using a larger than block-size key and a larger than block-size data. "+
+               "The key needs to be hashed before being used by the HMAC algorithm.",d);
+   HmacCase("hmac: RFC 4231 case 7 (key and data longer than the block)",k,d,"9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2");
+
+   //--- an empty message and a 64-byte key (exactly one block) must work too
+   uchar none[];
+   FillBytes(k,64,0x11);
+   Check(StringLen(Jarvis_HmacHex(k,none))==64,"hmac: empty message gives a 32-byte MAC");
+  }
+
+void TestEncoding()
+  {
+   uchar b[];
+   Check(Jarvis_HexDecode("00ff10Ab",b) && ArraySize(b)==4 && b[0]==0 && b[1]==255 && b[2]==16 && b[3]==171,"hex: decode, either case");
+   Check(Jarvis_HexEncode(b)=="00ff10ab","hex: encode is lowercase");
+   uchar t[];
+   Check(!Jarvis_HexDecode("abc",t) && !Jarvis_HexDecode("zz",t) && !Jarvis_HexDecode("0g",t),"hex: odd length and non-hex rejected");
+
+   uchar a1[],a2[],a3[],a4[];
+   Jarvis_AsciiBytes("abcd",a1);
+   Jarvis_AsciiBytes("abcd",a2);
+   Jarvis_AsciiBytes("abce",a3);
+   Jarvis_AsciiBytes("abc",a4);
+   Check(Jarvis_ConstTimeEqual(a1,a2) && !Jarvis_ConstTimeEqual(a1,a3) && !Jarvis_ConstTimeEqual(a1,a4),"ct-compare: equal, different, different length");
+   uchar e1[],e2[];
+   Check(Jarvis_ConstTimeEqual(e1,e2),"ct-compare: two empty arrays are equal");
+
+   //--- UTF-8: e acute (2 bytes) and euro sign (3 bytes), no terminating zero
+   uchar u[];
+   Jarvis_Utf8(ShortToString(0xE9)+ShortToString(0x20AC),u);
+   Check(ArraySize(u)==5 && u[0]==0xC3 && u[1]==0xA9 && u[2]==0xE2 && u[3]==0x82 && u[4]==0xAC,"utf8: multi-byte characters, no terminator",IntegerToString(ArraySize(u)));
+   Jarvis_Utf8("",u);
+   Check(ArraySize(u)==0,"utf8: empty string gives no bytes");
+   Jarvis_Utf8("ab",u);
+   Check(ArraySize(u)==2 && u[0]=='a' && u[1]=='b',"utf8: ascii, no terminator");
+
+   //--- key validation
+   string err="";
+   Check(!Jarvis_SetKeyHex("",err) && !g_jarvisKeyReady,"key: empty is refused");
+   Check(!Jarvis_SetKeyHex("abcd",err),"key: too short is refused");
+   Check(!Jarvis_SetKeyHex(StringSubstr(GOLDEN_KEY,0,62)+"zz",err),"key: non-hex is refused");
+   Check(!Jarvis_SetKeyHex("0000000000000000000000000000000000000000000000000000000000000000",err),"key: all zeros is refused");
+   Check(Jarvis_SetKeyHex("  "+GOLDEN_KEY+"  ",err) && g_jarvisKeyReady && ArraySize(g_jarvisKey)==32,"key: blanks are ignored");
+   string upper=GOLDEN_KEY;
+   StringToUpper(upper);
+   Check(Jarvis_SetKeyHex(upper,err) && g_jarvisKey[31]==0x1f,"key: uppercase hex accepted");
+  }
+
+void TestGolden()
+  {
+   string err="";
+   Check(Jarvis_SetKeyHex(GOLDEN_KEY,err),"golden: key loads",err);
+   uchar body[],frame[];
+   Jarvis_Utf8(GOLDEN_REQUEST,body);
+   Check(Jarvis_ExpectedMacFrame(body,frame) && CharArrayToString(frame,0,WHOLE_ARRAY,CP_ACP)==GOLDEN_REQUEST_MAC,
+         "golden: request MAC equals the Rust value",CharArrayToString(frame,0,WHOLE_ARRAY,CP_ACP));
+   uchar mac[];
+   Jarvis_AsciiBytes(GOLDEN_REQUEST_MAC,mac);
+   Check(Jarvis_VerifyFrames(mac,body),"golden: request frames verify");
+   Jarvis_Utf8(GOLDEN_REPLY,body);
+   Jarvis_AsciiBytes(GOLDEN_REPLY_MAC,mac);
+   Check(Jarvis_VerifyFrames(mac,body),"golden: reply frames verify");
+   Jarvis_AsciiBytes(StringSubstr(GOLDEN_REPLY_MAC,0,63)+"0",mac);
+   Check(!Jarvis_VerifyFrames(mac,body),"golden: one wrong digit fails");
+   string up=GOLDEN_REPLY_MAC;
+   StringToUpper(up);
+   Jarvis_AsciiBytes(up,mac);
+   Check(!Jarvis_VerifyFrames(mac,body),"golden: uppercase MAC is refused (frames are lowercase hex)");
+  }
+
+//--- the two frames of a message signed with keyHex
+void SignedFrames(const string keyHex,const string payload,uchar &mac[],uchar &body[])
+  {
+   uchar k[];
+   Jarvis_HexDecode(keyHex,k);
+   Jarvis_Utf8(payload,body);
+   Jarvis_AsciiBytes(Jarvis_HmacHex(k,body),mac);
+  }
+
+string ReqJson(const string id,const long ts,const string cmd="launch_missiles")
+  {
+   return StringFormat("{\"id\":\"%s\",\"ts\":%I64d,\"cmd\":\"%s\",\"args\":{}}",id,ts,cmd);
+  }
+
+//--- the reply must be the generic refusal: -4, "authentication failed", no data, the expected id
+void ExpectRefused(const string name,const int frames,const uchar &mac[],const uchar &body[],const string expectId)
+  {
+   JarvisResult r;
+   CJson rep;
+   Jarvis_HandleSigned(frames,mac,body,r);
+   bool ok=rep.Parse(r.reply);
+   int root=rep.Root();
+   ok=ok && rep.IsObject(root) && !rep.Bool(rep.Get(root,"ok")) && rep.Int(rep.Get(root,"retcode"))==-4 &&
+      rep.Str(rep.Get(root,"error"))=="authentication failed" && rep.Str(rep.Get(root,"id"))==expectId &&
+      rep.Get(root,"data")<0 && rep.IsWhole(rep.Get(root,"ts")) && !r.ok && r.retcode==-4;
+   Check(ok,name,r.reply);
+  }
+
+void TestPipeline()
+  {
+   string err="";
+   Jarvis_SetKeyHex(GOLDEN_KEY,err);
+   g_jarvisClockOverrideMs=NOW_MS;
+   g_jarvisMonoOverrideOn=true;
+   g_jarvisMonoOverrideMs=1000000;
+   Jarvis_ReplayReset();
+   ulong refusedBefore=g_jarvisAuthRefused;
+
+   uchar mac[],body[],none[];
+   JarvisResult r;
+   CJson rep;
+
+   //--- a genuine request passes authentication and reaches the dispatcher (unknown command: -2)
+   SignedFrames(GOLDEN_KEY,ReqJson("a-1",NOW_MS),mac,body);
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(!r.ok && r.retcode==-2 && r.id=="a-1","auth: a signed, fresh request reaches the dispatcher",r.reply);
+   Check(rep.Parse(r.reply) && rep.IsWhole(rep.Get(rep.Root(),"ts")) &&
+         MathAbs((double)rep.Int(rep.Get(rep.Root(),"ts"))-(double)NOW_MS)<=1.0,"auth: replies carry ts");
+   //--- the reply is signed over its exact bytes
+   uchar rbytes[],rframe[];
+   Jarvis_Utf8(r.reply,rbytes);
+   Check(Jarvis_ExpectedMacFrame(rbytes,rframe) && ArraySize(rframe)==64,"auth: a reply can be signed (64 hex digits)");
+
+   //--- replay: the very same message again
+   ExpectRefused("auth: a replayed id is refused (the id is echoed to a key holder)",2,mac,body,"a-1");
+   //--- ... and so is the same id with a new timestamp
+   SignedFrames(GOLDEN_KEY,ReqJson("a-1",NOW_MS+5),mac,body);
+   ExpectRefused("auth: the same id with a new ts is still a replay",2,mac,body,"a-1");
+
+   //--- wrong key: refused, and the id is NOT echoed (no signing oracle)
+   SignedFrames(OTHER_KEY,ReqJson("b-1",NOW_MS),mac,body);
+   ExpectRefused("auth: a request signed with another key is refused",2,mac,body,"");
+   //--- missing / malformed frames
+   ExpectRefused("auth: a single frame is refused",1,none,body,"");
+   uchar plain[];
+   Jarvis_Utf8(ReqJson("b-2",NOW_MS),plain);
+   ExpectRefused("auth: an unsigned request (payload as the only frame) is refused",1,plain,none,"");
+   SignedFrames(GOLDEN_KEY,ReqJson("b-3",NOW_MS),mac,body);
+   ExpectRefused("auth: three frames are refused even with a valid pair",3,mac,body,"");
+   ExpectRefused("auth: zero frames are refused",0,none,none,"");
+   ExpectRefused("auth: an empty MAC frame is refused",2,none,body,"");
+   uchar upMac[];
+   string upText=CharArrayToString(mac,0,WHOLE_ARRAY,CP_ACP);
+   StringToUpper(upText);
+   Jarvis_AsciiBytes(upText,upMac);
+   ExpectRefused("auth: an uppercase MAC is refused",2,upMac,body,"");
+   //--- tampering after signing
+   uchar bad[];
+   ArrayCopy(bad,body);
+   bad[10]=(uchar)(bad[10]^0x01);
+   ExpectRefused("auth: a payload changed after signing is refused",2,mac,bad,"");
+   uchar badMac[];
+   ArrayCopy(badMac,mac);
+   badMac[0]=(badMac[0]=='0')?'1':'0';
+   ExpectRefused("auth: a MAC with one digit changed is refused",2,badMac,body,"");
+   //--- the refused ids were not consumed
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(!r.ok && r.retcode==-2 && r.id=="b-3","auth: refusals do not consume the request id",r.reply);
+
+   //--- timestamps: +-30 s is fine, beyond is stale; missing or non-integer is refused
+   SignedFrames(GOLDEN_KEY,ReqJson("c-1",NOW_MS-30000),mac,body);
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(r.retcode==-2,"auth: ts exactly 30 s old is accepted",r.reply);
+   SignedFrames(GOLDEN_KEY,ReqJson("c-2",NOW_MS+30000),mac,body);
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(r.retcode==-2,"auth: ts exactly 30 s ahead is accepted",r.reply);
+   SignedFrames(GOLDEN_KEY,ReqJson("c-3",NOW_MS-30001),mac,body);
+   ExpectRefused("auth: ts 30.001 s old is stale",2,mac,body,"c-3");
+   SignedFrames(GOLDEN_KEY,ReqJson("c-4",NOW_MS+30001),mac,body);
+   ExpectRefused("auth: ts 30.001 s ahead is refused",2,mac,body,"c-4");
+   SignedFrames(GOLDEN_KEY,ReqJson("c-5",0),mac,body);
+   ExpectRefused("auth: ts 0 is stale",2,mac,body,"c-5");
+   SignedFrames(GOLDEN_KEY,ReqJson("c-6",-5),mac,body);
+   ExpectRefused("auth: negative ts is refused",2,mac,body,"c-6");
+   SignedFrames(GOLDEN_KEY,"{\"id\":\"c-7\",\"cmd\":\"launch_missiles\"}",mac,body);
+   ExpectRefused("auth: a missing ts is refused",2,mac,body,"c-7");
+   SignedFrames(GOLDEN_KEY,"{\"id\":\"c-8\",\"ts\":\"now\",\"cmd\":\"launch_missiles\"}",mac,body);
+   ExpectRefused("auth: a ts that is a string is refused",2,mac,body,"c-8");
+   SignedFrames(GOLDEN_KEY,"{\"id\":\"c-9\",\"ts\":1.5,\"cmd\":\"launch_missiles\"}",mac,body);
+   ExpectRefused("auth: a fractional ts is refused",2,mac,body,"c-9");
+   SignedFrames(GOLDEN_KEY,"{\"id\":\"c-10\",\"ts\":1e300,\"cmd\":\"launch_missiles\"}",mac,body);
+   ExpectRefused("auth: an absurd ts is refused",2,mac,body,"c-10");
+
+   //--- authentic but not JSON: the usual -1, nothing else
+   SignedFrames(GOLDEN_KEY,"hello",mac,body);
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(!r.ok && r.retcode==-1,"auth: authentic garbage is an ordinary -1",r.reply);
+   uchar zero[];
+   Jarvis_Utf8("{\"id\":\"z\"}",zero);
+   ArrayResize(zero,ArraySize(zero)+1);
+   zero[ArraySize(zero)-1]=0;
+   uchar zmac[];
+   Jarvis_AsciiBytes(Jarvis_HmacHex(g_jarvisKey,zero),zmac);
+   Jarvis_HandleSigned(2,zmac,zero,r);
+   Check(!r.ok && r.retcode==-1 && StringFind(r.reply,"zero byte")>=0,"auth: a payload with a zero byte is -1",r.reply);
+
+   //--- the id window: after 60 s the id may be used again (its old ts is long stale, a new one is fresh)
+   SignedFrames(GOLDEN_KEY,ReqJson("d-1",NOW_MS),mac,body);
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(r.retcode==-2,"auth: id d-1 accepted once");
+   g_jarvisMonoOverrideMs+=JARVIS_REPLAY_WINDOW_MS;
+   ExpectRefused("auth: still remembered after exactly 60 s",2,mac,body,"d-1");
+   g_jarvisMonoOverrideMs+=1;
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(r.retcode==-2,"auth: forgotten 60 s after it was used",r.reply);
+
+   //--- capacity: 4096 ids in the window, the next request is refused until some expire
+   Jarvis_ReplayReset();
+   bool allOk=true;
+   for(int i=0; i<JARVIS_REPLAY_CAPACITY; i++)
+      if(Jarvis_FreshnessCheck("cap-"+IntegerToString(i),NOW_MS)!=JARVIS_FRESH_OK)
+         allOk=false;
+   Check(allOk && g_jarvisSeenCount==JARVIS_REPLAY_CAPACITY,"replay table: holds 4096 ids");
+   Check(Jarvis_FreshnessCheck("cap-extra",NOW_MS)==JARVIS_FRESH_FULL,"replay table: full means refuse (fail closed)");
+   g_jarvisMonoOverrideMs+=JARVIS_REPLAY_WINDOW_MS+1;
+   Check(Jarvis_FreshnessCheck("cap-extra",NOW_MS)==JARVIS_FRESH_OK && g_jarvisSeenCount==1,"replay table: recovers when the ids expire");
+
+   //--- no key loaded: everything is refused
+   g_jarvisKeyReady=false;
+   SignedFrames(GOLDEN_KEY,ReqJson("e-1",NOW_MS),mac,body);
+   ExpectRefused("auth: without a key everything is refused",2,mac,body,"");
+   Jarvis_SetKeyHex(GOLDEN_KEY,err);
+
+   //--- nothing executes on a refused request: a write with bad arguments would be answered
+   //--- with -1 and cached by the write path; refused, it is neither
+   string badOrder="{\"id\":\"w-1\",\"ts\":"+IntegerToString(NOW_MS)+",\"cmd\":\"order_send\",\"args\":{\"symbol\":\"EURUSD\",\"side\":\"hold\",\"volume\":0,\"type\":\"market\",\"magic\":1,\"comment\":\"x\"}}";
+   int cacheBefore=g_jarvisCacheCount;
+   SignedFrames(OTHER_KEY,badOrder,mac,body);
+   ExpectRefused("auth: a write signed with another key is refused",2,mac,body,"");
+   Check(g_jarvisCacheCount==cacheBefore,"auth: the refused write never reached the write path");
+   SignedFrames(GOLDEN_KEY,badOrder,mac,body);
+   Jarvis_HandleSigned(2,mac,body,r);
+   Check(!r.ok && r.retcode==-1 && g_jarvisCacheCount==cacheBefore+1,"auth: the same write with the right key reaches validation (-1) and the cache",r.reply);
+   ExpectRefused("auth: replaying that write is refused before the cache is consulted",2,mac,body,"w-1");
+   Check(g_jarvisCacheCount==cacheBefore+1,"auth: the replay changed nothing");
+
+   Check(g_jarvisAuthRefused>refusedBefore,"auth: refusals are counted");
+
+   //--- real clock sanity: milliseconds track TimeGMT() and never run backwards within a second
+   g_jarvisClockOverrideMs=0;
+   g_jarvisMonoOverrideOn=false;
+   long n1=Jarvis_NowMs();
+   long n2=Jarvis_NowMs();
+   long gmtMs=(long)TimeGMT()*1000;
+   Check(n2>=n1 && n1>=gmtMs-1000 && n1<=gmtMs+1999,"clock: Jarvis_NowMs() follows TimeGMT()",StringFormat("%I64d vs %I64d",n1,gmtMs));
+
+   Jarvis_ReplayReset();
+   ArrayInitialize(g_jarvisKey,0);
+   g_jarvisKeyReady=false;
+  }
+
+void TestAuth()
+  {
+   TestHmac();
+   TestEncoding();
+   TestGolden();
+   TestPipeline();
+  }
+
 void OnStart()
   {
    Print("=== JarvisSelfTest start ===");
+   TestAuth();
    TestJson();
    TestProtocol();
    TestLive();

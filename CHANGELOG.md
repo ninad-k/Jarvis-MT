@@ -33,7 +33,8 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 
 ### Changed
 
-- The `JarvisBridge` EA reports `ea_version` 0.2.0 and accepts write commands. Version 0.1.0 was read-only.
+- The `JarvisBridge` EA reports `ea_version` 0.3.0 and accepts write commands. Version 0.1.0 was read-only.
+- Bridge protocol version 2: signed two-frame messages. EA 0.1.x/0.2.x and clients older than this release cannot talk to each other; reinstall the EA with `scripts/install-ea.ps1` and set `[bridge] key_file`.
 - `config/jarvis.example.toml` has new `[limits]`, `[trading]`, `[auth]` and `[voice]` sections. `.env.example` has `JARVIS_JWT_SECRET`.
 - The HTTP API gained confirm, cancel, read-back, close, kill switch, audit, authentication, voice and WebSocket endpoints. See [docs/api.md](docs/api.md).
 
@@ -50,6 +51,8 @@ Sprints 2 to 5 are built in this repository and not yet released. The maintainer
 - Free text in MT5 comment fields is not passed to the model. Providers that send an API key must use `https` (or loopback).
 - Dependencies: `time` 0.3.55 and `ctutils` 0.4.7 (RUSTSEC-2026-0009, RUSTSEC-2026-0385). The minimum Rust version is now 1.88.
 - pnpm's minimum release age (one week) now takes effect: it is set in `pnpm-workspace.yaml`, where pnpm reads it.
+- The bridge is authenticated (BR-1): every request and reply is signed with HMAC-SHA256 under a per-install key, requests older than 30 s or with a repeated id are refused, and the client rejects unsigned or forged replies. Other local processes can no longer send orders to the EA.
+- The EA's ZeroMQ library is libzmq 4.3.5, built from the official source with a pinned checksum by `scripts/build-libzmq.ps1` (BR-2; fixes CVE-2019-6250 and CVE-2020-15166 in 4.2.1). `libsodium.dll` is no longer shipped.
 - Security review: see [docs/security/threat-model.md](docs/security/threat-model.md) and [docs/security/audit-2026-10-30.md](docs/security/audit-2026-10-30.md).
 
 ## [0.1.0] - 2026-10-30

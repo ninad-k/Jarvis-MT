@@ -59,7 +59,7 @@ fn every_reply_fixture_round_trips_and_decodes_to_typed_data() {
         match cmd {
             "ping" => {
                 let info: PingInfo = round_trip(&name, &data);
-                assert_eq!(info.protocol_version, 1);
+                assert_eq!(info.protocol_version, 2);
             }
             "get_price" => {
                 let _: Price = round_trip(&name, &data);
@@ -105,6 +105,7 @@ fn error_reply_fixture_maps_to_remote_error() {
 fn request_wire_format_matches_the_contract() {
     let request = Request {
         id: "abc".into(),
+        ts: None,
         command: Command::GetPrice {
             symbol: "XAUUSD".into(),
         },
@@ -116,6 +117,7 @@ fn request_wire_format_matches_the_contract() {
     // Commands without arguments still carry an empty `args` object.
     let request = Request {
         id: "abc".into(),
+        ts: None,
         command: Command::Ping {},
     };
     assert_eq!(
@@ -125,6 +127,7 @@ fn request_wire_format_matches_the_contract() {
     // Optional arguments are omitted, not sent as null.
     let request = Request {
         id: "abc".into(),
+        ts: None,
         command: Command::GetPositions { symbol: None },
     };
     assert_eq!(
@@ -139,12 +142,38 @@ fn request_wire_format_matches_the_contract() {
     };
     let request = Request {
         id: "abc".into(),
+        ts: None,
         command: Command::GetHistory(query),
     };
     assert_eq!(
         serde_json::to_value(&request).unwrap(),
         json!({"id": "abc", "cmd": "get_history", "args": {"from": 1, "to": 2}})
     );
+}
+
+#[test]
+fn request_and_reply_carry_the_clock_when_set() {
+    let request = Request {
+        id: "abc".into(),
+        ts: Some(1_793_341_200_000),
+        command: Command::Ping {},
+    };
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        json!({"id": "abc", "ts": 1_793_341_200_000_i64, "cmd": "ping", "args": {}})
+    );
+    let back: Request = serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+    assert_eq!(back, request);
+    let reply: Reply = serde_json::from_value(
+        json!({"id": "abc", "ok": false, "error": "authentication failed", "retcode": -4, "ts": 5}),
+    )
+    .unwrap();
+    assert_eq!(reply.ts, Some(5));
+    assert_eq!(
+        reply.retcode,
+        jarvis_bridge_client::protocol::RETCODE_AUTH_FAILED
+    );
+    assert_eq!(jarvis_bridge_client::protocol::PROTOCOL_VERSION, 2);
 }
 
 #[test]
@@ -353,6 +382,7 @@ fn write_arguments_are_serialised_without_nulls() {
     let wire = |command: Command| {
         serde_json::to_value(Request {
             id: "i".into(),
+            ts: None,
             command,
         })
         .unwrap()

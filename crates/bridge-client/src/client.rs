@@ -8,25 +8,31 @@
 //! - connects lazily, so a missing EA only affects the call that needs it.
 use std::time::Duration;
 
-use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use uuid::Uuid;
-use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend};
 
+use crate::auth::{self, AuthFailure, BridgeKey};
 use crate::error::BridgeError;
 use crate::protocol::{
-    Account, Command, History, HistoryQuery, OrderCancelArgs, OrderSendArgs, Orders, PingInfo,
-    PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs, Positions, Price, Reply,
-    Request, SymbolInfo, TradeResult,
+    Account, Command, History, HistoryQuery, OrderCancelArgs, OrderSendArgs, Orders,
+    PROTOCOL_VERSION, PingInfo, PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs,
+    Positions, Price, RETCODE_AUTH_FAILED, Reply, Request, SymbolInfo, TradeResult,
 };
 
 /// Calls that may wait for the actor at the same time before `call` starts to back-pressure.
 const QUEUE_DEPTH: usize = 64;
 
-/// Connection settings for [`BridgeClient`].
+/// Endpoint used when none is given.
+pub const DEFAULT_ENDPOINT: &str = "tcp://127.0.0.1:5555";
+/// Per-request timeout used when none is given.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3000);
+
+/// Connection settings for [`BridgeClient`]. There is no `Default`: a client cannot exist
+/// without the shared key (ADR-0016).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BridgeConfig {
     /// ZeroMQ endpoint of the EA, e.g. `tcp://127.0.0.1:5555`. Must be loopback
@@ -36,20 +42,34 @@ pub struct BridgeConfig {
     /// calls, connecting, sending and waiting for the reply. Write commands use at least
     /// [`MIN_WRITE_TIMEOUT`], because a trade round trip can take seconds.
     pub timeout: Duration,
+    /// The shared key of the EA (`bridge.key`). Every message is signed with it and every
+    /// reply must carry a valid signature.
+    pub key: BridgeKey,
+}
+
+impl BridgeConfig {
+    /// The default endpoint and timeout with this key.
+    pub fn with_key(key: BridgeKey) -> Self {
+        Self {
+            endpoint: DEFAULT_ENDPOINT.to_owned(),
+            timeout: DEFAULT_TIMEOUT,
+            key,
+        }
+    }
+
+    /// All three settings.
+    pub fn new(endpoint: impl Into<String>, timeout: Duration, key: BridgeKey) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            timeout,
+            key,
+        }
+    }
 }
 
 /// Lower bound on the timeout of write commands. A write that times out has an
 /// unknown outcome, so a generous budget avoids needless "outcome unknown" results.
 pub const MIN_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
-
-impl Default for BridgeConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: "tcp://127.0.0.1:5555".to_owned(),
-            timeout: Duration::from_millis(3000),
-        }
-    }
-}
 
 /// Async client for the EA. Cheap to clone; all clones share one socket actor.
 ///
@@ -84,6 +104,7 @@ impl BridgeClient {
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         let actor = Actor {
             target,
+            key: config.key,
             timeout: config.timeout,
             write_timeout,
             socket: None,
@@ -108,11 +129,32 @@ impl BridgeClient {
         };
         self.tx.send(job).await.map_err(|_| actor_stopped())?;
         let reply = reply_rx.await.map_err(|_| actor_stopped())??;
-        Ok(reply.decode()?)
+        reply.decode().map_err(|e| match BridgeError::from(e) {
+            BridgeError::Remote { retcode, .. } if retcode == RETCODE_AUTH_FAILED => {
+                BridgeError::Remote {
+                    message: format!(
+                        "{}: the EA refused the request (bridge key mismatch, PC clock more \
+                         than 30 s off, or a repeated request id)",
+                        auth::AUTH_ERROR_TEXT
+                    ),
+                    retcode,
+                }
+            }
+            other => other,
+        })
     }
 
+    /// Health check. Also refuses an EA that speaks another protocol version.
     pub async fn ping(&self) -> Result<PingInfo, BridgeError> {
-        self.call(Command::Ping {}).await
+        let info: PingInfo = self.call(Command::Ping {}).await?;
+        if info.protocol_version != PROTOCOL_VERSION {
+            return Err(BridgeError::Protocol(format!(
+                "the EA speaks protocol version {} but this client speaks {PROTOCOL_VERSION}; \
+                 reinstall the EA with scripts/install-ea.ps1 and recompile it",
+                info.protocol_version
+            )));
+        }
+        Ok(info)
     }
 
     pub async fn get_price(&self, symbol: &str) -> Result<Price, BridgeError> {
@@ -247,6 +289,7 @@ impl Target {
 
 struct Actor {
     target: Target,
+    key: BridgeKey,
     timeout: Duration,
     write_timeout: Duration,
     /// Connected socket, kept between calls. `None` until the first call and after any failure.
@@ -285,6 +328,7 @@ impl Actor {
         let started = Instant::now();
         let outcome = match serde_json::to_vec(&Request {
             id: id.clone(),
+            ts: Some(auth::now_ms()),
             command,
         }) {
             Ok(payload) => self.exchange(&id, payload, deadline, budget).await,
@@ -325,12 +369,15 @@ impl Actor {
             return Err(BridgeError::Timeout(timeout_ms));
         }
         let socket = self.socket.take();
-        let round_trip = round_trip(&self.target, socket, payload);
+        let round_trip = round_trip(&self.target, &self.key, socket, payload);
         match tokio::time::timeout_at(deadline, round_trip).await {
             Err(_elapsed) => Err(BridgeError::Timeout(timeout_ms)),
             Ok(Err(e)) => Err(e),
             Ok(Ok((reply, socket))) => {
-                if reply.id != id {
+                // A signed "authentication failed" reply to a request the EA could not
+                // authenticate carries an empty id (it never echoes unauthenticated input).
+                let refused = reply.id.is_empty() && reply.retcode == RETCODE_AUTH_FAILED;
+                if reply.id != id && !refused {
                     return Err(BridgeError::Protocol(format!(
                         "reply id {:?} does not match request id {id:?}",
                         reply.id
@@ -343,15 +390,16 @@ impl Actor {
     }
 }
 
-/// Send `payload` and wait for one reply, connecting first when there is no live socket.
-/// If a reused socket turns out to be dead at send time, retries once on a fresh socket
-/// (nothing has been delivered in that case, so this is safe for write commands too).
+/// Sign and send `payload`, then wait for one signed reply, connecting first when there is no
+/// live socket. If a reused socket turns out to be dead at send time, retries once on a fresh
+/// socket (nothing has been delivered in that case, so this is safe for write commands too).
 async fn round_trip(
     target: &Target,
+    key: &BridgeKey,
     existing: Option<ReqSocket>,
     payload: Vec<u8>,
 ) -> Result<(Reply, ReqSocket), BridgeError> {
-    let message = ZmqMessage::from(Bytes::from(payload));
+    let message = auth::seal(key, payload);
     let (mut socket, reused) = match existing {
         Some(socket) => (socket, true),
         None => (connect(target).await?, false),
@@ -371,19 +419,23 @@ async fn round_trip(
         .recv()
         .await
         .map_err(|e| BridgeError::Transport(format!("receive failed: {e}")))?;
-    if frames.len() != 1 {
-        return Err(BridgeError::Protocol(format!(
-            "expected a single-frame reply, got {} frames",
+    let payload = auth::open(key, &frames).map_err(|failure| match failure {
+        AuthFailure::Frames => BridgeError::Protocol(format!(
+            "expected a signed two-frame reply, got {} frame(s); is the EA older than protocol \
+             version {PROTOCOL_VERSION}?",
             frames.len()
-        )));
-    }
-    let reply = frames
-        .get(0)
-        .ok_or_else(|| BridgeError::Protocol("empty reply".into()))
-        .and_then(|frame| {
-            serde_json::from_slice::<Reply>(frame)
-                .map_err(|e| BridgeError::Protocol(format!("invalid reply JSON: {e}")))
-        })?;
+        )),
+        _ => {
+            tracing::warn!(
+                "a reply failed authentication: either bridge.key differs between the API and the \
+                 EA, or another program is answering on {}",
+                target.endpoint
+            );
+            BridgeError::Protocol("reply authentication failed".into())
+        }
+    })?;
+    let reply = serde_json::from_slice::<Reply>(payload)
+        .map_err(|e| BridgeError::Protocol(format!("invalid reply JSON: {e}")))?;
     Ok((reply, socket))
 }
 

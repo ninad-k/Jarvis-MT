@@ -54,9 +54,14 @@ text, with a hard guarantee that nothing executes without their explicit, timed 
 
 ## Bridge protocol (summary; full contract in `docs/protocol.md`)
 
+Protocol version 2. Every message in both directions is a two-frame ZeroMQ multipart:
+frame 1 is the hex HMAC-SHA256 of frame 2 under a shared 32-byte key (created by
+`scripts/install-ea.ps1`), frame 2 is the JSON below. Requests also carry `ts` (Unix ms);
+the EA refuses unsigned, stale (±30 s) or replayed requests with retcode `-4` (ADR-0016).
+
 ```json
-// request
-{"id": "c0a8…", "cmd": "get_price", "args": {"symbol": "XAUUSD"}}
+// request (frame 2)
+{"id": "c0a8…", "ts": 1793341200123, "cmd": "get_price", "args": {"symbol": "XAUUSD"}}
 // reply (success)
 {"id": "c0a8…", "ok": true, "data": {"symbol": "XAUUSD", "bid": 2391.12, "ask": 2391.40, "time": 1793341200}, "retcode": 0}
 // reply (failure)

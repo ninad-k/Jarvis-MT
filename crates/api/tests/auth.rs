@@ -19,7 +19,7 @@ fn idle_llm() -> Arc<ScriptedLlm> {
 async fn auth_app() -> (TestApp, TestUser, MockBridge) {
     let mock = MockBridge::start().await;
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         idle_llm(),
         Options {
             auth: true,
@@ -470,7 +470,7 @@ async fn resetting_or_removing_a_user_ends_their_sessions() {
 #[tokio::test]
 async fn weak_or_missing_secrets_are_refused_at_startup() {
     let mock = MockBridge::start().await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     for secret in ["", "short", &"s".repeat(31)] {
         let result = AuthService::new(AuthParts {
             secret: secret.to_owned(),
@@ -621,7 +621,7 @@ async fn health_is_open_and_exactly_ok_true() {
 #[tokio::test]
 async fn with_login_disabled_nothing_needs_a_session() {
     let mock = MockBridge::start().await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     let (status, body) = request(&app.router, "GET", "/api/status", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["auth"], json!({ "enabled": false, "username": null }));
@@ -646,16 +646,12 @@ async fn with_login_disabled_nothing_needs_a_session() {
 async fn enabled_login_without_a_service_fails_closed() {
     // Auth on in the config, but no service installed (a wiring mistake): refuse everything.
     let mock = MockBridge::start().await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     let mut config = app.state.config().clone();
     config.auth.enabled = true;
     let state = jarvis_api::AppState::new(
         config,
-        jarvis_bridge_client::BridgeClient::new(jarvis_bridge_client::BridgeConfig {
-            endpoint: mock.endpoint.clone(),
-            timeout: std::time::Duration::from_millis(300),
-        })
-        .unwrap(),
+        bridge_client(&mock, 300),
         app.audit.clone(),
         Default::default(),
     );

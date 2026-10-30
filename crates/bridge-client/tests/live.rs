@@ -4,22 +4,32 @@
 //!
 //! Environment:
 //! - `JARVIS_BRIDGE_ENDPOINT` (default `tcp://127.0.0.1:5555`)
+//! - `JARVIS_BRIDGE_KEY` (the 64-character hex key) or `JARVIS_BRIDGE_KEY_FILE` (path of the
+//!   `bridge.key` that `scripts/install-ea.ps1` created in the terminal's `MQL5\Files\JarvisMT`).
+//!   One of them is required; the key is never printed.
 //! - `JARVIS_LIVE_SYMBOL` (default `EURUSD`; use your broker's name, e.g. `XAUUSD.m`)
 //!
 //! These tests only read. They never send trade commands.
 use std::time::Duration;
 
 use jarvis_bridge_client::protocol::{HistoryQuery, PROTOCOL_VERSION, TradeMode};
-use jarvis_bridge_client::{BridgeClient, BridgeConfig};
+use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeKey, DEFAULT_ENDPOINT};
+
+/// The shared key from `JARVIS_BRIDGE_KEY` (hex) or the file named by `JARVIS_BRIDGE_KEY_FILE`.
+fn key() -> BridgeKey {
+    if let Ok(hex) = std::env::var("JARVIS_BRIDGE_KEY") {
+        return BridgeKey::from_hex(&hex).expect("JARVIS_BRIDGE_KEY is not a valid key");
+    }
+    let path = std::env::var("JARVIS_BRIDGE_KEY_FILE")
+        .expect("set JARVIS_BRIDGE_KEY or JARVIS_BRIDGE_KEY_FILE for the live tests");
+    BridgeKey::from_file(std::path::Path::new(&path)).expect("cannot use JARVIS_BRIDGE_KEY_FILE")
+}
 
 fn client() -> BridgeClient {
-    let endpoint = std::env::var("JARVIS_BRIDGE_ENDPOINT")
-        .unwrap_or_else(|_| BridgeConfig::default().endpoint);
-    BridgeClient::new(BridgeConfig {
-        endpoint,
-        timeout: Duration::from_secs(5),
-    })
-    .expect("valid loopback endpoint")
+    let endpoint =
+        std::env::var("JARVIS_BRIDGE_ENDPOINT").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_owned());
+    BridgeClient::new(BridgeConfig::new(endpoint, Duration::from_secs(5), key()))
+        .expect("valid loopback endpoint")
 }
 
 fn symbol() -> String {
@@ -28,10 +38,10 @@ fn symbol() -> String {
 
 #[tokio::test]
 #[ignore = "needs MT5 demo terminal with the JarvisBridge EA running"]
-async fn live_ping_reports_protocol_1_and_demo_mode() {
+async fn live_ping_reports_the_current_protocol_and_demo_mode() {
     let info = client().ping().await.expect("ping");
     assert_eq!(info.protocol_version, PROTOCOL_VERSION);
-    assert_eq!(PROTOCOL_VERSION, 1);
+    assert_eq!(PROTOCOL_VERSION, 2);
     assert_eq!(
         info.trade_mode,
         TradeMode::Demo,

@@ -8,6 +8,11 @@
 //| - Trades ONLY in response to a request (order_send, ...), never  |
 //|   on its own. Real accounts are refused unless InpAllowReal.     |
 //| - Exactly one reply for every request received.                  |
+//| - Authenticated (protocol 2): every message is two frames        |
+//|   [hex HMAC-SHA256, JSON], keyed by the shared secret in         |
+//|   MQL5\Files\JarvisMT\bridge.key. A wrong or missing MAC, a stale|
+//|   ts or a reused id is refused with retcode -4 and nothing is    |
+//|   executed. Without a usable key file the EA does not start.     |
 //| Wire format: crates/bridge-client/src/protocol.rs                |
 //|                                                                  |
 //| Requires "Allow DLL imports" for this EA (libzmq.dll).           |
@@ -15,7 +20,7 @@
 #property copyright   "Jarvis MT"
 #property link        "https://github.com/dingmaotu/mql-zmq"
 #property description "Localhost bridge for the Jarvis MT assistant."
-#property description "Binds a ZeroMQ REP socket on 127.0.0.1. Trades only on request, and refuses real accounts unless InpAllowReal is set."
+#property description "Binds a ZeroMQ REP socket on 127.0.0.1. Only a holder of the shared key (bridge.key) can talk to it. Trades only on request, and refuses real accounts unless InpAllowReal is set."
 
 #include <Zmq/Zmq.mqh>
 #include <Jarvis/Protocol.mqh>
@@ -30,6 +35,7 @@ input bool   InpAllowReal = false;                 // Allow write commands on a 
 #define BRIDGE_EAGAIN            11        // libzmq/MSVC errno for "nothing to receive yet"
 #define BRIDGE_PENDING_RETRIES   200       // 200 ticks * 20 ms = 4 s before the socket is rebuilt
 #define BRIDGE_REBIND_INTERVAL   250       // ms between bind attempts after a rebuild
+#define BRIDGE_MAX_FRAMES        64        // frames of one message that are read; more and the socket is rebuilt
 
 Context *g_ctx=NULL;
 Socket  *g_sock=NULL;
@@ -124,6 +130,15 @@ int OnInit()
       return INIT_FAILED;
      }
 
+   //--- fail closed: without a usable key nobody could be authenticated, so do not listen at all
+   string keyErr="";
+   if(!Jarvis_LoadKeyFile(JARVIS_KEY_FILE,keyErr))
+     {
+      PrintFormat("JarvisBridge: %s. The EA will not start without it. Use the same file for [bridge] key_file of the API.",keyErr);
+      return INIT_FAILED;
+     }
+   Jarvis_ReplayReset();
+
    g_jarvisAllowReal=InpAllowReal;
    g_ctx=new Context();
    if(CheckPointer(g_ctx)!=POINTER_DYNAMIC || g_ctx.ref()==0)
@@ -150,8 +165,9 @@ int OnInit()
      }
 
    g_hostPort=StringSubstr(InpEndpoint,6);   // strip "tcp://"
-   PrintFormat("JarvisBridge %s listening on %s (libzmq %s, writes only on request, real accounts %s)",
-               JARVIS_EA_VERSION,g_hostPort,Zmq::getVersion(),InpAllowReal?"ALLOWED (InpAllowReal=true)":"refused");
+   PrintFormat("JarvisBridge %s listening on %s (protocol %d, authenticated, libzmq %s, writes only on request, real accounts %s)",
+               JARVIS_EA_VERSION,g_hostPort,JARVIS_PROTOCOL_VERSION,Zmq::getVersion(),
+               InpAllowReal?"ALLOWED (InpAllowReal=true)":"refused");
    return INIT_SUCCEEDED;
   }
 
@@ -165,24 +181,67 @@ void OnDeinit(const int reason)
       delete g_ctx;                     // zmq_ctx_term; all sockets are closed by now
       g_ctx=NULL;
      }
-   PrintFormat("JarvisBridge stopped (reason %d, %I64u requests served).",reason,g_served);
+   ArrayInitialize(g_jarvisKey,0);
+   g_jarvisKeyReady=false;
+   PrintFormat("JarvisBridge stopped (reason %d, %I64u requests served, %I64u refused).",reason,g_served,g_jarvisAuthRefused);
   }
 
 //+------------------------------------------------------------------+
-//| Send a reply without blocking. If the socket cannot take it now, |
-//| keep it and retry on the next tick: a REP socket cannot receive  |
-//| again until its reply was sent.                                  |
+//| Sign and send a reply as two frames [hex HMAC, JSON], without    |
+//| blocking. The MAC is computed over the exact bytes sent.         |
+//|   0: sent                                                        |
+//|   1: the socket cannot take it now; nothing was queued           |
+//|   2: could not sign, or the second frame failed after the first  |
+//|      was queued: the socket was closed (OnTimer rebinds it)      |
+//+------------------------------------------------------------------+
+int SendSigned(const string reply)
+  {
+   uchar body[];
+   Jarvis_Utf8(reply,body);
+   string mac=Jarvis_HmacHex(g_jarvisKey,body);
+   if(ArraySize(body)==0 || StringLen(mac)!=64)
+     {
+      Print("JarvisBridge: could not sign a reply; rebuilding the socket.");
+      CloseSocket();
+      return 2;
+     }
+   ZmqMsg macMsg(mac);
+   if(!g_sock.sendMore(macMsg,true))
+      return 1;
+   ZmqMsg bodyMsg((int)ArraySize(body));
+   bodyMsg.setData(body);
+   if(!g_sock.send(bodyMsg,true))
+     {
+      PrintFormat("JarvisBridge: second frame of a reply failed (%s); rebuilding the socket.",Zmq::errorMessage());
+      CloseSocket();
+      return 2;
+     }
+   return 0;
+  }
+
+//+------------------------------------------------------------------+
+//| Send a reply. If the socket cannot take it now, keep it and retry|
+//| on the next tick: a REP socket cannot receive again until its    |
+//| reply was sent.                                                  |
 //+------------------------------------------------------------------+
 bool SendReply(const string reply)
   {
    if(CheckPointer(g_sock)!=POINTER_DYNAMIC)
       return false;
-   if(g_sock.send(reply,true))
+   int st=SendSigned(reply);
+   if(st==0)
      {
       g_hasPending=false;
       g_pendingReply="";
       g_pendingTries=0;
       return true;
+     }
+   if(st==2)
+     {
+      g_hasPending=false;
+      g_pendingReply="";
+      g_pendingTries=0;
+      return false;
      }
    g_hasPending=true;
    g_pendingReply=reply;
@@ -195,12 +254,19 @@ bool ServicePendingReply()
   {
    if(!g_hasPending)
       return true;
-   if(g_sock.send(g_pendingReply,true))
+   if(CheckPointer(g_sock)!=POINTER_DYNAMIC)
+     {
+      g_hasPending=false;
+      g_pendingReply="";
+      return false;
+     }
+   int st=SendSigned(g_pendingReply);
+   if(st==0 || st==2)
      {
       g_hasPending=false;
       g_pendingReply="";
       g_pendingTries=0;
-      return true;
+      return st==0;
      }
    g_pendingTries++;
    if(g_pendingTries>=BRIDGE_PENDING_RETRIES)
@@ -214,14 +280,26 @@ bool ServicePendingReply()
    return false;
   }
 
-//+------------------------------------------------------------------+
-//| Receive one request (non-blocking), answer it exactly once.      |
-//| returns false when there was nothing to do                       |
-//+------------------------------------------------------------------+
-bool HandleOne()
+//--- copy the bytes of a received frame
+void CopyFrame(ZmqMsg &m,uchar &dst[])
   {
-   ZmqMsg msg;
-   if(!g_sock.recv(msg,true))
+   int sz=(int)m.size();
+   ArrayResize(dst,sz);
+   if(sz>0)
+      m.getData(dst);        // copies ArraySize(dst) bytes, which is exactly the frame size
+  }
+
+//+------------------------------------------------------------------+
+//| Receive one message (non-blocking) and read ALL its frames.      |
+//| false: nothing to read (or the socket was dropped)               |
+//+------------------------------------------------------------------+
+bool ReceiveMessage(int &count,uchar &f1[],uchar &f2[])
+  {
+   ArrayResize(f1,0);
+   ArrayResize(f2,0);
+   count=0;
+   ZmqMsg first;
+   if(!g_sock.recv(first,true))
      {
       int e=Zmq::errorNumber();
       if(e!=BRIDGE_EAGAIN && e!=0)
@@ -233,28 +311,45 @@ bool HandleOne()
       return false;
      }
    g_recvErrors=0;
-
-   ulong t0=GetMicrosecondCount();
-   string text="";
-   if(msg.size()>0)
-      text=msg.getData();
-
-   //--- a multipart request is still ONE request: drain the other frames, answer once
-   bool more=msg.more();
-   int guard=0;
-   while(more && guard<16)
+   count=1;
+   CopyFrame(first,f1);
+   bool more=first.more();
+   while(more)
      {
+      if(count>=BRIDGE_MAX_FRAMES)
+        {
+         //--- a message with absurdly many frames: the rest cannot be drained safely, start over
+         PrintFormat("JarvisBridge: a message with more than %d frames was dropped; rebuilding the socket.",BRIDGE_MAX_FRAMES);
+         CloseSocket();
+         return false;
+        }
       ZmqMsg part;
       if(!g_sock.recv(part,true))
          break;
+      count++;
+      if(count==2)
+         CopyFrame(part,f2);
       more=part.more();
-      guard++;
      }
+   return true;
+  }
 
+//+------------------------------------------------------------------+
+//| Receive one request (non-blocking), answer it exactly once.      |
+//| returns false when there was nothing to do                       |
+//+------------------------------------------------------------------+
+bool HandleOne()
+  {
+   int count=0;
+   uchar f1[],f2[];
+   if(!ReceiveMessage(count,f1,f2))
+      return false;
+
+   ulong t0=GetMicrosecondCount();
    JarvisResult r;
-   Jarvis_Process(text,r);
-   if(r.reply=="")   // defensive: never leave the client without an answer
-      r.reply=Jarvis_ErrorReply(r.id,"internal error: empty reply",JARVIS_RC_INTERNAL);
+   Jarvis_HandleSigned(count,f1,f2,r);
+   ArrayResize(f1,0);
+   ArrayResize(f2,0);
 
    bool sent=SendReply(r.reply);
    g_served++;
@@ -273,6 +368,7 @@ bool HandleOne()
 //+------------------------------------------------------------------+
 void OnTimer()
   {
+   Jarvis_NowMs();      // keeps the sub-second anchor of the clock fresh (see Auth.mqh)
    if(CheckPointer(g_sock)!=POINTER_DYNAMIC)
      {
       //--- socket was dropped after a send failure: bind it again, slowly

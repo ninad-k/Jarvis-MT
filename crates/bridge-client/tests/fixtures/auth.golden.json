@@ -1,0 +1,8 @@
+{
+  "_comment": "Golden vector for the authenticated bridge (protocol 2). key is the 64-character hex shared key; each mac is lowercase hex HMAC-SHA256(key bytes, payload UTF-8 bytes). Used by crates/bridge-client tests and by mql5/Scripts/JarvisMT/JarvisSelfTest.mq5. The key is a public test value, never a real one.",
+  "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "request_payload": "{\"id\":\"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001\",\"ts\":1793341200000,\"cmd\":\"ping\",\"args\":{}}",
+  "request_mac": "bc45b3fc8bc3cef210abe4efff32897c8ca52cf7a0da1d0366707923cd1ca581",
+  "reply_payload": "{\"id\":\"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001\",\"ok\":true,\"data\":{\"protocol_version\":2,\"ea_version\":\"0.3.0\",\"trade_mode\":\"demo\",\"terminal_connected\":true,\"trade_allowed\":true,\"server_time\":1793341200},\"retcode\":0,\"ts\":1793341200012}",
+  "reply_mac": "63b14665d262978eb9983b937d78ed251299d1ea085472b1b66628e94717c80b"
+}

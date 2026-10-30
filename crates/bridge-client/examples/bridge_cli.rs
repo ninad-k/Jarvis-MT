@@ -1,7 +1,8 @@
 //! Command-line client for the JarvisBridge EA (or the mock). Prints replies as pretty JSON.
 //!
 //! ```text
-//! cargo run -p jarvis-bridge-client --example bridge_cli -- ping
+//! # the key: --key-file <path to bridge.key>, or the JARVIS_BRIDGE_KEY environment variable
+//! cargo run -p jarvis-bridge-client --example bridge_cli -- --key-file <bridge.key> ping
 //! cargo run -p jarvis-bridge-client --example bridge_cli -- price XAUUSD
 //! cargo run -p jarvis-bridge-client --example bridge_cli -- history --days 7 --limit 50
 //! cargo run -p jarvis-bridge-client --example bridge_cli -- symbol XAUUSD
@@ -25,7 +26,7 @@ use jarvis_bridge_client::protocol::{
     ExecType, HistoryQuery, JARVIS_MAGIC, OrderCancelArgs, OrderSendArgs, PositionCloseArgs,
     PositionClosePartialArgs, PositionModifyArgs, Side, TradeMode,
 };
-use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError};
+use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError, BridgeKey, auth};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -34,6 +35,11 @@ struct Cli {
     /// EA endpoint (loopback only).
     #[arg(long, default_value = "tcp://127.0.0.1:5555")]
     endpoint: String,
+    /// File that holds the shared bridge key (hex), the `bridge.key` that `scripts/install-ea.ps1`
+    /// created in the terminal's `MQL5\Files\JarvisMT`. Without it the key is read from the
+    /// `JARVIS_BRIDGE_KEY` environment variable.
+    #[arg(long, value_name = "PATH")]
+    key_file: Option<std::path::PathBuf>,
     /// Per-request timeout in milliseconds.
     #[arg(long, default_value_t = 3000)]
     timeout_ms: u64,
@@ -184,6 +190,23 @@ async fn order(client: &BridgeClient, side: Side, a: OrderArgs) -> Result<(), Br
     )
 }
 
+/// The key from `--key-file`, else from `JARVIS_BRIDGE_KEY`. Never printed.
+fn load_key(key_file: Option<&std::path::Path>) -> Result<BridgeKey, BridgeError> {
+    let key = match key_file {
+        Some(path) => BridgeKey::from_file(path),
+        None => match std::env::var(auth::KEY_ENV) {
+            Ok(hex) => BridgeKey::from_hex(&hex),
+            Err(_) => {
+                return Err(BridgeError::Transport(format!(
+                    "no bridge key: pass --key-file <path to bridge.key> or set {}",
+                    auth::KEY_ENV
+                )));
+            }
+        },
+    };
+    key.map_err(|e| BridgeError::Transport(e.to_string()))
+}
+
 async fn run(cli: Cli) -> Result<(), BridgeError> {
     let is_write = matches!(
         cli.command,
@@ -193,10 +216,8 @@ async fn run(cli: Cli) -> Result<(), BridgeError> {
     if is_write {
         timeout = timeout.max(WRITE_TIMEOUT);
     }
-    let client = BridgeClient::new(BridgeConfig {
-        endpoint: cli.endpoint,
-        timeout,
-    })?;
+    let key = load_key(cli.key_file.as_deref())?;
+    let client = BridgeClient::new(BridgeConfig::new(cli.endpoint, timeout, key))?;
     match cli.command {
         Cmd::Symbol { symbol } => print(&client.get_symbol(&symbol).await?),
         Cmd::Buy(a) => order(&client, Side::Buy, a).await,

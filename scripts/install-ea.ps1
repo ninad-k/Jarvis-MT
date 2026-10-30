@@ -9,24 +9,37 @@
     Scripts\JarvisMT\          (JarvisSelfTest: offline JSON/protocol checks; sends no trades)
     Include\Jarvis\            (our JSON / protocol / handlers)
     Include\Zmq\, Include\Mql\ (vendored mql-zmq + mql4-lib subset)
-    Libraries\*.dll            (libzmq.dll, libsodium.dll)
+    Libraries\*.dll            (libzmq.dll; built by scripts\build-libzmq.ps1)
 
   The DLL SHA-256 hashes are checked against mql5\THIRD_PARTY.md before and after copying.
   Only adds or overwrites our own files. Nothing in the terminal folder is ever deleted.
+
+  Also creates the shared bridge key (finding BR-1, ADR-0016) if it does not exist yet:
+  32 random bytes from the system's cryptographic generator, written as 64 hex characters to
+  <DataFolder>\MQL5\Files\JarvisMT\bridge.key. That folder is the EA's file sandbox and lives in
+  your Windows profile, so other Windows users cannot read it. The key is NEVER printed. An
+  existing key is never touched (unless -RotateKey is given). Set [bridge] key_file in
+  config\jarvis.toml to the printed path; without the key neither the EA nor the API starts.
 
 .PARAMETER DataFolder
   MT5 data folder (File > Open Data Folder in the terminal), or just its 32-character id.
   Default: the only terminal data folder under %APPDATA%\MetaQuotes\Terminal. With several
   terminals installed the script stops and asks for -DataFolder.
 
+.PARAMETER RotateKey
+  Replace an existing bridge key with a new random one. The EA and the API must both be
+  restarted afterwards (the old key stops working at once for whoever still holds it).
+
 .EXAMPLE
   pwsh scripts\install-ea.ps1
   pwsh scripts\install-ea.ps1 -DataFolder <32-character terminal id>
+  pwsh scripts\install-ea.ps1 -RotateKey
 #>
 [CmdletBinding()]
 param(
     [Alias('Terminal')]
-    [string]$DataFolder
+    [string]$DataFolder,
+    [switch]$RotateKey
 )
 
 Set-StrictMode -Version Latest
@@ -61,6 +74,36 @@ if (-not (Test-Path -LiteralPath $dstRoot)) {
 
 function Get-Sha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+# --- the shared bridge key (BR-1) -----------------------------------------------------------
+$keyDir = Join-Path $dstRoot 'Files\JarvisMT'
+$keyPath = Join-Path $keyDir 'bridge.key'
+
+# 32 random bytes from the operating system's CSPRNG, as 64 lowercase hex characters.
+function New-BridgeKeyHex {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $hex = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
+    [Array]::Clear($bytes, 0, $bytes.Length)
+    return $hex
+}
+
+# Is the first non-empty line of the file 64 hex characters (not all zeros)? Never prints it.
+function Test-BridgeKeyFile([string]$Path) {
+    $line = Get-Content -LiteralPath $Path -TotalCount 5 -ErrorAction Stop |
+        Where-Object { $_.Trim() -ne '' } | Select-Object -First 1
+    if (-not $line) { return $false }
+    $line = $line.Trim()
+    return ($line -match '^[0-9A-Fa-f]{64}$') -and ($line -notmatch '^0{64}$')
+}
+
+$keyExists = Test-Path -LiteralPath $keyPath
+if ($keyExists -and -not $RotateKey) {
+    if (-not (Test-BridgeKeyFile $keyPath)) {
+        throw "The existing bridge key file is not a valid key (64 hex characters): $keyPath`nIt was left untouched. Fix it by hand, or run again with -RotateKey to replace it with a new random key."
+    }
 }
 
 # --- expected DLL hashes from THIRD_PARTY.md -----------------------------------------------
@@ -127,6 +170,40 @@ foreach ($dll in $dlls) {
 }
 Write-Host "Installed DLL hashes verified."
 
+# --- create (or rotate) the bridge key ------------------------------------------------------
+$keyAction = 'kept'
+if (-not $keyExists -or $RotateKey) {
+    if (-not (Test-Path -LiteralPath $keyDir)) {
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+    }
+    $hex = New-BridgeKeyHex
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    if (-not $keyExists) {
+        # CreateNew: fails instead of overwriting if another process created the file meanwhile.
+        $stream = [System.IO.File]::Open($keyPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $payload = $utf8NoBom.GetBytes($hex + "`n")
+            $stream.Write($payload, 0, $payload.Length)
+        } finally { $stream.Dispose() }
+        $keyAction = 'created'
+    } else {
+        $tmp = $keyPath + '.new'
+        [System.IO.File]::WriteAllText($tmp, $hex + "`n", $utf8NoBom)
+        Move-Item -LiteralPath $tmp -Destination $keyPath -Force
+        $keyAction = 'rotated'
+    }
+    $hex = $null
+}
+Write-Host "Bridge key $keyAction`: $keyPath"
+
+$appData = $env:APPDATA
+if ($appData -and -not $keyPath.StartsWith($appData, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Warning "The MT5 data folder is outside your Windows profile ($appData). Make sure that only your own Windows account can read $keyPath (right-click > Properties > Security)."
+}
+if ($keyAction -eq 'rotated') {
+    Write-Host "The key was replaced. Restart the EA (remove it from the chart and add it again) and the Jarvis API; until both run with the new key, every request is refused."
+}
+
 Write-Host @"
 
 Next steps
@@ -138,5 +215,13 @@ Next steps
   4. Write commands (order_send, ...) need the Algo Trading button ON and "Allow Algo Trading"
      for this EA. Without them the EA answers writes with retcode -3. Reads work either way.
   5. Real accounts are refused unless you set the EA input InpAllowReal = true (default false).
-  6. The Experts journal should show: JarvisBridge 0.2.0 listening on 127.0.0.1:5555
+  6. The Experts journal should show: JarvisBridge 0.3.0 listening on 127.0.0.1:5555 (protocol 2, authenticated ...)
+  7. Tell the Jarvis API where the key is. In config\jarvis.toml:
+
+         [bridge]
+         key_file = '$keyPath'
+
+     (single quotes: backslashes are literal in a TOML literal string). Or set JARVIS_BRIDGE_KEY
+     to the key's hex in .env. The API refuses to start without a valid key. Never copy the key
+     into the repository, a chat, an issue or a log.
 "@

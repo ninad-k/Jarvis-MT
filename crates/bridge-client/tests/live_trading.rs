@@ -9,6 +9,9 @@
 //!
 //! Environment:
 //! - `JARVIS_BRIDGE_ENDPOINT` (default `tcp://127.0.0.1:5555`)
+//! - `JARVIS_BRIDGE_KEY` (the 64-character hex key) or `JARVIS_BRIDGE_KEY_FILE` (path of the
+//!   `bridge.key` in the terminal's `MQL5\Files\JarvisMT`). One of them is required; the key
+//!   is never printed.
 //! - `JARVIS_LIVE_SYMBOL` (default `EURUSD`; use your broker's name, e.g. `EURUSD.m` or `XAUUSD_`)
 //!
 //! Safety:
@@ -27,8 +30,10 @@ use jarvis_bridge_client::protocol::{
     PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs, Reply, Request, Side,
     SymbolInfo, TradeMode, TradeResult,
 };
-use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError};
-use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+use jarvis_bridge_client::{
+    BridgeClient, BridgeConfig, BridgeError, BridgeKey, DEFAULT_ENDPOINT, auth,
+};
+use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend};
 
 const COMMENT_PREFIX: &str = "jarvis-live:";
 
@@ -53,7 +58,17 @@ fn recorded(ticket: u64) -> bool {
 }
 
 fn endpoint() -> String {
-    std::env::var("JARVIS_BRIDGE_ENDPOINT").unwrap_or_else(|_| BridgeConfig::default().endpoint)
+    std::env::var("JARVIS_BRIDGE_ENDPOINT").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_owned())
+}
+
+/// The shared key from `JARVIS_BRIDGE_KEY` (hex) or the file named by `JARVIS_BRIDGE_KEY_FILE`.
+fn key() -> BridgeKey {
+    if let Ok(hex) = std::env::var("JARVIS_BRIDGE_KEY") {
+        return BridgeKey::from_hex(&hex).expect("JARVIS_BRIDGE_KEY is not a valid key");
+    }
+    let path = std::env::var("JARVIS_BRIDGE_KEY_FILE")
+        .expect("set JARVIS_BRIDGE_KEY or JARVIS_BRIDGE_KEY_FILE for the live tests");
+    BridgeKey::from_file(std::path::Path::new(&path)).expect("cannot use JARVIS_BRIDGE_KEY_FILE")
 }
 
 fn symbol() -> String {
@@ -61,11 +76,12 @@ fn symbol() -> String {
 }
 
 fn client() -> BridgeClient {
-    BridgeClient::new(BridgeConfig {
-        endpoint: endpoint(),
-        // A trade server round trip can take seconds.
-        timeout: Duration::from_secs(15),
-    })
+    // A trade server round trip can take seconds.
+    BridgeClient::new(BridgeConfig::new(
+        endpoint(),
+        Duration::from_secs(15),
+        key(),
+    ))
     .expect("valid loopback endpoint")
 }
 
@@ -215,23 +231,26 @@ async fn find_position(
         .find(|p| p.magic == JARVIS_MAGIC && (p.ticket == ticket || p.comment == comment))
 }
 
-/// Send `request` over a fresh raw REQ socket and return the reply (bypasses the client, which
-/// always generates its own request id).
+/// Send `request` over a fresh raw REQ socket, signed and stamped with the current time, and
+/// return the verified reply (bypasses the client, which always generates its own request id).
 async fn raw_call(request: &Request) -> Reply {
+    let key = key();
+    let mut request = request.clone();
+    request.ts = Some(auth::now_ms());
     let mut socket = ReqSocket::new();
     let target = endpoint().replace("localhost", "127.0.0.1");
     socket.connect(&target).await.expect("connect");
-    let payload = serde_json::to_vec(request).expect("encode");
+    let payload = serde_json::to_vec(&request).expect("encode");
     socket
-        .send(ZmqMessage::from(payload))
+        .send(auth::seal(&key, payload))
         .await
         .expect("send request");
     let frames = tokio::time::timeout(Duration::from_secs(20), socket.recv())
         .await
         .expect("reply within 20 s")
         .expect("receive reply");
-    let frame = frames.get(0).expect("one frame");
-    serde_json::from_slice(frame).expect("reply JSON")
+    let payload = auth::open(&key, &frames).expect("reply is signed with the shared key");
+    serde_json::from_slice(payload).expect("reply JSON")
 }
 
 /// Unwrap a trade call. `None` means the market is closed and the test should stop.
@@ -428,7 +447,7 @@ async fn live_far_away_limit_order_is_placed_and_cancelled() {
 
 #[tokio::test]
 #[ignore = "places demo trades; needs MT5 demo terminal with the JarvisBridge EA running"]
-async fn live_duplicate_request_id_returns_the_cached_reply_and_trades_once() {
+async fn live_replayed_request_id_is_refused_and_trades_once() {
     let client = client();
     require_demo(&client).await;
     let _cleanup = Cleanup;
@@ -437,6 +456,7 @@ async fn live_duplicate_request_id_returns_the_cached_reply_and_trades_once() {
     let comment = unique_comment();
     let request = Request {
         id: uuid::Uuid::new_v4().to_string(),
+        ts: None,
         command: jarvis_bridge_client::protocol::Command::OrderSend(market_order(
             &spec,
             Side::Buy,
@@ -459,11 +479,14 @@ async fn live_duplicate_request_id_returns_the_cached_reply_and_trades_once() {
     {
         record(order);
     }
+    // The same id again (fresh timestamp and MAC): the replay guard refuses it with -4 before
+    // anything is interpreted, so no second order can be opened.
     let second = raw_call(&request).await;
-    assert_eq!(
-        first, second,
-        "the repeated id must get the cached reply verbatim"
+    assert!(
+        !second.ok && second.retcode == jarvis_bridge_client::protocol::RETCODE_AUTH_FAILED,
+        "a reused request id must be refused: {second:?}"
     );
+    assert_eq!(second.error.as_deref(), Some("authentication failed"));
 
     let ours: Vec<_> = client
         .get_positions(Some(&symbol))

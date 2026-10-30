@@ -1,17 +1,22 @@
 //+------------------------------------------------------------------+
 //| Protocol.mqh - request envelope parsing, dispatch, reply build.  |
 //|                                                                  |
-//| Request: {"id": str, "cmd": str, "args": object}                 |
-//| Reply:   {"id","ok":true,"data":{...},"retcode":0}               |
-//|          {"id","ok":false,"error":"...","retcode":N}             |
+//| Request: {"id": str, "ts": ms, "cmd": str, "args": object}       |
+//| Reply:   {"id","ok":true,"data":{...},"retcode":0,"ts":ms}       |
+//|          {"id","ok":false,"error":"...","retcode":N,"ts":ms}     |
+//| Both travel as two frames [hex HMAC, payload] (see Auth.mqh).    |
 //|                                                                  |
-//| Jarvis_Process() ALWAYS produces exactly one reply string, for   |
-//| any input, because a ZeroMQ REP socket must answer every request.|
+//| Jarvis_HandleSigned() is the entry point of the EA: it checks the|
+//| frames, the MAC, the timestamp and the id BEFORE anything is     |
+//| parsed or executed, then calls Jarvis_Process().                 |
+//| Both ALWAYS produce exactly one reply string, for any input,     |
+//| because a ZeroMQ REP socket must answer every request.           |
 //| Wire format: crates/bridge-client/src/protocol.rs                |
 //+------------------------------------------------------------------+
 #ifndef JARVIS_PROTOCOL_MQH
 #define JARVIS_PROTOCOL_MQH
 
+#include "Auth.mqh"
 #include "Json.mqh"
 #include "ReadHandlers.mqh"
 #include "TradeHandlers.mqh"
@@ -41,6 +46,7 @@ string Jarvis_ErrorReply(const string id,const string message,const int retcode)
    w.PutBool("ok",false);
    w.PutStr("error",msg);
    w.PutInt("retcode",retcode);
+   w.PutInt("ts",Jarvis_NowMs());
    w.EndObject();
    return w.ToString();
   }
@@ -53,6 +59,7 @@ string Jarvis_OkReply(const string id,const string dataJson)
    w.PutBool("ok",true);
    w.PutRaw("data",dataJson);
    w.PutInt("retcode",0);
+   w.PutInt("ts",Jarvis_NowMs());
    w.EndObject();
    return w.ToString();
   }
@@ -66,6 +73,7 @@ string Jarvis_TradeOkReply(const string id,const int retcode,const string dataJs
    w.PutBool("ok",true);
    w.PutRaw("data",dataJson);
    w.PutInt("retcode",retcode);
+   w.PutInt("ts",Jarvis_NowMs());
    w.EndObject();
    return w.ToString();
   }
@@ -117,10 +125,50 @@ void Jarvis_Write(const string cmd,CJson &req,const int args,JarvisResult &r)
                r.ok?"true":"false",r.retcode,r.ok?"":" error=",r.ok?"":out.error);
   }
 
+//--- requests refused by authentication since start, and a throttled log line
+ulong g_jarvisAuthRefused=0;
+ulong g_jarvisAuthLastLog=0;
+int   g_jarvisAuthSinceLog=0;
+
+string Jarvis_FreshReason(const int why)
+  {
+   switch(why)
+     {
+      case JARVIS_FRESH_STALE:
+         return "timestamp more than 30 s away from this PC's clock (is the clock right on both sides?)";
+      case JARVIS_FRESH_REPLAYED:
+         return "request id already used in the last 60 s";
+      case JARVIS_FRESH_FULL:
+         return "more than 4096 requests in the last 60 s";
+      case JARVIS_FRESH_NO_TS:
+         return "missing or invalid ts";
+     }
+   return "unknown";
+  }
+
+//--- count a refused request; log the first one and then at most one line per 10 s.
+//--- Only a fixed reason text is logged, never anything the peer sent.
+void Jarvis_AuthRefused(const string reason)
+  {
+   g_jarvisAuthRefused++;
+   g_jarvisAuthSinceLog++;
+   ulong now=Jarvis_MonoMs();
+   if(g_jarvisAuthRefused==1 || (long)(now-g_jarvisAuthLastLog)>=10000)
+     {
+      PrintFormat("JarvisBridge: request refused (%s); %d refused since the last line, %I64u in total. "+
+                  "Nothing was executed.",reason,g_jarvisAuthSinceLog,g_jarvisAuthRefused);
+      g_jarvisAuthLastLog=now;
+      g_jarvisAuthSinceLog=0;
+     }
+  }
+
 //+------------------------------------------------------------------+
 //| Handle one raw request text and fill r (r.reply is always set).  |
+//| checkFresh: also require a fresh "ts" and a never-seen "id"      |
+//| (the EA always passes true; the offline self-test of the handlers|
+//| passes false). The caller has already verified the MAC.          |
 //+------------------------------------------------------------------+
-void Jarvis_Process(const string raw,JarvisResult &r)
+void Jarvis_Process(const string raw,JarvisResult &r,const bool checkFresh)
   {
    r.id="";
    r.cmd="";
@@ -157,6 +205,22 @@ void Jarvis_Process(const string raw,JarvisResult &r)
       return;
      }
    r.id=id;
+
+   //--- freshness and replay: the sender holds the key, so its id may be echoed. Nothing below
+   //--- (command, arguments, cache, trade handlers) runs for a stale or repeated request.
+   if(checkFresh)
+     {
+      int tsNode=req.Get(root,"ts");
+      int fresh=JARVIS_FRESH_NO_TS;
+      if(tsNode>=0 && req.IsWhole(tsNode))
+         fresh=Jarvis_FreshnessCheck(id,req.Int(tsNode));
+      if(fresh!=JARVIS_FRESH_OK)
+        {
+         Jarvis_AuthRefused(Jarvis_FreshReason(fresh));
+         Jarvis_SetError(r,JARVIS_AUTH_ERROR,JARVIS_RC_AUTH_FAILED);
+         return;
+        }
+     }
 
    //--- cmd: required string
    int cmdNode=req.Get(root,"cmd");
@@ -231,6 +295,58 @@ void Jarvis_Process(const string raw,JarvisResult &r)
    r.ok=true;
    r.retcode=0;
    r.reply=Jarvis_OkReply(id,data.ToString());
+  }
+
+//+------------------------------------------------------------------+
+//| Entry point of the EA for one received message.                  |
+//|   frameCount: how many frames the message had                    |
+//|   macFrame, payload: frame 1 and frame 2 (empty if absent)       |
+//| Anything but exactly two frames with a correct MAC is answered   |
+//| with the generic "authentication failed" (-4) and an empty id,   |
+//| so the reply reveals nothing and cannot be used to get a chosen  |
+//| text signed. Nothing is parsed, cached or executed for it.       |
+//+------------------------------------------------------------------+
+void Jarvis_HandleSigned(const int frameCount,const uchar &macFrame[],const uchar &payload[],JarvisResult &r)
+  {
+   r.id="";
+   r.cmd="";
+   r.ok=false;
+   r.retcode=JARVIS_RC_AUTH_FAILED;
+   r.reply="";
+   r.cached=false;
+
+   if(!g_jarvisKeyReady)
+     {
+      Jarvis_AuthRefused("no key loaded");
+      r.reply=Jarvis_ErrorReply("",JARVIS_AUTH_ERROR,JARVIS_RC_AUTH_FAILED);
+      return;
+     }
+   if(frameCount!=2)
+     {
+      Jarvis_AuthRefused("not a two-frame message");
+      r.reply=Jarvis_ErrorReply("",JARVIS_AUTH_ERROR,JARVIS_RC_AUTH_FAILED);
+      return;
+     }
+   if(!Jarvis_VerifyFrames(macFrame,payload))
+     {
+      Jarvis_AuthRefused("MAC does not match (wrong key or altered message)");
+      r.reply=Jarvis_ErrorReply("",JARVIS_AUTH_ERROR,JARVIS_RC_AUTH_FAILED);
+      return;
+     }
+   //--- authentic. A zero byte cannot be part of valid JSON and would cut the text short.
+   int n=ArraySize(payload);
+   for(int i=0; i<n; i++)
+      if(payload[i]==0)
+        {
+         Jarvis_SetError(r,"malformed request: contains a zero byte",JARVIS_RC_INVALID);
+         return;
+        }
+   string text="";
+   if(n>0)
+      text=CharArrayToString(payload,0,n,CP_UTF8);
+   Jarvis_Process(text,r,true);
+   if(r.reply=="")   // defensive: never leave the client without an answer
+      r.reply=Jarvis_ErrorReply(r.id,"internal error: empty reply",JARVIS_RC_INTERNAL);
   }
 
 #endif // JARVIS_PROTOCOL_MQH

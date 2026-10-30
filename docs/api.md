@@ -36,8 +36,8 @@ Health of every part. This endpoint never fails because the bridge is down; it r
   "bridge": {
     "connected": true,
     "latency_ms": 4,
-    "ea_version": "0.1.0",
-    "protocol_version": 1,
+    "ea_version": "0.3.0",
+    "protocol_version": 2,
     "trade_mode": "demo",
     "terminal_connected": true,
     "error": null

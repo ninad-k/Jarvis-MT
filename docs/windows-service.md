@@ -104,6 +104,9 @@ For a dedicated account:
   `models\` read). Everything the server writes goes there.
 - Create users (`jarvis-api user ...`) as the same account, or make sure that account can write `data\`. SQLite
   needs write access to the database folder, including the `-wal` and `-shm` files.
+- The account needs **Read** access to the bridge key file named in `[bridge] key_file` (by default under the MT5
+  data folder of the user who runs MT5, `MQL5\Files\JarvisMT\bridge.key`). Grant read on that one file only, or copy
+  the key into `.env` as `JARVIS_BRIDGE_KEY` for the service account. Without it the server refuses to start.
 - Give the account the "Log on as a service" right if Windows refuses to start the service with an access error.
 - Restart the service after changing the account: `service stop`, then `service start`.
 

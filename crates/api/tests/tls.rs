@@ -50,7 +50,7 @@ async fn https_login_status_and_wss_work_end_to_end() {
     let mock = MockBridge::start().await;
     let server_lines = tls_lines(&pki);
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             auth: true,
@@ -220,7 +220,7 @@ async fn https_login_status_and_wss_work_end_to_end() {
 async fn a_missing_or_broken_certificate_stops_the_server_with_a_clear_error() {
     let mock = MockBridge::start().await;
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             server: "tls_cert = 'does/not/exist.pem'\ntls_key = 'nor/this.pem'",

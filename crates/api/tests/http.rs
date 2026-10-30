@@ -16,7 +16,7 @@ fn idle_llm() -> std::sync::Arc<ScriptedLlm> {
 #[tokio::test]
 async fn status_with_bridge_up() {
     let mock = MockBridge::start().await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     let (status, body) = request(&app.router, "GET", "/api/status", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
@@ -24,7 +24,7 @@ async fn status_with_bridge_up() {
     assert_eq!(body["mode_mismatch"], false);
     assert_eq!(body["bridge"]["connected"], true);
     assert_eq!(body["bridge"]["trade_mode"], "demo");
-    assert_eq!(body["bridge"]["protocol_version"], 1);
+    assert_eq!(body["bridge"]["protocol_version"], 2);
     assert_eq!(body["bridge"]["terminal_connected"], true);
     assert!(body["bridge"]["latency_ms"].is_u64());
     assert!(body["bridge"]["error"].is_null());
@@ -69,7 +69,7 @@ async fn status_with_bridge_down_still_returns_200() {
 #[tokio::test]
 async fn account_and_positions() {
     let mock = MockBridge::start().await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
 
     let (status, account) = request(&app.router, "GET", "/api/account", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -109,7 +109,7 @@ async fn watchlist_lists_partial_errors() {
         watchlist: &["XAUUSD", "NOSUCHSYM", "US100"],
         ..Options::default()
     };
-    let app = build_app(&mock.endpoint, idle_llm(), opts).await;
+    let app = build_app(&mock, idle_llm(), opts).await;
     let (status, body) = request(&app.router, "GET", "/api/watchlist", None).await;
     assert_eq!(status, StatusCode::OK);
     let prices = body["prices"].as_array().unwrap();
@@ -150,7 +150,7 @@ async fn chat_happy_path_calls_tool_and_writes_audit() {
             text("Gold is 2391.12 bid, 2391.40 ask."),
         ],
     );
-    let app = build_app(&mock.endpoint, llm.clone(), Options::default()).await;
+    let app = build_app(&mock, llm.clone(), Options::default()).await;
 
     let (status, body) = chat(&app, "what's gold at?").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -216,7 +216,7 @@ async fn chat_suffix_is_applied_before_the_bridge_call() {
         suffix: ".m",
         ..Options::default()
     };
-    let app = build_app(&mock.endpoint, llm, opts).await;
+    let app = build_app(&mock, llm, opts).await;
     let (status, body) = chat(&app, "gold?").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["tool_calls"][0]["ok"], false);
@@ -235,7 +235,7 @@ async fn chat_tool_error_is_given_to_the_model_not_the_client() {
             text("I couldn't find that symbol. Could you check its name?"),
         ],
     );
-    let app = build_app(&mock.endpoint, llm.clone(), Options::default()).await;
+    let app = build_app(&mock, llm.clone(), Options::default()).await;
     let (status, body) = chat(&app, "price of goldd").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["tool_calls"][0]["ok"], false);
@@ -332,7 +332,7 @@ async fn chat_can_select_a_provider_by_name() {
 async fn chat_stops_after_max_rounds() {
     let mock = MockBridge::start().await;
     let llm = ScriptedLlm::always("fake", tool_use_response("c", "get_account", json!({})));
-    let app = build_app(&mock.endpoint, llm.clone(), Options::default()).await;
+    let app = build_app(&mock, llm.clone(), Options::default()).await;
     let (status, body) = chat(&app, "loop forever").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(llm.request_count(), jarvis_api::agent::MAX_ROUNDS);
@@ -439,7 +439,7 @@ fn real_account_state() -> MockState {
 async fn demo_config_against_real_account_blocks_chat() {
     let mock = MockBridge::start_with(real_account_state()).await;
     let llm = ScriptedLlm::new("fake", vec![text("should never be used")]);
-    let app = build_app(&mock.endpoint, llm.clone(), Options::default()).await;
+    let app = build_app(&mock, llm.clone(), Options::default()).await;
 
     // Before any successful ping the flag is not set yet.
     assert!(!app.state.mode_mismatch());
@@ -459,7 +459,7 @@ async fn demo_config_against_real_account_blocks_chat() {
 #[tokio::test]
 async fn mismatch_is_also_detected_through_the_account_endpoint() {
     let mock = MockBridge::start_with(real_account_state()).await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     let (status, _) = request(&app.router, "GET", "/api/account", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(app.state.mode_mismatch());
@@ -471,7 +471,7 @@ async fn mismatch_is_also_detected_through_the_account_endpoint() {
 #[tokio::test]
 async fn startup_refuses_demo_config_against_real_account() {
     let mock = MockBridge::start_with(real_account_state()).await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     let err = app.state.startup_check().await.unwrap_err().to_string();
     assert!(err.contains("refusing to start"), "{err}");
 }
@@ -480,7 +480,7 @@ async fn startup_refuses_demo_config_against_real_account() {
 async fn startup_accepts_live_config_against_real_account_and_demo_against_demo() {
     let real = MockBridge::start_with(real_account_state()).await;
     let live = build_app(
-        &real.endpoint,
+        &real,
         idle_llm(),
         Options {
             mode: "live",
@@ -492,7 +492,7 @@ async fn startup_accepts_live_config_against_real_account_and_demo_against_demo(
     assert!(!live.state.mode_mismatch());
 
     let demo_mock = MockBridge::start().await;
-    let demo = build_app(&demo_mock.endpoint, idle_llm(), Options::default()).await;
+    let demo = build_app(&demo_mock, idle_llm(), Options::default()).await;
     demo.state.startup_check().await.unwrap();
     assert!(!demo.state.mode_mismatch());
 }
@@ -596,7 +596,7 @@ async fn state_changing_requests_from_a_foreign_origin_are_refused() {
     // another port on localhost (SECURITY.md: no web page may drive the trade endpoints).
     let mock = MockBridge::start().await;
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::always("fake", text_response("hello")),
         Options::default(),
     )
@@ -664,7 +664,7 @@ async fn state_changing_requests_from_a_foreign_origin_are_refused() {
 
     // A configured dev origin passes.
     let dev = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::always("fake", text_response("hello")),
         Options {
             server: r#"dev_origins = ["http://localhost:5173"]"#,
@@ -689,7 +689,7 @@ async fn state_changing_requests_from_a_foreign_origin_are_refused() {
 #[tokio::test]
 async fn reads_from_a_foreign_origin_get_no_cors_headers() {
     let mock = MockBridge::start().await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     let (status, headers, _) = raw_request(
         &app.router,
         "GET",
@@ -711,7 +711,7 @@ async fn dns_rebinding_is_refused_while_login_is_off() {
     // With no session cookie in play, a web page whose DNS name is switched to 127.0.0.1 is
     // same-origin with the API. The Host header gives it away.
     let mock = MockBridge::start().await;
-    let app = build_app(&mock.endpoint, idle_llm(), Options::default()).await;
+    let app = build_app(&mock, idle_llm(), Options::default()).await;
     for host in [
         "evil.example:8787",
         "evil.example",
@@ -759,7 +759,7 @@ async fn host_names_are_not_restricted_when_login_is_on() {
     // has no cookie to send; deployments behind a reverse proxy keep working.
     let mock = MockBridge::start().await;
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         idle_llm(),
         Options {
             auth: true,
@@ -809,7 +809,7 @@ async fn history_ranges_use_the_learned_server_time_offset() {
             text("done"),
         ],
     );
-    let app = build_app(&mock.endpoint, llm.clone(), Options::default()).await;
+    let app = build_app(&mock, llm.clone(), Options::default()).await;
 
     // A status call pings the bridge and teaches the clock the offset.
     request(&app.router, "GET", "/api/status", None).await;

@@ -277,10 +277,16 @@ impl AppState {
 
     /// Production wiring: bridge client, providers via `build_provider`, audit database.
     pub async fn build(config: Config) -> anyhow::Result<Self> {
-        let bridge = BridgeClient::new(BridgeConfig {
-            endpoint: config.bridge.endpoint.clone(),
-            timeout: Duration::from_millis(config.bridge.timeout_ms),
-        })?;
+        // Refuse to start without the shared bridge key: the EA would refuse every request
+        // anyway, and a server that cannot reach it must say why, not fail on the first call.
+        let key = config
+            .bridge_key()
+            .map_err(|e| anyhow::anyhow!("refusing to start: {e:#}"))?;
+        let bridge = BridgeClient::new(BridgeConfig::new(
+            config.bridge.endpoint.clone(),
+            Duration::from_millis(config.bridge.timeout_ms),
+            key,
+        ))?;
         let audit = Audit::connect(&config.database.url).await?;
         let auth = if config.auth.enabled {
             let secret = std::env::var(JWT_SECRET_ENV).unwrap_or_default();

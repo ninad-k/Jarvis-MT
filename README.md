@@ -86,8 +86,16 @@ pwsh scripts/install-ea.ps1 -DataFolder <32-character-id>
 pwsh scripts/compile-ea.ps1 -DataFolder <32-character-id>
 ```
 
-Always pass `-DataFolder`. The default in the scripts is a terminal path from the maintainer's PC. If MT5 is not in `C:\Program Files\MetaTrader 5`,
-pass `-MetaEditor "<path to MetaEditor64.exe>"` to `compile-ea.ps1`. Both scripts check the DLL hashes in [mql5/THIRD_PARTY.md](mql5/THIRD_PARTY.md).
+`-DataFolder` is required. If MT5 is not in `C:\Program Files\MetaTrader 5`, pass `-MetaEditor "<path to MetaEditor64.exe>"`
+to `compile-ea.ps1`. Both scripts check the DLL hashes in [mql5/THIRD_PARTY.md](mql5/THIRD_PARTY.md).
+
+`install-ea.ps1` also creates the bridge key (once; `-RotateKey` replaces it) and prints its path. Put that path in
+`config\jarvis.toml`:
+
+```toml
+[bridge]
+key_file = '<data folder>\MQL5\Files\JarvisMT\bridge.key'
+```
 
 ### 3. Attach JarvisBridge
 
@@ -98,13 +106,15 @@ Then attach the EA to a chart: **Navigator > Expert Advisors > JarvisMT > Jarvis
 **Allow Algo Trading**. Keep the global option under Tools > Options > Expert Advisors off. The **Algo Trading** button on the toolbar must be on,
 because writes are refused while it is off.
 
-The Experts tab should show a line that starts with `JarvisBridge 0.2.0 listening on 127.0.0.1:5555`.
+The Experts tab should show a line that starts with `JarvisBridge 0.3.0 listening on 127.0.0.1:5555`.
 
 Check the bridge from the repository root:
 
 ```powershell
-cargo run -p jarvis-bridge-client --example bridge_cli -- ping
+cargo run -p jarvis-bridge-client --example bridge_cli -- --key-file <path to bridge.key> ping
 ```
+
+`<path to bridge.key>` is the file `scripts/install-ea.ps1` created (`MQL5\Files\JarvisMT\bridge.key` in the MT5 data folder; the script prints it). The EA answers only a holder of that key.
 
 The reply should contain `"trade_mode": "demo"`.
 
@@ -228,11 +238,11 @@ pwsh scripts/check.ps1 -SkipWeb -SkipSecurity -SkipWhisper -SkipDesktop
 | `crates/llm` | `jarvis-llm`: provider trait with tool calling; Ollama, Anthropic and OpenAI clients |
 | `crates/voice` | `jarvis-voice`: Whisper speech-to-text (feature `whisper`) and Piper text-to-speech |
 | `crates/bridge-client` | `jarvis-bridge-client`: wire types, ZeroMQ client, mock bridge, `bridge_cli` and `mock_server` examples |
-| `mql5/` | `JarvisBridge` EA, protocol headers, vendored mql-zmq ([THIRD_PARTY.md](mql5/THIRD_PARTY.md)) |
+| `mql5/` | `JarvisBridge` EA, protocol headers, vendored mql-zmq and a libzmq 4.3.5 DLL built from source by `scripts/build-libzmq.ps1` ([THIRD_PARTY.md](mql5/THIRD_PARTY.md)) |
 | `web/` | SvelteKit web app: the HUD, login, audit page, PWA |
 | `apps/desktop/` | Tauri 2 desktop shell |
 | `config/` | `jarvis.example.toml`, the settings template |
-| `scripts/` | `install-ea.ps1`, `compile-ea.ps1`, `fetch-models.ps1`, `check.ps1` |
+| `scripts/` | `install-ea.ps1`, `compile-ea.ps1`, `build-libzmq.ps1`, `fetch-models.ps1`, `check.ps1` |
 | `docs/` | Architecture, runbook, configuration, API, protocol and user docs (see below) |
 | `tasks/`, `SPEC.md` | Product spec and sprint plans |
 | `.github/` | CI, security, Scorecard, Whisper and release workflows |

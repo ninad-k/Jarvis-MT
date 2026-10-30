@@ -25,6 +25,7 @@ The server refuses to start, and says why, when:
 
 - `mode` is not `demo` or `live`, or the account reports a real trade mode while `mode = "demo"`.
 - `bridge.endpoint` is not `tcp://` on a loopback host (`127.0.0.1`, `::1` or `localhost`).
+- There is no usable bridge key: neither `JARVIS_BRIDGE_KEY` nor `bridge.key_file` is set, the file cannot be read, or the key is not 64 hexadecimal characters (and not all zeros). The message points at `scripts/install-ea.ps1`. The key is never printed.
 - `server.bind` is not loopback and TLS (`tls_cert` and `tls_key`) and `[auth] enabled = true` are not both set.
 - Only one of `tls_cert` and `tls_key` is set, or a PEM file cannot be read.
 - `[auth] enabled = true` and `JARVIS_JWT_SECRET` is missing or shorter than 32 bytes.
@@ -59,6 +60,9 @@ When TLS is on, responses carry `Strict-Transport-Security`, the session cookie 
 |---|---|---|---|
 | `endpoint` | `tcp://<loopback>:<port>` | `"tcp://127.0.0.1:5555"` | Where the API connects to the `JarvisBridge` EA. Must be loopback. Must match the EA input `InpEndpoint`. |
 | `timeout_ms` | integer > 0 | `3000` | Time to wait for each EA reply. A write that times out is not retried and is reported as `outcome_unknown`. Raise it only if replies are slow for a reason you understand. |
+| `key_file` | path | unset | The shared bridge key (finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)): a text file holding 64 hexadecimal characters, 32 random bytes. `scripts/install-ea.ps1` creates it as `<MT5 data folder>\MQL5\Files\JarvisMT\bridge.key` and prints the path. The EA reads the same file when it starts. Without the key the EA refuses every request, so the API **refuses to start** without one. `JARVIS_BRIDGE_KEY` overrides this setting. Write the path as a TOML literal string (single quotes), for example `key_file = 'C:\Users\you\AppData\Roaming\MetaQuotes\Terminal\<id>\MQL5\Files\JarvisMT\bridge.key'`. Only your own Windows account should be able to read the file; the MT5 data folder under `%APPDATA%` already is. |
+
+Every message to and from the EA is signed with this key, so any other program on the PC that does not hold it cannot place orders or read the account, and it cannot answer in the EA's place. See [protocol.md](protocol.md#authentication). To change the key, see [Rotating the bridge key](runbook.md#rotating-the-bridge-key).
 
 ## `[database]`
 
@@ -156,6 +160,7 @@ the reason is written to the log. `GET /api/status` reports `voice.stt` and `voi
 | Variable | Required | Effect and safety |
 |---|---|---|
 | `JARVIS_JWT_SECRET` | Yes, when `[auth] enabled = true` (the default), and for every `jarvis-api user` command | Signs session tokens and derives the key that encrypts TOTP secrets. At least 32 bytes. Generate a random value (see below). Changing it logs everyone out and makes stored TOTP secrets unreadable, so run `jarvis-api user reset-totp <name>` for each user afterwards. Never commit it. |
+| `JARVIS_BRIDGE_KEY` | Yes, unless `[bridge] key_file` is set | The shared bridge key as 64 hexadecimal characters. When set and not empty it wins over `key_file`; if it is set but not a valid key, the server stops instead of falling back to the file. Same secret as the content of `bridge.key`. Never commit it, and never paste it into an issue or a chat. |
 | The variable named by `api_key_env`, for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | Only for that provider | The provider API key. Keep it in `.env` only. |
 | `RUST_LOG` | No | Log filter (tracing `EnvFilter` syntax). Unset, the console default is `info,jarvis_api=debug,jarvis_bridge_client=debug`, and the Windows service default is `info,jarvis_api=debug,jarvis_bridge_client=info`. |
 | `JARVIS_CONFIG` | No | Path to the config file, used when `--config` is not given. |
@@ -179,6 +184,8 @@ The result is 64 characters, which is above the 32-byte minimum. Paste it after 
 | Variable | Used by | Effect |
 |---|---|---|
 | `JARVIS_BRIDGE_ENDPOINT` | `bridge-client` live tests | Endpoint of the EA. Default `tcp://127.0.0.1:5555`. |
+| `JARVIS_BRIDGE_KEY`, `JARVIS_BRIDGE_KEY_FILE` | `bridge-client` live tests and `bridge_cli` | The shared key (hex), or the path of `bridge.key`. The live tests need one of them. `bridge_cli` also has `--key-file`. |
+| `JARVIS_MOCK_KEY_FILE` | `mock_server` example | Where the offline mock writes its random key when `JARVIS_BRIDGE_KEY` is not set. Default `target/mock-bridge.key`. |
 | `JARVIS_LIVE_SYMBOL` | `bridge-client` live tests | Broker symbol the tests read or trade, default `EURUSD`. Use your broker's name. |
 | `JARVIS_OLLAMA_URL`, `JARVIS_OLLAMA_MODEL`, `JARVIS_ANTHROPIC_URL`, `JARVIS_ANTHROPIC_MODEL`, `JARVIS_OPENAI_URL`, `JARVIS_OPENAI_MODEL` | `llm` live tests | Override the provider endpoint and model. |
 | `LIBCLANG_PATH` | Build of the `whisper` feature | Folder that contains `libclang.dll`. `scripts/check.ps1` sets it when LLVM is installed in its default folder. |

@@ -3,20 +3,27 @@
 //! This module is the source of truth for the JSON contract. `docs/protocol.md`
 //! and the golden files in `tests/fixtures/` must match it.
 //!
-//! Request:  `{"id": "...", "cmd": "get_price", "args": {"symbol": "XAUUSD"}}`
-//! Reply:    `{"id": "...", "ok": true,  "data": {...},          "retcode": 0}`
-//!           `{"id": "...", "ok": false, "error": "message",     "retcode": 4301}`
+//! Request:  `{"id": "...", "ts": 1793341200000, "cmd": "get_price", "args": {"symbol": "XAUUSD"}}`
+//! Reply:    `{"id": "...", "ok": true,  "data": {...},          "retcode": 0, "ts": 1793341200012}`
+//!           `{"id": "...", "ok": false, "error": "message",     "retcode": 4301, "ts": 1793341200012}`
+//!
+//! Each message travels as two ZeroMQ frames, `[hex HMAC-SHA256, this JSON]`; see [`crate::auth`].
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 /// Protocol version reported by the EA in `ping`. Bump on breaking changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Version 2: every message is a signed two-frame message (ADR-0016).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Retcode used by the EA for malformed requests or invalid arguments.
 pub const RETCODE_INVALID_REQUEST: i64 = -1;
 /// Retcode used by the EA for an unknown or not-yet-implemented command.
 pub const RETCODE_UNKNOWN_COMMAND: i64 = -2;
+/// Retcode used by the EA when a request failed authentication: wrong or missing MAC, wrong
+/// frame count, stale `ts`, or an `id` that was already used. The error text is always
+/// [`crate::auth::AUTH_ERROR_TEXT`].
+pub const RETCODE_AUTH_FAILED: i64 = -4;
 
 /// Maximum number of deals `get_history` may return in one reply.
 pub const HISTORY_LIMIT_MAX: u32 = 500;
@@ -220,10 +227,14 @@ pub struct HistoryQuery {
     pub limit: Option<u32>,
 }
 
-/// A request envelope: `{"id", "cmd", "args"}`.
+/// A request envelope: `{"id", "ts", "cmd", "args"}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: String,
+    /// Sender's clock, Unix milliseconds. The client always sets it; the EA refuses a request
+    /// without one. Optional here only so that older golden files still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<i64>,
     #[serde(flatten)]
     pub command: Command,
 }
@@ -239,6 +250,10 @@ pub struct Reply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub retcode: i64,
+    /// EA clock, Unix milliseconds (informational; the MAC and the `id` bind a reply to its
+    /// request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<i64>,
 }
 
 impl Reply {

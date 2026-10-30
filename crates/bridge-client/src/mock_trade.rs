@@ -728,6 +728,7 @@ fn trade_reply(id: &str, result: &TradeResult) -> Reply {
         data: serde_json::to_value(result).ok(),
         error: None,
         retcode: result.retcode,
+        ts: None,
     }
 }
 

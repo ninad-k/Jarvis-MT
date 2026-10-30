@@ -1,14 +1,24 @@
-# Bridge protocol (version 1)
+# Bridge protocol (version 2)
 
 Wire contract between the Rust backend (`jarvis-bridge-client`) and the MQL5 EA `JarvisBridge`.
 Read commands (`ping`, `get_price`, `get_account`, `get_positions`, `get_orders`, `get_history`,
 `get_symbol`) and write commands (`order_send`, `position_modify`, `position_close`,
-`position_close_partial`, `order_cancel`) are specified below. EA 0.2.0 implements both;
-`protocol_version` stays `1` because the write commands and `get_symbol` are additive.
+`position_close_partial`, `order_cancel`) are specified below. EA 0.3.0 implements both.
 
-Source of truth in code: `crates/bridge-client/src/protocol.rs`. The JSON examples below are the
+**Version 2 (EA 0.3.0) is not compatible with version 1.** Every message is now authenticated
+(finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)): it travels as two ZeroMQ
+frames, a hex HMAC-SHA256 and the JSON, requests carry a timestamp, and only a holder of the shared
+key can talk to the EA. The commands and their arguments did not change. The client refuses an EA
+that reports another `protocol_version`, and an old EA answers a version 2 request with a single
+plain frame, which the client reports as such.
+
+Source of truth in code: `crates/bridge-client/src/protocol.rs` (JSON) and
+`crates/bridge-client/src/auth.rs` (frames, MAC, replay rules). The JSON examples below are the
 golden files in `crates/bridge-client/tests/fixtures/`; the Rust tests round-trip every one of them,
-and the EA's parser/serialiser should be checked against the same files.
+and the EA's parser/serialiser should be checked against the same files. The envelope files
+(`*.request.json`, `*.reply.json`) show the JSON payload only (frame 2); `ts` is left out of them
+so that they stay readable. `auth.golden.json` is the authentication vector (key, payload, MAC)
+that the Rust tests and the MQL5 self-test both check.
 
 ## Transport
 
@@ -16,32 +26,107 @@ and the EA's parser/serialiser should be checked against the same files.
   (default port `5555`). The backend is the REQ side and **connects**.
 - **Loopback only.** The EA must bind `127.0.0.1` (never `*` or `0.0.0.0`). The Rust client refuses to
   start with any endpoint other than `tcp://127.0.0.1:<port>`, `tcp://localhost:<port>` or
-  `tcp://[::1]:<port>` (`localhost` is connected as `127.0.0.1`). There is no authentication
-  on the socket; being unreachable from the network is the access control.
-- One request is one ZeroMQ message with **one frame** holding a UTF-8 JSON object. One reply is
-  likewise one frame. No multipart messages. No ZeroMQ-specific extensions: plain REQ, plain REP,
+  `tcp://[::1]:<port>` (`localhost` is connected as `127.0.0.1`). Being unreachable from the
+  network keeps remote hosts out; a program on the same PC is kept out by the message
+  authentication below.
+- One request is one ZeroMQ **multipart message of exactly two frames**: frame 1 is the MAC,
+  frame 2 is a UTF-8 JSON object. One reply is likewise two frames. See
+  [Authentication](#authentication). No ZeroMQ-specific extensions: plain REQ, plain REP,
   ZMTP 3.x with the NULL mechanism (this is what libzmq 4.x and the pure-Rust `zeromq` crate both speak).
 - Maximum message size: no hard limit in the protocol, but `get_history` is capped at 500 deals
   (about 150 KB) to keep replies small.
 
-## Envelope
+## Authentication
 
-Request:
+Finding BR-1: without this, any program on the PC (also another Windows user on a shared PC or VPS)
+could connect to `127.0.0.1:5555` and send `order_send` straight to the EA, skipping the gate, the
+limits, the confirmation and the audit log. Now only a holder of a shared secret can talk to the EA,
+and only the EA (or a holder of the secret) can answer the API.
+
+**The key.** 32 random bytes, written as 64 hexadecimal characters in a text file, by
+`scripts/install-ea.ps1` (CSPRNG, never overwritten, never printed). The EA reads it from
+`MQL5\Files\JarvisMT\bridge.key` (its file sandbox, inside the user's profile) when it starts and
+does not start without it. The API reads the same file (`[bridge] key_file`) or `JARVIS_BRIDGE_KEY`
+and does not start without it. See [configuration.md](configuration.md) and the
+[runbook](runbook.md#the-bridge-key).
+
+**Frames.** Every message, in both directions:
+
+| frame | content |
+|---|---|
+| 1 | lowercase hex of `HMAC-SHA256(key, frame 2)`, exactly 64 ASCII characters |
+| 2 | the JSON payload, as the exact bytes that were sent |
+
+The MAC covers the raw bytes of frame 2, so there is no JSON canonicalisation to get wrong. The key
+is the 32 bytes the hex stands for. Receivers compare the MAC in constant time and accept only
+lowercase hex. Golden vector (`auth.golden.json`): key `000102...1f`, payload
+`{"id":"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001","ts":1793341200000,"cmd":"ping","args":{}}`, MAC
+`bc45b3fc8bc3cef210abe4efff32897c8ca52cf7a0da1d0366707923cd1ca581`. Both implementations are also
+checked against the RFC 4231 HMAC-SHA256 test vectors.
+
+**What the EA checks, in this order, before it parses or executes anything:**
+
+1. The message has exactly two frames (more frames are read and dropped; the EA still answers once).
+2. Frame 1 is the correct MAC of frame 2.
+3. Frame 2 is a JSON object with a non-empty string `id` and an integer `ts` (Unix milliseconds on
+   the client's clock). A payload with a zero byte is rejected as malformed.
+4. `ts` is within 30 000 ms of the EA's clock (either direction).
+5. `id` was not accepted in the last 60 s. Accepted ids are remembered in a table of at most 4096
+   entries, expired by time (a monotonic clock, so a clock change cannot forget one early). A full
+   table refuses new requests until entries expire (fail closed).
+
+Then the usual checks follow (command, arguments, write cache, safety gate). A request that fails
+step 1, 2, 3, 4 or 5 is **not executed and not cached**. The EA's clock is `TimeGMT()` (one-second
+resolution) plus milliseconds from `GetTickCount64()` since it last saw the second change: about
+25 ms accurate while the 20 ms timer runs, at worst 1 s. The 30 s window is far wider than that.
+The API's clock is the system clock. Both normally belong to the same PC.
+
+**The reply to a refused request.** REP is lock-step, so the EA answers it exactly once, with a
+signed reply like any other, retcode `-4` and always the same text:
 
 ```json
-{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001", "cmd": "ping", "args": {}}
+{"id": "", "ok": false, "error": "authentication failed", "retcode": -4, "ts": 1793341200012}
+```
+
+`id` is `""` when the request was not authentic (wrong or missing MAC, wrong frame count): the EA
+never echoes unauthenticated input, so a peer without the key cannot get text of its choosing
+signed. When the MAC was valid (the sender holds the key) but `ts` or `id` was refused, the `id` is
+echoed. The error text never says which check failed; the EA logs the reason (throttled to one line
+per 10 s) in the Experts journal. A peer without the key learns nothing from the reply, which is
+signed with a key it does not have.
+
+**Replies.** The reply JSON is unchanged and has an added `"ts"` (the EA's clock, informational).
+The client verifies the MAC of every reply in constant time, and that the reply `id` equals the
+request `id` (the one exception: a signed `-4` with `id` `""` is reported as an authentication
+refusal). A reply that fails is a `BridgeError::Protocol("reply authentication failed")`: either the
+keys differ or another program answers on the port. The client then drops the socket. A reply that
+is not exactly two frames is also a protocol error, with a hint that the EA may be older than
+version 2.
+
+**What this does not do.** It does not encrypt: anyone who can read loopback traffic (an
+administrator) sees the messages. It does not stop a program that can read `bridge.key` (the same
+Windows account, or an administrator), and it does not rate-limit a peer that floods the socket
+with garbage (each message still gets one cheap reply). The threat model has the details.
+
+## Envelope
+
+Request (frame 2 of the message; the examples further down omit `ts` for readability):
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001", "ts": 1793341200000, "cmd": "ping", "args": {}}
 ```
 
 | field | type | rules |
 |---|---|---|
-| `id` | string | Chosen by the client (UUID v4). Non-empty. The EA echoes it unchanged. |
+| `id` | string | Chosen by the client (UUID v4). Non-empty, at most 128 characters. The EA echoes it unchanged. A new id for every request: an id used in the last 60 s is refused. |
+| `ts` | integer | Unix **milliseconds** on the client's clock. Required. Refused when more than 30 s from the EA's clock. |
 | `cmd` | string | Lower-case command name. |
 | `args` | object | **Always present**, `{}` when the command takes none. Unknown extra keys should be ignored by the EA. |
 
 Reply, success:
 
 ```json
-{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001", "ok": true, "data": {}, "retcode": 0}
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001", "ok": true, "data": {}, "retcode": 0, "ts": 1793341200012}
 ```
 
 Reply, failure:
@@ -80,6 +165,7 @@ The client rejects a reply whose `id` differs from the request's (`BridgeError::
 | `-1` | request invalid: not JSON, not an object, missing/ill-typed `id`, `cmd` or arguments, argument out of range (`limit`, `from > to`), request too large |
 | `-2` | unknown command, or a command not implemented in this protocol version |
 | `-3` | write refused by the EA safety gate (real account without `InpAllowReal`, Algo Trading off); nothing was sent to the trade server |
+| `-4` | **authentication failed**: not a two-frame message, wrong or missing MAC, `ts` outside 30 s, `ts` missing, `id` already used in the last 60 s, or too many requests in the last 60 s. The text is always `authentication failed`. Nothing beyond the envelope was parsed, and nothing was cached or executed. See [Authentication](#authentication) |
 | `> 0` | For read commands the MT5 `GetLastError()` value, for example `4301` (`ERR_MARKET_UNKNOWN_SYMBOL`). For write commands the trade server retcode: `10009` done, `10008` placed, `10010` done partially (success), `10018` market closed, `10019` no money, `10013` invalid request, and so on. |
 
 `ok: false` always comes with a non-empty `error`. The Rust client maps it to
@@ -111,8 +197,8 @@ Request / reply (`ping.request.json`, `ping.reply.json`):
   "id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1001",
   "ok": true,
   "data": {
-    "protocol_version": 1,
-    "ea_version": "0.1.0",
+    "protocol_version": 2,
+    "ea_version": "0.3.0",
     "trade_mode": "demo",
     "terminal_connected": true,
     "trade_allowed": true,
@@ -124,7 +210,7 @@ Request / reply (`ping.request.json`, `ping.reply.json`):
 
 | data field | type | notes |
 |---|---|---|
-| `protocol_version` | integer | `1`. Bumped on breaking changes; the backend should refuse a mismatch. |
+| `protocol_version` | integer | `2`. Bumped on breaking changes. `BridgeClient::ping` returns a `Protocol` error that names both versions when it differs. |
 | `ea_version` | string | EA build, free text. |
 | `trade_mode` | `"demo"` \| `"contest"` \| `"real"` | `ACCOUNT_TRADE_MODE`. |
 | `terminal_connected` | bool | `TERMINAL_CONNECTED`. |
@@ -553,8 +639,12 @@ The EA keeps a ring cache of the **last 64 write replies**, keyed by request `id
 after the EA restarts or is reloaded. Entries are evicted oldest first, so only the 64 most recent
 writes are protected.
 
-The Rust client generates a fresh UUID for every call and never resends a write, so the cache is a
-second line of defence for any other sender (a script, a retrying proxy).
+Since protocol 2 the authentication step runs first: a request whose `id` was accepted in the last
+60 s is refused with `-4` before the cache is consulted, and after 60 s its `ts` is stale anyway.
+So the cache cannot be reached through the socket any more. It stays as defence in depth (the
+EA code path is unchanged and still tested).
+
+The Rust client generates a fresh UUID for every call and never resends a write.
 
 ### A timeout after sending means the outcome is unknown
 
@@ -568,8 +658,9 @@ server, lost reply, client timeout). Therefore:
   reconcile by reading `get_positions`, `get_orders` and `get_history` before deciding anything.
 - A trade round trip can take seconds, so give the client that sends writes a generous timeout
   (the live tests and `bridge_cli` use 15 s; the default 3 s is meant for reads).
-- Sending the same request again with the **same `id`** is safe while the EA is up (the cache
-  answers it). Sending a new request with a new `id` is a new trade.
+- Sending the same request again with the **same `id`** is refused with `-4` (replay protection):
+  safe, but it does not tell you what happened. Sending a new request with a new `id` is a new
+  trade. Reconcile by reading positions, orders and history.
 
 ## Error example
 
@@ -620,17 +711,20 @@ Unknown command:
 |---|---|
 | `Timeout(ms)` | no reply within the budget; socket reset |
 | `Transport(msg)` | bad endpoint, EA unreachable, socket send/receive failed |
-| `Protocol(msg)` | reply not valid JSON or not the expected shape, `id` mismatch, multi-frame reply |
-| `Remote { message, retcode }` | EA answered `ok: false` |
+| `Protocol(msg)` | reply not valid JSON or not the expected shape, `id` mismatch, reply not a signed two-frame message, reply MAC wrong (`reply authentication failed`), `ping` reports another protocol version |
+| `Remote { message, retcode }` | EA answered `ok: false`. Retcode `-4` means the EA refused the request (key, clock or id), and the message says so |
 
 ## Requirements for the EA
 
 1. `bind` `tcp://127.0.0.1:<port>` only. Log the endpoint on start (including whether real accounts are allowed).
 2. Poll with `ZMQ_DONTWAIT` from `OnTimer` (about 20 ms); handle at most 10 requests per tick.
-3. Exactly one single-frame JSON reply per request, always, including errors. Echo `id`.
-4. Validate every field (types, ranges, symbol) before using it. Never crash or hang on bad input.
+3. Exactly one signed two-frame reply per request, always, including errors and authentication
+   failures. Echo `id` (empty for an unauthenticated request).
+4. Authenticate first (frames, MAC, `ts`, replay; see [Authentication](#authentication)) and do
+   nothing else for a request that fails. Validate every field (types, ranges, symbol) before using
+   it. Never crash or hang on bad input.
 5. Never include login, name, server or company in any reply.
-6. Requests larger than 64 KB are dropped by ZeroMQ (`ZMQ_MAXMSGSIZE`), so the client sees a timeout, not a reply.
+6. Frames larger than 64 KB are dropped by ZeroMQ (`ZMQ_MAXMSGSIZE`), so the client sees a timeout, not a reply.
 7. Answer every unknown command with `retcode -2`.
 8. Write commands: validate before touching `CTrade`, apply the safety gate (`-3`), execute only on
    request, cache the last 64 replies by `id`, log every write (command, id, retcode) and every
@@ -639,8 +733,12 @@ Unknown command:
 ## Mock for tests and offline work
 
 `jarvis_bridge_client::mock::MockBridge` (cargo feature `mock`) is an in-process REP server that follows
-this document. `cargo run -p jarvis-bridge-client --features mock --example mock_server`
-serves it on `tcp://127.0.0.1:5555` so `bridge_cli` and the API can be exercised without MT5.
+this document, **including the authentication**: two frames, MAC, `ts` window, replay table, signed
+replies, `-4` refusals. Every mock has its own random key (`mock.key()`, `mock.config(timeout)`), or
+one you give it (`start_with_key`, `start_at_with_key`), so every test goes through the real
+authenticated code path. `cargo run -p jarvis-bridge-client --features mock --example mock_server`
+serves it on `tcp://127.0.0.1:5555` so `bridge_cli` and the API can be exercised without MT5; it
+writes its key to `target/mock-bridge.key` (or uses `JARVIS_BRIDGE_KEY`) and prints the path.
 
 The mock implements `get_symbol` and every write command with real state changes: `order_send`
 adds a position (filled at the ask or bid, new ticket) or a pending order, `position_modify` updates
@@ -656,6 +754,8 @@ sl/tp, closes remove or reduce positions and realise profit into the account and
 | `drop_next(n)` | swallow the next `n` requests without replying (timeout tests) |
 | `state()`, `update_state(f)` | read back or change positions, orders, deals, prices, symbols |
 | `executed_writes()`, `cache_hits()` | how many writes ran, and how many were answered from the cache |
+| `auth_failures()` | requests refused with `-4` |
+| `allow_replays(true)` | stops refusing a repeated id (the `ts` window still applies); only to exercise the write cache, which the replay guard otherwise hides |
 
 `MockState::symbols` holds realistic trading specifications for the six mock symbols.
 `bridge_cli` offers `symbol`, `buy`, `sell`, `modify`, `close` and `cancel`; each write needs `--yes`

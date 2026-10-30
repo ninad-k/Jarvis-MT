@@ -19,7 +19,8 @@ use jarvis_api::config::Config;
 use jarvis_api::state::{Overrides, ProviderSlot};
 use jarvis_api::trading::WriteSink;
 use jarvis_api::voice::Voice;
-use jarvis_bridge_client::{BridgeClient, BridgeConfig};
+use jarvis_bridge_client::mock::MockBridge;
+use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeKey};
 use jarvis_llm::{ChatRequest, ChatResponse, LlmError, LlmProvider, StopReason, ToolCall};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -256,12 +257,53 @@ impl Default for Options<'_> {
     }
 }
 
-/// App wired to the bridge at `endpoint` and the given fake LLM (registered as `fake`;
+/// Where a test app's bridge client connects, and the key it signs with. A running mock
+/// brings its own random key (`&mock`); an endpoint nobody listens on (`DEAD_ENDPOINT`) gets a
+/// random key that matches nothing.
+pub trait BridgeTarget {
+    fn endpoint(&self) -> String;
+    fn key(&self) -> BridgeKey;
+}
+
+impl BridgeTarget for &str {
+    fn endpoint(&self) -> String {
+        (*self).to_owned()
+    }
+    fn key(&self) -> BridgeKey {
+        BridgeKey::generate().expect("random key")
+    }
+}
+
+impl BridgeTarget for &MockBridge {
+    fn endpoint(&self) -> String {
+        self.endpoint.clone()
+    }
+    fn key(&self) -> BridgeKey {
+        MockBridge::key(self)
+    }
+}
+
+/// A bridge client for `target`, with the timeout the test configs use.
+pub fn bridge_client(target: impl BridgeTarget, timeout_ms: u64) -> BridgeClient {
+    BridgeClient::new(BridgeConfig::new(
+        target.endpoint(),
+        Duration::from_millis(timeout_ms),
+        target.key(),
+    ))
+    .expect("bridge client")
+}
+
+/// App wired to the bridge at `target` and the given fake LLM (registered as `fake`;
 /// the `claude` provider is left unavailable).
-pub async fn build_app(endpoint: &str, llm: Arc<ScriptedLlm>, opts: Options<'_>) -> TestApp {
+pub async fn build_app(
+    target: impl BridgeTarget,
+    llm: Arc<ScriptedLlm>,
+    opts: Options<'_>,
+) -> TestApp {
+    let endpoint = target.endpoint();
     let config = Config::from_toml_str(&config_toml(
         opts.mode,
-        endpoint,
+        &endpoint,
         opts.suffix,
         opts.watchlist,
         opts.limits,
@@ -270,11 +312,7 @@ pub async fn build_app(endpoint: &str, llm: Arc<ScriptedLlm>, opts: Options<'_>)
         opts.auth,
     ))
     .expect("test config");
-    let bridge = BridgeClient::new(BridgeConfig {
-        endpoint: endpoint.to_owned(),
-        timeout: Duration::from_millis(config.bridge.timeout_ms),
-    })
-    .expect("bridge client");
+    let bridge = bridge_client(target, config.bridge.timeout_ms);
     let audit = match opts.audit {
         Some(audit) => audit,
         None => Audit::connect(&temp_db_url()).await.expect("audit db"),

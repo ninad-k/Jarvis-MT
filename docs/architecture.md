@@ -76,7 +76,7 @@ Whisper build, and tagged releases). See "Build and release pipeline" below.
 
 | Unit | Responsibility | Main files |
 |---|---|---|
-| `jarvis-bridge-client` (`crates/bridge-client`) | Wire types (`Command`, replies, DTOs, retcodes). `BridgeClient` is one actor: one request in flight, a timeout (default 3 s), a socket reset after a failure, and a reply-id check. The `mock` feature provides an in-process REP server and a standalone mock EA. | `src/protocol.rs`, `src/client.rs`, `src/mock.rs`, `src/mock_trade.rs`, `src/error.rs`; examples `bridge_cli.rs`, `mock_server.rs` |
+| `jarvis-bridge-client` (`crates/bridge-client`) | Wire types (`Command`, replies, DTOs, retcodes). `BridgeClient` is one actor: one request in flight, a timeout (default 3 s), a socket reset after a failure, and a reply-id check. Every message is signed with the shared bridge key (two frames, HMAC-SHA256) and every reply is verified (ADR-0016). The `mock` feature provides an in-process REP server, with the same authentication, and a standalone mock EA. | `src/protocol.rs`, `src/auth.rs`, `src/client.rs`, `src/mock.rs`, `src/mock_trade.rs`, `src/error.rs`; examples `bridge_cli.rs`, `mock_server.rs` |
 | `jarvis-llm` (`crates/llm`) | `LlmProvider` trait with tool calling, `build_provider`, and the Ollama, Anthropic and OpenAI clients. Reads API keys from the variable named in config. | `src/lib.rs`, `src/types.rs`, `src/ollama.rs`, `src/anthropic.rs`, `src/openai.rs`, `src/util.rs` |
 | `jarvis-gate` (`crates/gate`) | The action gate: limit checks, the deterministic intent parser (English and Hinglish), previews, one-time confirmation tokens with their stages and timing, and the kill switch. No I/O, so it is tested on its own. | `src/limits.rs`, `src/intent.rs`, `src/preview.rs`, `src/tokens.rs`, `src/killswitch.rs` |
 | `jarvis-voice` (`crates/voice`) | WAV decoding, transcript clean-up and corrections, Whisper STT (feature `whisper`), Piper TTS as a child process. | `src/audio.rs`, `src/stt.rs`, `src/text.rs`, `src/tts.rs` |
@@ -275,7 +275,7 @@ Other enforced controls:
 | Port | Used by | Bound to | Notes |
 |---|---|---|---|
 | 8787 | `jarvis-api` HTTP, WebSocket, static site | `server.bind` (loopback by default) | Off loopback only with TLS and login. |
-| 5555 | `JarvisBridge` EA (ZeroMQ REP) | `127.0.0.1` only | `bridge.endpoint` and `InpEndpoint` must match. |
+| 5555 | `JarvisBridge` EA (ZeroMQ REP) | `127.0.0.1` only | `bridge.endpoint` and `InpEndpoint` must match. Only a holder of the shared `bridge.key` is answered. |
 | 11434 | Ollama | Loopback | Used by the `local` provider. |
 | 5173 | Vite dev server | Local | Proxies `/api` (including WebSocket) to 8787. |
 | 443 | Optional reverse proxy | Public | Terminates TLS and forwards to a loopback `jarvis-api`. |

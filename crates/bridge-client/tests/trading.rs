@@ -12,26 +12,19 @@ use jarvis_bridge_client::protocol::{
     PositionCloseArgs, PositionClosePartialArgs, PositionModifyArgs, RETCODE_INVALID_REQUEST,
     RETCODE_WRITE_REFUSED, Reply, Request, Side, TradeMode, TradeResult,
 };
-use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError};
-use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+use jarvis_bridge_client::{BridgeClient, BridgeError, auth};
+use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend};
 
 const TIMEOUT: Duration = Duration::from_millis(500);
 
 async fn started() -> (MockBridge, BridgeClient) {
     let mock = MockBridge::start().await;
-    let client = client_for(&mock.endpoint);
+    let client = client_for(&mock);
     (mock, client)
 }
 
-fn client_for(endpoint: &str) -> BridgeClient {
-    BridgeClient::with_write_timeout(
-        BridgeConfig {
-            endpoint: endpoint.to_owned(),
-            timeout: TIMEOUT,
-        },
-        TIMEOUT,
-    )
-    .expect("client")
+fn client_for(mock: &MockBridge) -> BridgeClient {
+    BridgeClient::with_write_timeout(mock.config(TIMEOUT), TIMEOUT).expect("client")
 }
 
 fn order(symbol: &str, side: Side, volume: f64, exec: ExecType) -> OrderSendArgs {
@@ -70,16 +63,28 @@ fn assert_remote(result: Result<TradeResult, BridgeError>, retcode: i64, part: &
     }
 }
 
-/// Send `request` over a fresh raw REQ socket (the client always generates its own id).
-async fn raw_call(endpoint: &str, request: &Request) -> Reply {
+/// Send `request` over a fresh raw REQ socket, signed with the mock's key and stamped with the
+/// current time (the client always generates its own id; tests that need a chosen id use this).
+/// The reply is verified and returned without its `ts`, so replies can be compared.
+async fn raw_call(mock: &MockBridge, request: &Request) -> Reply {
+    let mut request = request.clone();
+    request.ts = Some(auth::now_ms());
+    let key = mock.key();
     let mut socket = ReqSocket::new();
-    socket.connect(endpoint).await.expect("connect");
+    socket.connect(&mock.endpoint).await.expect("connect");
     socket
-        .send(ZmqMessage::from(serde_json::to_vec(request).expect("json")))
+        .send(auth::seal(
+            &key,
+            serde_json::to_vec(&request).expect("json"),
+        ))
         .await
         .expect("send");
     let frames = socket.recv().await.expect("recv");
-    serde_json::from_slice(frames.get(0).expect("frame")).expect("reply json")
+    let payload = auth::open(&key, &frames).expect("the reply is signed");
+    let mut reply: Reply = serde_json::from_slice(payload).expect("reply json");
+    assert!(reply.ts.is_some(), "every reply carries the EA clock");
+    reply.ts = None;
+    reply
 }
 
 // ---- get_symbol -----------------------------------------------------------------------------
@@ -449,7 +454,7 @@ async fn symbol_that_is_not_tradable_is_rejected() {
     let mut state = MockState::default();
     state.symbols[0].trade_allowed = false;
     let mock = MockBridge::start_with(state).await;
-    let client = client_for(&mock.endpoint);
+    let client = client_for(&mock);
     assert_remote(
         client.order_send(market("XAUUSD", Side::Buy, 0.1)).await,
         RETCODE_INVALID_REQUEST,
@@ -840,12 +845,12 @@ async fn real_account_refuses_writes_unless_allowed() {
     state.ping.trade_mode = TradeMode::Real;
     state.account.trade_mode = TradeMode::Real;
     let mock = MockBridge::start_with(state.clone()).await;
-    let client = client_for(&mock.endpoint);
+    let client = client_for(&mock);
     assert_all_writes_refused(&client, "real account").await;
 
     state.allow_real = true;
     let mock = MockBridge::start_with(state).await;
-    let client = client_for(&mock.endpoint);
+    let client = client_for(&mock);
     assert!(
         client
             .order_send(market("XAUUSD", Side::Buy, 0.1))
@@ -859,7 +864,7 @@ async fn algo_trading_off_refuses_writes() {
     let mut state = MockState::default();
     state.ping.trade_allowed = false;
     let mock = MockBridge::start_with(state).await;
-    let client = client_for(&mock.endpoint);
+    let client = client_for(&mock);
     assert_all_writes_refused(&client, "enable Algo Trading").await;
 }
 
@@ -947,10 +952,16 @@ async fn validation_errors_do_not_consume_fail_next_write() {
 }
 
 // ---- idempotency --------------------------------------------------------------------------------
+//
+// With authentication on, a repeated request id is refused before it can reach the reply cache
+// (`a_replayed_request_id_is_refused` in tests/client.rs). The cache is the second line of defence,
+// so these tests switch the replay guard off to exercise it, exactly as the EA's cache is
+// exercised in the MQL5 self-test.
 
 fn raw_order_request(id: &str) -> Request {
     Request {
         id: id.to_owned(),
+        ts: None,
         command: Command::OrderSend(market("XAUUSD", Side::Buy, 0.1)),
     }
 }
@@ -958,10 +969,11 @@ fn raw_order_request(id: &str) -> Request {
 #[tokio::test]
 async fn a_repeated_request_id_gets_the_cached_reply_and_executes_once() {
     let (mock, _client) = started().await;
+    mock.allow_replays(true);
     let request = raw_order_request("same-id-1");
-    let first = raw_call(&mock.endpoint, &request).await;
+    let first = raw_call(&mock, &request).await;
     assert!(first.ok, "{first:?}");
-    let second = raw_call(&mock.endpoint, &request).await;
+    let second = raw_call(&mock, &request).await;
     assert_eq!(first, second, "verbatim cached reply");
     assert_eq!(mock.state().positions.len(), 3, "one new position, not two");
     assert_eq!(mock.executed_writes(), 1);
@@ -970,12 +982,13 @@ async fn a_repeated_request_id_gets_the_cached_reply_and_executes_once() {
     // A different command with the same id still returns the cached reply.
     let other = Request {
         id: "same-id-1".to_owned(),
+        ts: None,
         command: Command::PositionClose(PositionCloseArgs {
             ticket: 1_001_001,
             deviation_points: None,
         }),
     };
-    assert_eq!(raw_call(&mock.endpoint, &other).await, first);
+    assert_eq!(raw_call(&mock, &other).await, first);
     assert_eq!(mock.state().positions.len(), 3);
     assert_eq!(mock.cache_hits(), 2);
 }
@@ -983,27 +996,30 @@ async fn a_repeated_request_id_gets_the_cached_reply_and_executes_once() {
 #[tokio::test]
 async fn rejected_and_refused_replies_are_cached_too() {
     let (mock, _client) = started().await;
+    mock.allow_replays(true);
     let bad = Request {
         id: "bad-id".to_owned(),
+        ts: None,
         command: Command::OrderSend(market("XAUUSD", Side::Buy, 0.005)),
     };
-    let first = raw_call(&mock.endpoint, &bad).await;
+    let first = raw_call(&mock, &bad).await;
     assert!(!first.ok && first.retcode == RETCODE_INVALID_REQUEST);
     // Even after the situation changes, the same id keeps its first answer.
     mock.refuse_writes(true);
-    assert_eq!(raw_call(&mock.endpoint, &bad).await, first);
+    assert_eq!(raw_call(&mock, &bad).await, first);
     mock.refuse_writes(false);
 
     let refused = Request {
         id: "refused-id".to_owned(),
+        ts: None,
         command: Command::OrderSend(market("XAUUSD", Side::Buy, 0.1)),
     };
     mock.refuse_writes(true);
-    let first = raw_call(&mock.endpoint, &refused).await;
+    let first = raw_call(&mock, &refused).await;
     assert_eq!(first.retcode, RETCODE_WRITE_REFUSED);
     mock.refuse_writes(false);
     assert_eq!(
-        raw_call(&mock.endpoint, &refused).await,
+        raw_call(&mock, &refused).await,
         first,
         "not executed after the flag is cleared"
     );
@@ -1013,28 +1029,28 @@ async fn rejected_and_refused_replies_are_cached_too() {
 #[tokio::test]
 async fn the_cache_holds_64_replies() {
     let (mock, _client) = started().await;
-    let first = raw_call(&mock.endpoint, &raw_order_request("first")).await;
+    mock.allow_replays(true);
+    let first = raw_call(&mock, &raw_order_request("first")).await;
     assert!(first.ok);
     // 63 more distinct ids keep "first" cached (64 entries); the 64th evicts it.
     for i in 0..63 {
         let cancel = Request {
             id: format!("filler-{i}"),
+            ts: None,
             command: Command::OrderCancel(OrderCancelArgs { ticket: 99 }),
         };
-        raw_call(&mock.endpoint, &cancel).await;
+        raw_call(&mock, &cancel).await;
     }
-    assert_eq!(
-        raw_call(&mock.endpoint, &raw_order_request("first")).await,
-        first
-    );
+    assert_eq!(raw_call(&mock, &raw_order_request("first")).await, first);
     assert_eq!(mock.executed_writes(), 1);
     let cancel = Request {
         id: "filler-63".to_owned(),
+        ts: None,
         command: Command::OrderCancel(OrderCancelArgs { ticket: 99 }),
     };
-    raw_call(&mock.endpoint, &cancel).await;
+    raw_call(&mock, &cancel).await;
     // Now "first" is gone and the same id executes again.
-    let again = raw_call(&mock.endpoint, &raw_order_request("first")).await;
+    let again = raw_call(&mock, &raw_order_request("first")).await;
     assert!(again.ok);
     assert_ne!(again, first, "a new order ticket");
     assert_eq!(mock.executed_writes(), 2);
@@ -1045,11 +1061,12 @@ async fn reads_are_never_cached() {
     let (mock, _client) = started().await;
     let request = Request {
         id: "read-id".to_owned(),
+        ts: None,
         command: Command::GetPositions { symbol: None },
     };
-    let before = raw_call(&mock.endpoint, &request).await;
+    let before = raw_call(&mock, &request).await;
     mock.update_state(|s| s.positions.clear());
-    let after = raw_call(&mock.endpoint, &request).await;
+    let after = raw_call(&mock, &request).await;
     assert_ne!(before, after);
     assert_eq!(mock.cache_hits(), 0);
 }
@@ -1110,7 +1127,7 @@ async fn assert_mock_answers(request: &str, reply: &str, setup: impl FnOnce(&Moc
     let mock = MockBridge::start().await;
     setup(&mock);
     let request: Request = serde_json::from_value(fixture(request)).expect("request fixture");
-    let got = raw_call(&mock.endpoint, &request).await;
+    let got = raw_call(&mock, &request).await;
     let got = serde_json::to_value(got).expect("reply to value");
     assert_eq!(got, fixture(reply), "{reply}");
 }

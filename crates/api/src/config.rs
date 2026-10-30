@@ -6,6 +6,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
+use jarvis_bridge_client::BridgeKey;
+use jarvis_bridge_client::auth::KEY_ENV;
 use jarvis_gate::Limits;
 use jarvis_llm::ProviderConfig;
 use serde::Deserialize;
@@ -234,6 +236,12 @@ pub struct BridgeSection {
     pub endpoint: String,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// File that holds the shared bridge key (64 hex characters): the `bridge.key` that
+    /// `scripts/install-ea.ps1` creates in the MT5 data folder (`MQL5\Files\JarvisMT`). The
+    /// environment variable `JARVIS_BRIDGE_KEY` (the same 64 characters) overrides it. The
+    /// server does not start without one of them (BR-1, ADR-0016).
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
 }
 
 impl Default for BridgeSection {
@@ -241,9 +249,13 @@ impl Default for BridgeSection {
         Self {
             endpoint: default_endpoint(),
             timeout_ms: default_timeout_ms(),
+            key_file: None,
         }
     }
 }
+
+/// Where the bridge key comes from, for error messages.
+const KEY_HELP: &str = r"The EA only answers a holder of the shared bridge key. Run `pwsh scripts\install-ea.ps1` (it creates MQL5\Files\JarvisMT\bridge.key in your MT5 data folder and prints the path), then set `key_file` under [bridge] in config/jarvis.toml to that path, or put the key's 64 hex characters in JARVIS_BRIDGE_KEY.";
 
 fn default_endpoint() -> String {
     "tcp://127.0.0.1:5555".to_owned()
@@ -353,6 +365,28 @@ impl Config {
                 .iter()
                 .filter_map(|s| resolver.resolve(s))
                 .collect();
+        }
+    }
+
+    /// The shared key for the bridge: `JARVIS_BRIDGE_KEY` (hex) if set and non-empty, otherwise
+    /// the file named by `[bridge] key_file`. Fails, with a message that says what to do, when
+    /// there is no usable key. Never includes the key in an error.
+    pub fn bridge_key(&self) -> anyhow::Result<BridgeKey> {
+        let from_env = std::env::var(KEY_ENV).ok();
+        self.bridge_key_from(from_env.as_deref())
+    }
+
+    /// [`Config::bridge_key`] with the environment value passed in (tests).
+    fn bridge_key_from(&self, from_env: Option<&str>) -> anyhow::Result<BridgeKey> {
+        match (
+            from_env.filter(|v| !v.trim().is_empty()),
+            &self.bridge.key_file,
+        ) {
+            (Some(hex), _) => BridgeKey::from_hex(hex)
+                .map_err(|e| anyhow!("{KEY_ENV} is not a usable bridge key: {e}. {KEY_HELP}")),
+            (None, Some(path)) => BridgeKey::from_file(path)
+                .map_err(|e| anyhow!("[bridge] key_file is not usable: {e}. {KEY_HELP}")),
+            (None, None) => bail!("no bridge key is configured. {KEY_HELP}"),
         }
     }
 
@@ -683,6 +717,82 @@ mod tests {
         let v = c.voice.unwrap().to_voice_config().unwrap().unwrap();
         assert_eq!(v.language, "en");
         assert!((v.max_seconds - 30.0).abs() < f32::EPSILON);
+    }
+
+    // ---- the shared bridge key (BR-1) ------------------------------------------------------
+
+    const KEY_A: &str = "0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100";
+    const KEY_B: &str = "a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0";
+
+    fn config_with_key_file(contents: &str) -> (std::path::PathBuf, Config) {
+        let dir = std::env::temp_dir().join(format!("jarvis-keycfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bridge.key");
+        std::fs::write(&path, contents).unwrap();
+        let toml = minimal(&format!("[bridge]\nkey_file = '{}'", path.display()));
+        (path, Config::from_toml_str(&toml).unwrap())
+    }
+
+    fn remove_key_dir(path: &std::path::Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn the_bridge_key_comes_from_the_file() {
+        let (path, c) = config_with_key_file(&format!("{KEY_A}\n"));
+        assert_eq!(c.bridge.key_file.as_deref(), Some(path.as_path()));
+        assert_eq!(c.bridge_key_from(None).unwrap().expose_hex(), KEY_A);
+        // An empty or blank environment variable counts as unset.
+        assert_eq!(c.bridge_key_from(Some("  ")).unwrap().expose_hex(), KEY_A);
+        remove_key_dir(&path);
+    }
+
+    #[test]
+    fn the_environment_key_wins_over_the_file() {
+        let (_, c) = config_with_key_file(&format!("{KEY_A}\n"));
+        assert_eq!(c.bridge_key_from(Some(KEY_B)).unwrap().expose_hex(), KEY_B);
+        // A broken environment key is an error, not a silent fall back to the file.
+        let err = c.bridge_key_from(Some("not-a-key")).unwrap_err();
+        assert!(format!("{err:#}").contains("JARVIS_BRIDGE_KEY"), "{err:#}");
+    }
+
+    #[test]
+    fn without_a_key_the_server_says_how_to_get_one() {
+        let c = Config::from_toml_str(&minimal("")).unwrap();
+        assert!(c.bridge.key_file.is_none());
+        let err = format!("{:#}", c.bridge_key_from(None).unwrap_err());
+        assert!(err.contains("no bridge key"), "{err}");
+        assert!(err.contains("install-ea.ps1"), "{err}");
+        assert!(
+            err.contains("key_file") && err.contains("JARVIS_BRIDGE_KEY"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_malformed_key_file_is_refused_without_echoing_it() {
+        let c =
+            Config::from_toml_str(&minimal("[bridge]\nkey_file = 'no/such/bridge.key'")).unwrap();
+        let err = format!("{:#}", c.bridge_key_from(None).unwrap_err());
+        assert!(err.contains("cannot read the bridge key file"), "{err}");
+        assert!(err.contains("install-ea.ps1"), "{err}");
+
+        let wrong_chars = "zz".repeat(32);
+        let zeros = "00".repeat(32);
+        for bad in ["", "tooshort", wrong_chars.as_str(), zeros.as_str()] {
+            let (path, c) = config_with_key_file(bad);
+            let err = format!("{:#}", c.bridge_key_from(None).unwrap_err());
+            remove_key_dir(&path);
+            assert!(err.contains("install-ea.ps1"), "{err}");
+            if bad.len() > 8 {
+                assert!(
+                    !err.contains(bad),
+                    "the file content must not appear in the error"
+                );
+            }
+        }
     }
 
     #[test]

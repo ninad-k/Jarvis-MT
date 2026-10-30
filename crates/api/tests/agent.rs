@@ -3,17 +3,15 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::*;
 use jarvis_api::clock::ServerClock;
 use jarvis_api::symbols::SymbolResolver;
 use jarvis_api::tools::ToolRegistry;
 use jarvis_bridge_client::mock::MockBridge;
-use jarvis_bridge_client::{BridgeClient, BridgeConfig};
 use serde_json::{Value, json};
 
-fn registry(endpoint: &str, suffix: &str) -> ToolRegistry {
+fn registry(target: impl BridgeTarget, suffix: &str) -> ToolRegistry {
     let aliases = [
         ("gold", "XAUUSD"),
         ("cold", "XAUUSD"),
@@ -23,11 +21,7 @@ fn registry(endpoint: &str, suffix: &str) -> ToolRegistry {
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
     .collect();
-    let bridge = BridgeClient::new(BridgeConfig {
-        endpoint: endpoint.to_owned(),
-        timeout: Duration::from_millis(300),
-    })
-    .unwrap();
+    let bridge = bridge_client(target, 300);
     ToolRegistry::new(
         bridge,
         Arc::new(SymbolResolver::new(&aliases, suffix)),
@@ -42,7 +36,7 @@ fn parse(content: &str) -> Value {
 #[tokio::test]
 async fn get_price_resolves_aliases() {
     let mock = MockBridge::start().await;
-    let tools = registry(&mock.endpoint, "");
+    let tools = registry(&mock, "");
     for input in ["gold", "Gold", "GOLD", "cold", "xauusd", "  XAUUSD "] {
         let out = tools
             .execute("get_price", &json!({ "symbol": input }))
@@ -66,7 +60,7 @@ async fn get_price_resolves_aliases() {
 #[tokio::test]
 async fn get_price_errors_are_tool_errors() {
     let mock = MockBridge::start().await;
-    let tools = registry(&mock.endpoint, "");
+    let tools = registry(&mock, "");
 
     let unknown = tools
         .execute("get_price", &json!({ "symbol": "goldd" }))
@@ -104,7 +98,7 @@ async fn get_price_errors_are_tool_errors() {
 #[tokio::test]
 async fn unknown_or_write_tool_names_are_rejected() {
     let mock = MockBridge::start().await;
-    let tools = registry(&mock.endpoint, "");
+    let tools = registry(&mock, "");
     for name in [
         "order_send",
         "propose_order",
@@ -136,7 +130,7 @@ async fn bridge_down_becomes_an_error_result() {
 #[tokio::test]
 async fn get_account_has_no_identity_fields() {
     let mock = MockBridge::start().await;
-    let tools = registry(&mock.endpoint, "");
+    let tools = registry(&mock, "");
     let out = tools.execute("get_account", &Value::Null).await;
     assert!(!out.is_error, "{}", out.content);
     let v = parse(&out.content);
@@ -150,7 +144,7 @@ async fn get_account_has_no_identity_fields() {
 #[tokio::test]
 async fn get_positions_filters_by_symbol_and_side() {
     let mock = MockBridge::start().await;
-    let tools = registry(&mock.endpoint, "");
+    let tools = registry(&mock, "");
 
     let all = parse(&tools.execute("get_positions", &json!({})).await.content);
     assert_eq!(all["count"], 2);
@@ -212,7 +206,7 @@ async fn get_positions_filters_by_symbol_and_side() {
 #[tokio::test]
 async fn get_orders_and_history() {
     let mock = MockBridge::start().await;
-    let tools = registry(&mock.endpoint, "");
+    let tools = registry(&mock, "");
 
     let orders = parse(&tools.execute("get_orders", &json!({})).await.content);
     assert_eq!(orders["count"], 1);
@@ -296,7 +290,7 @@ async fn price_of_gold_scenario_end_to_end_through_the_agent() {
             text("Gold is 2391.12 and you hold one long."),
         ],
     );
-    let app = build_app(&mock.endpoint, llm.clone(), Options::default()).await;
+    let app = build_app(&mock, llm.clone(), Options::default()).await;
     let (status, body) = chat(&app, "price of gold and my longs").await;
     assert_eq!(status, 200);
     let calls = body["tool_calls"].as_array().unwrap();

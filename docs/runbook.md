@@ -188,6 +188,47 @@ Change `JARVIS_JWT_SECRET` only when you have to, for example when `.env` may ha
 
 A backup taken before the rotation needs the old `.env` to restore its TOTP secrets. Keep the old `.env` with that backup, and keep it private.
 
+## The bridge key
+
+The EA answers only a program that holds the shared bridge key (finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)).
+Without it, any program on the PC could send `order_send` straight to the EA and skip the gate, the limits, the confirmation and the audit log.
+
+### First setup
+
+1. Run `pwsh scripts\install-ea.ps1` (add `-DataFolder <id>` if you have several terminals). If `MQL5\Files\JarvisMT\bridge.key` does not exist yet, the script creates it:
+   32 random bytes from the system's cryptographic generator, as 64 hex characters. It prints the path and never the key.
+   An existing key is never changed, and a damaged one stops the script.
+2. In `config\jarvis.toml` set `key_file` under `[bridge]` to the printed path (a TOML literal string, single quotes), or put the key in `.env` as `JARVIS_BRIDGE_KEY`.
+3. Compile and attach the EA (see the install script's next steps). The Experts log must say `JarvisBridge 0.3.0 listening on ... (protocol 2, authenticated, ...)`.
+   An EA without a usable key does not start; the log says `cannot open the key file` or `the key file ... is not usable`.
+4. Start the API. `bridge_cli --key-file <path> ping` checks the link on its own.
+
+The key lives in the terminal's file sandbox (`MQL5\Files`), which is inside your Windows profile, so other Windows users cannot read it.
+If the MT5 data folder is elsewhere (a portable install, another drive), make sure only your own account can read the file.
+Do not copy the key into the repository, an issue, a chat or a log. The API and the EA never log it.
+
+### Rotating the bridge key
+
+Rotate the key when it may have been exposed (for example, the file was copied to a shared place) and when someone else had access to the PC.
+
+1. Turn the kill switch on and stop the API (or the service).
+2. Run `pwsh scripts\install-ea.ps1 -RotateKey`. It replaces `bridge.key` with a new random key. If you use `JARVIS_BRIDGE_KEY`, put the new key (read it from the file) in `.env`.
+3. Remove the EA from the chart and attach it again. It reads the key only when it starts. Until then the EA still uses the old key and refuses the API.
+4. Start the API and check `/api/status`. Release the kill switch.
+
+### When requests are refused
+
+A refused request is answered `retcode -4`, "authentication failed". The API shows it as a bridge error that mentions the key and the clock. The Experts log of the EA says why, in one line per 10 seconds at most:
+
+| Experts log | Meaning |
+|---|---|
+| `MAC does not match (wrong key or altered message)` | The API and the EA use different keys (one was rotated, or `key_file` points at another terminal's file), or another program is sending garbage. |
+| `timestamp more than 30 s away from this PC's clock` | The clock of the PC that runs the API differs from the EA's by more than 30 seconds. Both are normally the same PC; check Windows time sync. |
+| `request id already used in the last 60 s` | A message was sent twice. The API never does this; the cause is another program replaying captured traffic. |
+| `not a two-frame message` | The sender does not speak protocol 2: an old API build, or another program. |
+
+If the API itself reports `reply authentication failed`, the reply was not signed with its key: the keys differ, or a program other than the EA answers on port 5555. Check which process owns the port (`Get-NetTCPConnection -LocalPort 5555`).
+
 ## The kill switch
 
 The kill switch blocks every write at once: new orders, closes, changes and cancellations. It is the first thing to
@@ -232,7 +273,7 @@ After MT5 restarts, check that JarvisBridge is still attached. The chart shows t
 an EA is running. The Experts tab should show the listening line:
 
 ```text
-JarvisBridge 0.2.0 listening on 127.0.0.1:5555 (libzmq 4.2.1, writes only on request, real accounts refused)
+JarvisBridge 0.3.0 listening on 127.0.0.1:5555 (protocol 2, authenticated, libzmq 4.3.5, writes only on request, real accounts refused)
 ```
 
 With `InpAllowReal` set to `true`, the last part reads `real accounts ALLOWED (InpAllowReal=true)`.
@@ -306,6 +347,9 @@ to Jarvis, so treat it like the secrets it is. Test a restore on another folder 
 | `unknown symbol: XAUUS` or `unknown symbol` in the watchlist errors | The broker's name differs (`XAUUSD.m`, `XAUUSD_`, `GOLD`, `US100`, `NAS100`) | Find the exact name in Market Watch (Ctrl+M). Set `[symbols] suffix` (for example `".m"`), or an alias under `[symbols.aliases]`. Restart. |
 | `writes refused: Algo Trading is disabled in the terminal` or `... trading is not allowed for this EA` | The Algo Trading button is off, or the EA's Allow Algo Trading is not ticked | Turn on the Algo Trading button and tick Allow Algo Trading on the EA's Common tab. |
 | `writes refused on a real account (InpAllowReal is false)` | The MT5 account is real and the EA input is off | Expected while on a real account. Set `InpAllowReal` only if you have decided to trade real money. |
+| `cannot open the key file` / `the key file ... is not usable` in the EA log; `refusing to start: ... no bridge key` from the API | The bridge key is missing or damaged | Run `pwsh scripts\install-ea.ps1` and set `[bridge] key_file`. See [The bridge key](#the-bridge-key). |
+| `authentication failed` (retcode -4) or `reply authentication failed` | The API and the EA use different keys, the clock is off by more than 30 s, or another program uses the port | See [When requests are refused](#when-requests-are-refused). |
+| `the EA speaks protocol version 1 but this client speaks 2` | The EA is the old 0.2.0 build | Run `scripts\install-ea.ps1`, `scripts\compile-ea.ps1`, and re-attach the EA. |
 | `bind(...) failed` in the EA log | Port 5555 is used by another process | Stop `mock_server` or the other EA. |
 | `binding 127.0.0.1:8787 (is another jarvis-api running?)` | Port 8787 is used | Stop the other process, or pick another loopback port. |
 | The first chat reply takes about 100 seconds | Ollama is loading `qwen3.5:9b` into memory | Wait. Later replies are faster. Keep Ollama running. |
@@ -323,7 +367,7 @@ to Jarvis, so treat it like the secrets it is. Test a restore on another folder 
 | `429 rate_limited` on confirm | More than 10 confirmations per minute in one session | Wait, then confirm again. Each preview still expires after 15 seconds. |
 | `403 origin not allowed` on the live-update connection, behind a reverse proxy | The proxy changed the `Host` header, so the `Origin` does not match | Make the proxy pass `Host $host` (or the public host), and keep the `Upgrade` headers. See the [VPS guide](vps.md). |
 | `config file not found at config/jarvis.toml` | Config not copied, or started from another folder | Copy `config\jarvis.example.toml` to `config\jarvis.toml`, start from the repository root, or set `JARVIS_CONFIG`. |
-| `install-ea.ps1`: `SHA-256 mismatch` or `has no SHA-256 entry` | A DLL in `mql5\Libraries` changed, or the table in `mql5\THIRD_PARTY.md` does not match | Restore the DLL from Git or the upstream release. Do not edit a hash to match a file you do not recognise. |
+| `install-ea.ps1`: `SHA-256 mismatch` or `has no SHA-256 entry` | A DLL in `mql5\Libraries` changed, or the table in `mql5\THIRD_PARTY.md` does not match | Restore the DLL from Git, or rebuild it with `scripts/build-libzmq.ps1`. Do not edit a hash to match a file you do not recognise. |
 | `install-ea.ps1`: `Not an MT5 data folder (no MQL5 subfolder)` | Wrong `-DataFolder`, or the terminal was never run | Open the terminal once, then check the folder under File > Open Data Folder. |
 | `compile-ea.ps1` fails with compile errors or with warnings in our code | An error in the EA source | Read the printed MetaEditor lines and fix them. `-AllowWarnings` is for looking at a build, not for shipping. |
 | Path errors, or tools that cannot start in a long folder | Windows limits paths to 260 characters without the long-path setting | Keep the repository near the drive root. |
@@ -345,24 +389,31 @@ skip the confirmation gate, the limits and the kill switch. Use them only on a d
 in place of the chat flow.
 
 ```powershell
-cargo run -p jarvis-bridge-client --example bridge_cli -- ping
-cargo run -p jarvis-bridge-client --example bridge_cli -- price XAUUSD
-cargo run -p jarvis-bridge-client --example bridge_cli -- account
+cargo run -p jarvis-bridge-client --example bridge_cli -- --key-file <path to bridge.key> ping
+cargo run -p jarvis-bridge-client --example bridge_cli -- --key-file <path to bridge.key> price XAUUSD
+cargo run -p jarvis-bridge-client --example bridge_cli -- --key-file <path to bridge.key> account
 ```
+
+`bridge_cli` needs the bridge key like the API does (see [The bridge key](#the-bridge-key)): pass `--key-file`, or set `JARVIS_BRIDGE_KEY` in the environment.
+The other `bridge_cli` examples in this runbook leave the option out for brevity; add it.
 
 The `symbol` argument takes the broker's name, not an alias. The `ping` reply reports `trade_mode`. Check it says `demo` before any write.
 
 ## Updating the EA's DLLs
 
-The DLLs in `mql5\Libraries` are the x64 builds of libzmq and libsodium from mql-zmq. `scripts/install-ea.ps1` refuses to install a DLL whose
-hash does not match the table in `mql5\THIRD_PARTY.md`, so the table and the files change together. [SPEC.md](../SPEC.md) requires approval before
-new binaries are committed.
+The only DLL is `mql5\Libraries\libzmq.dll`, libzmq 4.3.5 built from the official source (no CURVE, no libsodium, static C runtime, so it needs no
+Visual C++ runtime). `scripts/install-ea.ps1` refuses to install a DLL whose hash does not match the table in `mql5\THIRD_PARTY.md`, so the table and the file
+change together. [SPEC.md](../SPEC.md) requires approval before new binaries are committed.
 
-1. Replace the files in `mql5\Libraries\` with the new x64 builds.
-2. Compute the new hashes: `Get-FileHash mql5\Libraries\*.dll -Algorithm SHA256`.
-3. Update the table in `mql5\THIRD_PARTY.md`: version and SHA-256 for each DLL, keeping the format. The install script reads it.
+Needs the Visual Studio Build Tools (workload "Desktop development with C++"), CMake and an internet connection for the first run.
+
+1. To upgrade libzmq, change `$Version`, `$TarballUrl` and `$TarballSha256` at the top of `scripts\build-libzmq.ps1`.
+2. Build: `powershell -ExecutionPolicy Bypass -File scripts\build-libzmq.ps1`. It downloads the tarball, checks its SHA-256, builds, checks that the DLL imports only
+   Windows system DLLs and exports every function the mql-zmq headers use, copies it to `mql5\Libraries\libzmq.dll` and prints its SHA-256. Add `-RunTests` to run
+   libzmq's own tests too (stop MT5 first; some tests use port 5555). The same toolchain gives the same hash, so you can rebuild to check the committed file.
+3. Update the table and the build notes in `mql5\THIRD_PARTY.md` (version, tarball hash, compiler, DLL SHA-256, keeping the table format; the install script reads it).
 4. If the mql-zmq headers are re-vendored, re-apply the local patch listed in `THIRD_PARTY.md`.
-5. Reinstall, recompile and check:
+5. Close the terminal (or remove the EA from its chart) because MT5 keeps the old DLL locked, then reinstall, recompile and check:
    ```powershell
    pwsh scripts/install-ea.ps1 -DataFolder <32-character-id>
    pwsh scripts/compile-ea.ps1 -DataFolder <32-character-id>

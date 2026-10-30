@@ -67,7 +67,7 @@ pub fn start(app: &TestApp) -> Running {
 async fn auth_app() -> (TestApp, TestUser, MockBridge) {
     let mock = MockBridge::start().await;
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             auth: true,
@@ -254,7 +254,7 @@ async fn site_app(dir: &std::path::Path, auth: bool) -> (TestApp, MockBridge) {
         dir.to_string_lossy().replace('\\', "/")
     );
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             server: &server,
@@ -445,12 +445,7 @@ async fn the_spa_shell_is_public_but_the_api_behind_it_is_not() {
 #[tokio::test]
 async fn without_a_static_dir_non_api_paths_are_a_json_404() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, body) = request(&app.router, "GET", "/", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
@@ -459,12 +454,7 @@ async fn without_a_static_dir_non_api_paths_are_a_json_404() {
 #[tokio::test]
 async fn orders_are_listed_for_the_hud() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, body) = request(&app.router, "GET", "/api/orders", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["orders"].is_array(), "{body}");

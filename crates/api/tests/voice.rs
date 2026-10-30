@@ -90,7 +90,7 @@ fn wav(seconds: f32) -> Vec<u8> {
 async fn voice_app(voice: Option<Voice>, auth: bool) -> (TestApp, MockBridge) {
     let mock = MockBridge::start().await;
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             voice,

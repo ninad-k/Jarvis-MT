@@ -22,6 +22,13 @@ bind = "127.0.0.1:8787"
 # The EA binds here. Must be loopback.
 endpoint = "tcp://127.0.0.1:5555"
 timeout_ms = 3000
+# The shared secret between this server and the EA (security finding BR-1). The EA only answers
+# a request signed with it, and the server only believes a signed reply. `pwsh scripts\install-ea.ps1`
+# creates the key (32 random bytes as 64 hex characters) in the terminal's file sandbox and prints
+# this path. Use a TOML literal string (single quotes) so backslashes stay as they are. The
+# environment variable JARVIS_BRIDGE_KEY (the key's hex, see .env.example) overrides this setting.
+# The server does not start without a valid key. Never commit it.
+key_file = 'C:\Users\<you>\AppData\Roaming\MetaQuotes\Terminal\<terminal id>\MQL5\Files\JarvisMT\bridge.key'
 
 [database]
 url = "sqlite://data/jarvis.db"

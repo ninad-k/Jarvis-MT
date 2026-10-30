@@ -12,13 +12,13 @@ The Rust backend must talk to the MT5 terminal, which runs the `JarvisBridge` Ex
 - The EA is the ZeroMQ **REP** side and binds `tcp://127.0.0.1:5555`. The Rust backend is the **REQ** side and connects to it. The EA refuses any endpoint that is not loopback.
 - The EA polls its socket with `ZMQ_DONTWAIT` from `OnTimer`, every 20 ms, and handles at most 10 requests per tick. It never blocks.
 - The Rust client sends every call through one actor task that keeps one request in flight. REQ/REP is lock-step, so the client applies a timeout (default 3 seconds). After a timeout, a transport error or a malformed reply, it drops the socket and creates a new one. Every reply's `id` is checked against its request.
-- Messages are one JSON frame each, in the `{"id","cmd","args"}` envelope described in [docs/protocol.md](../protocol.md).
+- Messages are JSON in the `{"id","ts","cmd","args"}` envelope described in [docs/protocol.md](../protocol.md). Originally each message was one frame; since protocol 2 each is a signed two-frame message (see ADR-0016).
 
 The EA is vendored through the mql-zmq binding (see ADR-0004).
 
 ## Consequences
 
-- The bridge cannot be reached from the network, so the network is not an access path. Local processes can still reach it, which is why the EA validates every field.
+- The bridge cannot be reached from the network, so the network is not an access path. Local processes could reach it in protocol 1; since protocol 2 only a holder of the shared key can talk to it (ADR-0016). The EA still validates every field.
 - Polling keeps the EA responsive, but a request waits up to one timer tick (about 20 ms) before it is read.
 - A lost reply does not wedge the link, because the client recreates the socket. A write that was sent but not answered has an unknown outcome (see ADR-0013).
 - Only the EA can speak this protocol. Tests use the mock bridge in `crates/bridge-client`, so most of the code can be tested without MT5.

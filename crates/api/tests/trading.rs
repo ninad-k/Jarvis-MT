@@ -55,7 +55,7 @@ async fn chat_preview(
     args: Value,
     opts: Options<'_>,
 ) -> (TestApp, Value) {
-    let app = build_app(&mock.endpoint, llm_propose(tool, args), opts).await;
+    let app = build_app(mock, llm_propose(tool, args), opts).await;
     let (status, body) = chat(&app, message).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     (app, body)
@@ -140,11 +140,7 @@ impl WriteSink for FaultySink {
 }
 
 fn bridge_for(mock: &MockBridge) -> BridgeClient {
-    BridgeClient::new(jarvis_bridge_client::BridgeConfig {
-        endpoint: mock.endpoint.clone(),
-        timeout: std::time::Duration::from_millis(300),
-    })
-    .unwrap()
+    bridge_client(mock, 300)
 }
 
 // ------------------------------------------------------------ rule 1 (tools)
@@ -152,12 +148,7 @@ fn bridge_for(mock: &MockBridge) -> BridgeClient {
 #[tokio::test]
 async fn tool_specs_are_exactly_five_read_and_four_propose() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let specs = app.state.agent().tools().specs();
     let mut names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     names.sort_unstable();
@@ -200,12 +191,7 @@ async fn tool_specs_are_exactly_five_read_and_four_propose() {
 async fn executing_every_tool_never_sends_a_write() {
     let mock = MockBridge::start().await;
     let before = mock.state();
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let tools = app.state.agent().tools();
     let ctx = ToolContext {
         session_id: uuid::Uuid::new_v4(),
@@ -282,12 +268,7 @@ async fn free_text_comments_from_mt5_never_reach_the_model() {
     state.deals[0].comment = "[sl 2300.00]".to_owned();
     assert!(state.positions.len() > 1 && !state.orders.is_empty() && !state.deals.is_empty());
     let mock = MockBridge::start_with(state).await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let tools = app.state.agent().tools();
     let ctx = ToolContext {
         session_id: uuid::Uuid::new_v4(),
@@ -647,12 +628,7 @@ async fn batch_close_needs_a_second_confirmation_then_reports_each_ticket() {
 #[tokio::test]
 async fn cancelling_either_batch_token_cancels_both() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let preview = ui_close_all(&app).await;
     let first = token_of(&preview);
     let (_, step) = post(&app, &format!("/api/confirm/{first}"), None).await;
@@ -675,7 +651,7 @@ async fn expired_token_is_410_and_nothing_is_sent() {
     let mock = MockBridge::start().await;
     let clock = ManualClock::starting_now();
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         clock_options(&clock),
     )
@@ -697,12 +673,7 @@ async fn expired_token_is_410_and_nothing_is_sent() {
 #[tokio::test]
 async fn replayed_token_is_409_and_unknown_token_is_404() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, preview) = post(&app, "/api/positions/1001001/close", None).await;
     assert_eq!(status, StatusCode::OK, "{preview}");
     let token = token_of(&preview);
@@ -763,7 +734,7 @@ async fn only_one_live_preview_per_session() {
             text("second preview"),
         ],
     );
-    let app = build_app(&mock.endpoint, llm, Options::default()).await;
+    let app = build_app(&mock, llm, Options::default()).await;
     let (_, one) = chat(&app, "buy 0.1 gold").await;
     let sid = one["session_id"].as_str().unwrap().to_owned();
     let (status, two) = request(
@@ -852,12 +823,7 @@ async fn kill_switch_between_preview_and_confirm_blocks_with_423() {
 async fn kill_switch_survives_a_restart_and_needs_a_release() {
     // A crash or a service restart must not turn trading back on (SPEC rule 6).
     let mock = MockBridge::start().await;
-    let first = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let first = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, ks) = post(
         &first,
         "/api/killswitch",
@@ -868,7 +834,7 @@ async fn kill_switch_survives_a_restart_and_needs_a_release() {
 
     // "Restart": a new process over the same database starts engaged...
     let second = build_app(
-        &mock.endpoint,
+        &mock,
         llm_propose("propose_close", json!({ "all": true })),
         Options {
             audit: Some(first.audit.clone()),
@@ -915,7 +881,7 @@ async fn kill_switch_survives_a_restart_and_needs_a_release() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let third = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             audit: Some(first.audit.clone()),
@@ -930,12 +896,7 @@ async fn kill_switch_survives_a_restart_and_needs_a_release() {
 #[tokio::test]
 async fn an_unreadable_kill_switch_state_keeps_trading_off() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     // Simulate a damaged database: the table the state lives in is gone.
     sqlx::query("DROP TABLE kill_switch")
         .execute(app.audit.pool())
@@ -953,7 +914,7 @@ async fn kill_switch_is_rechecked_before_every_write_of_a_batch() {
     let mock = MockBridge::start().await;
     let sink = FaultySink::new(bridge_for(&mock), None, Some(1));
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             sink: Some(sink.clone()),
@@ -1023,12 +984,7 @@ impl ReleaseGuard for DenyRelease {
 #[tokio::test]
 async fn release_goes_through_the_release_guard() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     app.state.set_release_guard(Arc::new(DenyRelease));
     post(&app, "/api/killswitch", Some(json!({ "engaged": true }))).await;
 
@@ -1197,12 +1153,7 @@ async fn missing_limits_section_fails_closed() {
 #[tokio::test]
 async fn gate_rejection_from_the_ui_is_422() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, body) = post(&app, "/api/orders/424242/cancel", None).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["error"]["code"], "gate_rejected");
@@ -1301,7 +1252,7 @@ async fn confirm_wording_in_chat_does_not_create_a_new_proposal() {
             text("Press the Confirm button."),
         ],
     );
-    let app = build_app(&mock.endpoint, llm, Options::default()).await;
+    let app = build_app(&mock, llm, Options::default()).await;
     let (_, one) = chat(&app, "buy 0.1 gold").await;
     let sid = one["session_id"].as_str().unwrap().to_owned();
     let (status, two) = request(
@@ -1330,12 +1281,7 @@ async fn confirm_wording_in_chat_does_not_create_a_new_proposal() {
 #[tokio::test]
 async fn ui_close_one_partial_close_and_order_cancel() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
 
     // Partial close of the gold position.
     let (status, preview) = post(
@@ -1396,12 +1342,7 @@ async fn ui_close_one_partial_close_and_order_cancel() {
 #[tokio::test]
 async fn ui_close_validates_bodies() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, body) = post(
         &app,
         "/api/positions/close",
@@ -1421,7 +1362,7 @@ async fn voice_previews_start_their_window_after_readback() {
     let mock = MockBridge::start().await;
     let clock = ManualClock::starting_now();
     let llm = llm_propose("propose_order", buy_gold());
-    let app = build_app(&mock.endpoint, llm, clock_options(&clock)).await;
+    let app = build_app(&mock, llm, clock_options(&clock)).await;
     let issued_at = clock.now_ms();
     let (status, body) = request(
         &app.router,
@@ -1449,7 +1390,7 @@ async fn voice_previews_start_their_window_after_readback() {
 
     // Read-back finishing late is capped at 30 s from issue.
     let app2 = build_app(
-        &mock.endpoint,
+        &mock,
         llm_propose("propose_order", buy_gold()),
         clock_options(&clock),
     )
@@ -1481,7 +1422,7 @@ async fn confirm_is_rate_limited_to_ten_per_minute() {
     let mock = MockBridge::start().await;
     let clock = ManualClock::starting_now();
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         clock_options(&clock),
     )
@@ -1525,12 +1466,7 @@ async fn real_account_blocks_ui_proposals_and_demo_config_blocks_confirm() {
     state.ping.trade_mode = TradeMode::Real;
     state.account.trade_mode = TradeMode::Real;
     let real = MockBridge::start_with(state).await;
-    let app = build_app(
-        &real.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&real, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, body) = post(&app, "/api/positions/close", Some(json!({ "all": true }))).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"]["code"], "mode_mismatch");
@@ -1538,12 +1474,7 @@ async fn real_account_blocks_ui_proposals_and_demo_config_blocks_confirm() {
     // A preview made on a demo account, then the account turns out to be real: the cached
     // flag blocks the confirm before the token is even looked at.
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let preview = ui_close_all(&app).await;
     let token = token_of(&preview);
     app.state.observe_trade_mode(TradeMode::Real);
@@ -1553,12 +1484,7 @@ async fn real_account_blocks_ui_proposals_and_demo_config_blocks_confirm() {
     assert_eq!(mock.executed_writes(), 0);
 
     // Same, but only discovered by the reachability check right before the writes.
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (_, preview) = post(&app, "/api/positions/1001001/close", None).await;
     mock.update_state(|s| {
         s.ping.trade_mode = TradeMode::Real;
@@ -1578,7 +1504,7 @@ async fn live_mode_on_a_real_account_is_allowed() {
     state.allow_real = true;
     let mock = MockBridge::start_with(state).await;
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             mode: "live",
@@ -1604,7 +1530,7 @@ async fn timeout_after_send_is_outcome_unknown_and_the_batch_stops() {
     let mock = MockBridge::start().await;
     let sink = FaultySink::new(bridge_for(&mock), Some(2), None);
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             sink: Some(sink.clone()),
@@ -1646,7 +1572,7 @@ async fn single_write_timeout_is_never_retried() {
     let mock = MockBridge::start().await;
     let sink = FaultySink::new(bridge_for(&mock), Some(1), None);
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         Options {
             sink: Some(sink.clone()),
@@ -1695,12 +1621,7 @@ async fn mt5_rejection_of_a_single_write_is_502_trade_failed_with_the_retcode() 
 #[tokio::test]
 async fn one_failed_write_in_a_batch_does_not_stop_the_rest() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let preview = ui_close_all(&app).await;
     let (_, step) = post(&app, &format!("/api/confirm/{}", token_of(&preview)), None).await;
     mock.fail_next_write(10018);
@@ -1723,12 +1644,7 @@ async fn one_failed_write_in_a_batch_does_not_stop_the_rest() {
 #[tokio::test]
 async fn bridge_down_at_confirm_is_503_and_nothing_is_sent() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let preview = ui_close_all(&app).await;
     let (_, step) = post(&app, &format!("/api/confirm/{}", token_of(&preview)), None).await;
     mock.stop().await;
@@ -1747,12 +1663,7 @@ async fn bridge_down_at_confirm_is_503_and_nothing_is_sent() {
 #[tokio::test]
 async fn status_reports_kill_switch_limits_auth_and_voice() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let (status, body) = get(&app, "/api/status").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -1822,7 +1733,7 @@ async fn purge_announces_expired_previews_once() {
     let mock = MockBridge::start().await;
     let clock = ManualClock::starting_now();
     let app = build_app(
-        &mock.endpoint,
+        &mock,
         ScriptedLlm::new("fake", vec![]),
         clock_options(&clock),
     )
@@ -1846,12 +1757,7 @@ async fn purge_announces_expired_previews_once() {
 #[tokio::test]
 async fn kill_switch_event_is_published() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let mut events = app.state.events().subscribe();
     post(
         &app,
@@ -1873,12 +1779,7 @@ async fn kill_switch_event_is_published() {
 #[tokio::test]
 async fn propose_arguments_are_validated_before_any_bridge_call() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let tools = app.state.agent().tools();
     let ctx = ToolContext {
         session_id: uuid::Uuid::new_v4(),
@@ -1937,12 +1838,7 @@ async fn propose_arguments_are_validated_before_any_bridge_call() {
 #[tokio::test]
 async fn small_models_may_send_numbers_as_strings() {
     let mock = MockBridge::start().await;
-    let app = build_app(
-        &mock.endpoint,
-        ScriptedLlm::new("fake", vec![]),
-        Options::default(),
-    )
-    .await;
+    let app = build_app(&mock, ScriptedLlm::new("fake", vec![]), Options::default()).await;
     let tools = app.state.agent().tools();
     let ctx = ToolContext {
         session_id: uuid::Uuid::new_v4(),

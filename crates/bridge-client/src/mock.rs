@@ -1,12 +1,17 @@
 //! In-process ZeroMQ REP server speaking the bridge protocol with canned data.
 //! Used by unit tests here and in `jarvis-api`, and for offline development.
 //!
+//! It enforces the same authentication as the EA (protocol 2, ADR-0016): a request must be a
+//! two-frame message with a valid HMAC, a `ts` within 30 s and an `id` not seen in the last
+//! 60 s, otherwise it is answered with a signed `-4` "authentication failed" and nothing runs.
+//! Every reply is signed. The key is random per mock unless one is given.
+//!
 //! The server is a spawned task around `zeromq::RepSocket`. That socket does not enforce
 //! strict REP lock-step (a request that is never answered simply leaves the socket ready for
 //! the next `recv`), so [`MockBridge::drop_next`] is just "receive and do not reply". A client
 //! that times out and reconnects is served normally afterwards; its old connection ends and
 //! the mock ignores the resulting disconnect.
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,14 +19,17 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use zeromq::{RepSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+use zeromq::{RepSocket, Socket, SocketRecv, SocketSend};
 
+use crate::auth::{self, AUTH_ERROR_TEXT, BridgeKey, ReplayGuard};
+use crate::client::BridgeConfig;
 use crate::error::BridgeError;
 use crate::mock_trade::Engine;
 use crate::protocol::{
     Account, Command, Deal, DealEntry, DealType, HISTORY_LIMIT_DEFAULT, HISTORY_LIMIT_MAX, History,
     HistoryQuery, Order, OrderType, Orders, PingInfo, Position, Positions, Price,
-    RETCODE_INVALID_REQUEST, RETCODE_UNKNOWN_COMMAND, Reply, Request, Side, SymbolInfo, TradeMode,
+    RETCODE_AUTH_FAILED, RETCODE_INVALID_REQUEST, RETCODE_UNKNOWN_COMMAND, Reply, Request, Side,
+    SymbolInfo, TradeMode,
 };
 
 /// MT5 `ERR_MARKET_UNKNOWN_SYMBOL`.
@@ -347,6 +355,13 @@ fn default_symbols() -> Vec<SymbolInfo> {
     ]
 }
 
+fn random_key() -> BridgeKey {
+    match BridgeKey::generate() {
+        Ok(key) => key,
+        Err(e) => panic!("MockBridge could not create a random key: {e}"),
+    }
+}
+
 pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -358,13 +373,17 @@ pub(crate) fn unix_now() -> i64 {
 struct Inner {
     state: MockState,
     engine: Engine,
+    guard: ReplayGuard,
 }
 
 /// Counters and state shared between the handle and the server task.
 #[derive(Debug)]
 struct Shared {
+    key: BridgeKey,
     drop_next: AtomicUsize,
     requests: AtomicUsize,
+    auth_failures: AtomicUsize,
+    allow_replays: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -385,37 +404,59 @@ pub struct MockBridge {
 }
 
 impl MockBridge {
-    /// Start on a free loopback port with `MockState::default()`.
+    /// Start on a free loopback port with `MockState::default()` and a random key.
     pub async fn start() -> Self {
         Self::start_with(MockState::default()).await
     }
 
-    /// Start with custom state.
+    /// Start with custom state and a random key.
     ///
     /// # Panics
     /// If no loopback port can be bound.
     pub async fn start_with(state: MockState) -> Self {
-        match Self::start_at("tcp://127.0.0.1:0", state).await {
+        Self::start_with_key(state, random_key()).await
+    }
+
+    /// Start with custom state and a given key.
+    ///
+    /// # Panics
+    /// If no loopback port can be bound.
+    pub async fn start_with_key(state: MockState, key: BridgeKey) -> Self {
+        match Self::start_at_with_key("tcp://127.0.0.1:0", state, key).await {
             Ok(mock) => mock,
             Err(e) => panic!("MockBridge could not bind a loopback port: {e}"),
         }
     }
 
     /// Start on a specific endpoint (e.g. `tcp://127.0.0.1:5555`, or port `0` for any free
-    /// port). Lets tests create a client first and bring the "EA" up later, or restart it
-    /// on the same port.
+    /// port) with a random key. Use [`MockBridge::start_at_with_key`] to restart "the EA" on
+    /// the same port with the key its clients already have.
     pub async fn start_at(endpoint: &str, state: MockState) -> Result<Self, BridgeError> {
+        Self::start_at_with_key(endpoint, state, random_key()).await
+    }
+
+    /// Start on a specific endpoint with a given key. Lets tests create a client first and
+    /// bring the "EA" up later, or restart it on the same port.
+    pub async fn start_at_with_key(
+        endpoint: &str,
+        state: MockState,
+        key: BridgeKey,
+    ) -> Result<Self, BridgeError> {
         let mut socket = RepSocket::new();
         let bound = socket
             .bind(endpoint)
             .await
             .map_err(|e| BridgeError::Transport(format!("mock bind failed: {e}")))?;
         let shared = Arc::new(Shared {
+            key,
             drop_next: AtomicUsize::new(state.drop_next),
             requests: AtomicUsize::new(0),
+            auth_failures: AtomicUsize::new(0),
+            allow_replays: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 state,
                 engine: Engine::default(),
+                guard: ReplayGuard::new(),
             }),
         });
         let (stop, stopped) = oneshot::channel();
@@ -426,6 +467,28 @@ impl MockBridge {
             stop: Some(stop),
             task: Some(task),
         })
+    }
+
+    /// The shared key of this mock.
+    pub fn key(&self) -> BridgeKey {
+        self.shared.key.clone()
+    }
+
+    /// A client configuration for this mock: its endpoint, this timeout and its key.
+    pub fn config(&self, timeout: Duration) -> BridgeConfig {
+        BridgeConfig::new(self.endpoint.clone(), timeout, self.key())
+    }
+
+    /// Requests refused by the authentication step (answered with a signed `-4`).
+    pub fn auth_failures(&self) -> usize {
+        self.shared.auth_failures.load(Ordering::SeqCst)
+    }
+
+    /// Test hook: stop refusing repeated request ids (the `ts` window still applies). Only for
+    /// exercising the write reply cache, which is the second line of defence behind the replay
+    /// guard and unreachable with it on.
+    pub fn allow_replays(&self, allow: bool) {
+        self.shared.allow_replays.store(allow, Ordering::SeqCst);
     }
 
     /// Make the mock swallow the next `n` requests without replying.
@@ -508,20 +571,35 @@ async fn serve(mut socket: RepSocket, shared: Arc<Shared>, mut stopped: oneshot:
         if swallow {
             continue;
         }
-        let payload = request
-            .get(0)
-            .map(|frame| frame.as_ref())
-            .unwrap_or_default();
-        let reply = {
-            let mut inner = shared.lock();
-            let Inner { state, engine } = &mut *inner;
-            handle(state, engine, payload)
+        let mut reply = match auth::open(&shared.key, &request) {
+            // Not authentic: say so without echoing anything the peer sent, so the signed
+            // reply is useless as a signing oracle.
+            Err(failure) => {
+                tracing::debug!(%failure, "mock bridge: request refused");
+                shared.auth_failures.fetch_add(1, Ordering::SeqCst);
+                err_reply("", RETCODE_AUTH_FAILED, AUTH_ERROR_TEXT)
+            }
+            Ok(payload) => {
+                let mut inner = shared.lock();
+                let Inner {
+                    state,
+                    engine,
+                    guard,
+                } = &mut *inner;
+                let replays = shared.allow_replays.load(Ordering::SeqCst);
+                let reply = handle(state, engine, guard, replays, payload);
+                if reply.retcode == RETCODE_AUTH_FAILED {
+                    shared.auth_failures.fetch_add(1, Ordering::SeqCst);
+                }
+                reply
+            }
         };
-        let reply = match serde_json::to_vec(&reply) {
+        reply.ts = Some(auth::now_ms());
+        let bytes = match serde_json::to_vec(&reply) {
             Ok(bytes) => bytes,
             Err(_) => continue,
         };
-        if let Err(e) = socket.send(ZmqMessage::from(reply)).await {
+        if let Err(e) = socket.send(auth::seal(&shared.key, bytes)).await {
             tracing::debug!(error = %e, "mock bridge: client went away before the reply");
         }
     }
@@ -536,6 +614,7 @@ pub(crate) fn ok_reply<T: Serialize>(id: &str, data: &T) -> Reply {
             data: Some(value),
             error: None,
             retcode: 0,
+            ts: None,
         },
         Err(e) => err_reply(id, RETCODE_INVALID_REQUEST, &format!("encode failed: {e}")),
     }
@@ -548,6 +627,7 @@ pub(crate) fn err_reply(id: &str, retcode: i64, message: &str) -> Reply {
         data: None,
         error: Some(message.to_owned()),
         retcode,
+        ts: None,
     }
 }
 
@@ -560,7 +640,13 @@ fn unknown_symbol(id: &str, symbol: &str) -> Reply {
 }
 
 /// Decode one request and produce its reply. Never panics on bad input.
-fn handle(state: &mut MockState, engine: &mut Engine, payload: &[u8]) -> Reply {
+fn handle(
+    state: &mut MockState,
+    engine: &mut Engine,
+    guard: &mut ReplayGuard,
+    allow_replays: bool,
+    payload: &[u8],
+) -> Reply {
     let value: Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
         Err(e) => {
@@ -574,6 +660,17 @@ fn handle(state: &mut MockState, engine: &mut Engine, payload: &[u8]) -> Reply {
     let Some(id) = value.get("id").and_then(Value::as_str) else {
         return err_reply("", RETCODE_INVALID_REQUEST, "malformed request: missing id");
     };
+    // The MAC is valid, so the sender holds the key; now freshness and replay, before anything
+    // is interpreted or executed. The id is echoed because this peer is authentic.
+    let fresh = match value.get("ts").and_then(Value::as_i64) {
+        Some(ts) if allow_replays => ReplayGuard::new().check(id, ts),
+        Some(ts) => guard.check(id, ts),
+        None => Err(auth::AuthFailure::Envelope),
+    };
+    if let Err(failure) = fresh {
+        tracing::debug!(%failure, "mock bridge: request refused");
+        return err_reply(id, RETCODE_AUTH_FAILED, AUTH_ERROR_TEXT);
+    }
     let Some(cmd) = value.get("cmd").and_then(Value::as_str) else {
         return err_reply(
             id,
