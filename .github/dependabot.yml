@@ -59,6 +59,11 @@ updates:
     groups:
       web-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # Type definitions track the supported Node line (engines >=22, CI on 24),
+      # not the newest Node release.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
 
   # Desktop front-end tooling (Tauri CLI and API packages)
   - package-ecosystem: npm
