@@ -71,3 +71,7 @@ apps/desktop/.svelte-kit/
 .idea/
 Thumbs.db
 .DS_Store
+
+# local state and run logs (scripts/run.ps1, remote-start.ps1, stop.ps1)
+/.local/
+/logs/

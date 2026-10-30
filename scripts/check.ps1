@@ -7,7 +7,8 @@
   Mirrors the CI workflows (.github/workflows): Rust (fmt, clippy, tests, optional whisper
   feature, desktop shell), web (check, unit tests, build, end-to-end tests) and security
   (cargo deny, cargo audit, pnpm audit, gitleaks on the working tree and the git history,
-  semgrep). Exits with a non-zero code when any step fails. A step that cannot run because a
+  semgrep), and a syntax check of every script under scripts\ in Windows PowerShell 5.1.
+  Exits with a non-zero code when any step fails. A step that cannot run because a
   tool is missing counts as a failure, except for the whisper build, which is skipped (with
   the reason) when CMake or LLVM is not installed.
 
@@ -151,6 +152,31 @@ if ($semgrep) {
 
 $hasDesktop = Test-Path -LiteralPath (Join-Path $Root 'apps\desktop\src-tauri\Cargo.toml')
 $hasWebLock = Test-Path -LiteralPath (Join-Path $Root 'web\pnpm-lock.yaml')
+
+# --- Scripts -----------------------------------------------------------------------------------
+
+# Every script under scripts\ must parse in Windows PowerShell 5.1 (the shell the operations scripts
+# target; pwsh would accept things 5.1 rejects) and stay ASCII (5.1 reads a BOM-less file as ANSI, so a
+# typographic dash would silently change meaning).
+Invoke-Step 'scripts: PowerShell 5.1 syntax' {
+    $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $ps51)) { Skip-Step 'Windows PowerShell 5.1 not found' }
+    $code = @'
+$ProgressPreference = 'SilentlyContinue'
+$bad = 0
+foreach ($f in Get-ChildItem -LiteralPath 'scripts' -Filter '*.ps1' -Recurse) {
+    $tokens = $null; $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
+    foreach ($e in $errors) { $bad++; '{0}:{1}: {2}' -f $f.FullName, $e.Extent.StartLineNumber, $e.Message }
+    foreach ($b in [System.IO.File]::ReadAllBytes($f.FullName)) {
+        if ($b -gt 127) { $bad++; '{0}: contains non-ASCII characters' -f $f.FullName; break }
+    }
+}
+if ($bad -gt 0) { exit 1 }
+'@
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($code))
+    Invoke-Native $ps51 @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded)
+}
 
 # --- Rust -------------------------------------------------------------------------------------
 
