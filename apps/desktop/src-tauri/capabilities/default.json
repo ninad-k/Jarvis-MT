@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The bundled launcher page may read and set the backend URL. Nothing else: no shell, no fs, no core defaults. Remote pages (the backend UI) get no IPC at all because no `remote` URLs are listed.",
+  "windows": ["main"],
+  "permissions": ["allow-get-backend-url", "allow-connect"]
+}

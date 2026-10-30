@@ -1,0 +1,3 @@
+# A version must be a week old (in minutes) before it can be chosen when the lockfile is
+# updated. Installs that follow the lockfile (`--frozen-lockfile`, as in CI) are not affected.
+minimumReleaseAge: 10080

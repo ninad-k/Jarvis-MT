@@ -1,0 +1,4 @@
+node_modules/
+src-tauri/target/
+# Tauri regenerates the capability/ACL schemas on every build.
+src-tauri/gen/schemas/
