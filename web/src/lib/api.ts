@@ -143,6 +143,15 @@ export interface Status {
 	limits?: Limits;
 	/** The active persona. Absent on a server without personas. */
 	persona?: { id: string; name: string };
+	/** The broker MT5 is logged in to and how many canonical instruments map onto it. Absent on an older server. */
+	broker?: StatusBroker | null;
+}
+
+export interface StatusBroker {
+	company: string;
+	server: string;
+	mapped: number;
+	total: number;
 }
 
 export interface Account {
@@ -161,7 +170,10 @@ export type Side = 'buy' | 'sell';
 
 export interface Position {
 	ticket: number;
+	/** The broker's own name for the instrument (`XAUUSD_`). */
 	symbol: string;
+	/** The canonical name (`XAUUSD`). Absent on a server without symbol mapping. */
+	canonical?: string;
 	side: Side;
 	volume: number;
 	price_open: number;
@@ -192,6 +204,7 @@ export type OrderType =
 export interface PendingOrder {
 	ticket: number;
 	symbol: string;
+	canonical?: string;
 	type: OrderType;
 	volume_initial: number;
 	volume_current: number;
@@ -209,6 +222,7 @@ export interface OrdersResponse {
 
 export interface PriceTick {
 	symbol: string;
+	canonical?: string;
 	bid: number;
 	ask: number;
 	last: number;
@@ -362,13 +376,76 @@ export interface TranscribeResponse {
 	wake?: WakeResult;
 }
 
+// ---- Broker symbol mapping (docs/api.md "Broker symbol mapping") ------------
+
+/** Where a mapping came from. The UI words these as user / curated / auto / pattern / unchanged. */
+export type SymbolSource = 'user' | 'curated' | 'generated' | 'pattern' | 'passthrough';
+
+export interface BrokerInfo {
+	company: string;
+	server: string;
+	/** ISO time of the last detection. */
+	detected_at: string;
+	catalog_size: number;
+	detected_suffix: string;
+	detected_prefix: string;
+}
+
+export interface SymbolCandidate {
+	broker_symbol: string;
+	description: string;
+	score: number;
+	reasons: string[];
+}
+
+export interface SymbolMapping {
+	canonical: string;
+	/** metal | index | energy | crypto | fx (anything else is shown under "Other"). */
+	class: string;
+	aliases: string[];
+	broker_symbol: string;
+	source: SymbolSource;
+	/** False when the resolved name is not in this broker's catalog: the entry needs attention. */
+	available: boolean;
+	candidates: SymbolCandidate[];
+}
+
+export interface SymbolsResponse {
+	/** Null while the bridge has never been reachable. */
+	broker: BrokerInfo | null;
+	mappings: SymbolMapping[];
+	/** Canonical names with no match on this broker. */
+	unmapped: string[];
+}
+
+export interface CatalogSymbol {
+	name: string;
+	description: string;
+	path: string;
+	trade_mode: string | number;
+	visible: boolean;
+}
+
+export interface CatalogResponse {
+	symbols: CatalogSymbol[];
+	total: number;
+}
+
+/** `PUT /api/symbols/map`; `broker_symbol: null` removes the override. */
+export interface SymbolMapBody {
+	canonical: string;
+	broker_symbol: string | null;
+	totp?: string;
+}
+
 /** Events pushed over `GET /api/ws`. */
 export type WsEvent =
 	| { type: 'kill_switch'; engaged: boolean; reason: string | null }
 	| { type: 'preview_expired'; token: string }
 	| { type: 'trade_executed'; preview_id: string; results: TradeResult[] }
 	| { type: 'positions_changed' }
-	| { type: 'settings_changed' };
+	| { type: 'settings_changed' }
+	| { type: 'symbol_map_changed'; broker?: string };
 
 // ---- Transport -----------------------------------------------------------
 
@@ -539,5 +616,18 @@ export const api = {
 			method: 'DELETE',
 			body: totp ? { totp } : {},
 			keepOn401: true
-		})
+		}),
+
+	symbols: (signal?: AbortSignal) => request<SymbolsResponse>('/api/symbols', { signal }),
+	/** Re-reads the broker's catalog and re-runs the auto-mapper; a slow broker can take a while. */
+	detectSymbols: (signal?: AbortSignal) =>
+		post<SymbolsResponse>('/api/symbols/detect', undefined, { signal, timeoutMs: 60_000 }),
+	symbolCatalog: (q: string, limit = 30, signal?: AbortSignal) => {
+		const params = new URLSearchParams({ q, limit: String(limit) });
+		return request<CatalogResponse>(`/api/symbols/catalog?${params}`, { signal });
+	},
+	/** A wrong TOTP code is a 401 that is an answer, not a lost session. */
+	setSymbolMap: (body: SymbolMapBody) => put<unknown>('/api/symbols/map', body, { keepOn401: true }),
+	/** The effective map as a JSON file. */
+	exportSymbols: () => request<Blob>('/api/symbols/export', { asBlob: true })
 };

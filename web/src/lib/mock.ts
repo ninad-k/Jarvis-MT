@@ -11,6 +11,8 @@
  *   ?mock=unknown       every execute ends in outcome_unknown
  *   ?mock=settingsfail  saving settings fails (shows the optimistic rollback)
  *   ?mock=staleconfig   the limits page is told a looser config than the gate enforces (shows server 422s)
+ *   ?mock=switchbroker  a few seconds after the first request MT5 "switches" from the CFI-like broker to an
+ *                       IC-Markets-like one: the symbol map changes and `symbol_map_changed` is pushed
  *   ?mock=ttl=4         confirmation window of 4 s instead of 15 s
  *   ?mock=reset         forget the remembered switches
  *
@@ -19,7 +21,8 @@
  * Voice: the mock transcriber returns a scripted phrase; `window.__jarvisMock.say("...")` sets it.
  * Hands-free (`/api/voice/transcribe?wake=1`): script "hey friday what's gold at" and the reply carries
  * `wake` (and switches the persona); without a script the segment is ignored background speech.
- * Settings, personas and limits are remembered for the browser session (tighten-only; TOTP 123456 with `auth`).
+ * Broker symbols (CFI-like map, 200-odd catalog symbols, overrides with TOTP 123456 under `auth`, a 1.5 s
+ * re-detect) are remembered for the browser session too. Settings, personas and limits are remembered for the browser session (tighten-only; TOTP 123456 with `auth`).
  */
 import {
 	ApiError,
@@ -67,6 +70,17 @@ import {
 	readback,
 	setKill
 } from './mock-trading';
+import {
+	detectSymbols,
+	exportSymbols,
+	getSymbols,
+	putSymbolMap,
+	scheduleBrokerSwitch,
+	searchCatalog,
+	statusBroker,
+	toCanonical,
+	withBrokerSymbol
+} from './mock-symbols';
 import { toneWav, wavDurationMs } from './voice/wav';
 
 export { onMockEvent };
@@ -180,7 +194,8 @@ function status(): Status {
 		auth: { enabled: flag('auth'), username: s?.username ?? null },
 		voice: { stt: !flag('novoice'), tts: !flag('novoice') },
 		limits: effectiveLimits(),
-		persona: { id: activePersona().id, name: activePersona().name }
+		persona: { id: activePersona().id, name: activePersona().name },
+		broker: statusBroker()
 	};
 }
 
@@ -195,9 +210,9 @@ function watchlist(): WatchlistResponse {
 	const prices: WatchlistResponse['prices'] = [];
 	const errors: WatchlistResponse['errors'] = [];
 	for (const entry of getSettings().watchlist) {
-		const symbol = resolveSymbol(entry);
+		const symbol = resolveSymbol(entry) ?? resolveSymbol(toCanonical(entry));
 		const t = symbol ? ticks.find((p) => p.symbol === symbol) : undefined;
-		if (t) prices.push(t);
+		if (t) prices.push(withBrokerSymbol(t));
 		else errors.push({ symbol: entry, message: `unknown symbol: ${entry}` });
 	}
 	return { prices, errors };
@@ -399,6 +414,7 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 		seedBook();
 	}
 	applyConfig();
+	if (flag('switchbroker')) scheduleBrokerSwitch();
 	await sleep(40 + Math.random() * 120, opts.signal);
 	if (flag('offline')) throw new ApiError('network', 'Cannot reach the Arc MT server');
 
@@ -448,6 +464,22 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 		if (flag('staleconfig')) res.config.max_lot = 2;
 		return res as T;
 	}
+	if (path === '/api/symbols/map' && opts.method === 'PUT') {
+		const b = (opts.body ?? {}) as { totp?: string };
+		// Like the server: a code is required only when login is on.
+		putSymbolMap(opts.body, () => {
+			if (flag('auth') && b.totp !== MOCK_TOTP) throw new ApiError('unauthorized', 'code not accepted', 401);
+		});
+		return undefined as T;
+	}
+	if (path === '/api/symbols/detect' && opts.method === 'POST') {
+		await sleep(1500, opts.signal);
+		return detectSymbols() as T;
+	}
+	if (path === '/api/symbols/export') return exportSymbols() as T;
+	if (path === '/api/symbols' || path.startsWith('/api/symbols/catalog')) {
+		return (path === '/api/symbols' ? getSymbols() : searchCatalog(path)) as T;
+	}
 	if (path === '/api/killswitch' && opts.method !== 'POST') return killState() as T;
 	if (path === '/api/killswitch') {
 		const b = opts.body as { engaged: boolean; reason?: string; totp?: string };
@@ -459,8 +491,8 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 		throw new ApiError('bridge_unavailable', 'bridge did not reply within 3000 ms', 503);
 
 	if (path === '/api/account') return account() as T;
-	if (path === '/api/positions') return { positions: positions() } satisfies PositionsResponse as T;
-	if (path === '/api/orders') return { orders: pending.map((o) => ({ ...o })) } satisfies OrdersResponse as T;
+	if (path === '/api/positions') return { positions: positions().map(withBrokerSymbol) } satisfies PositionsResponse as T;
+	if (path === '/api/orders') return { orders: pending.map((o) => withBrokerSymbol({ ...o })) } satisfies OrdersResponse as T;
 	if (path === '/api/watchlist') return watchlist() as T;
 
 	if (path === '/api/chat') {
@@ -489,8 +521,10 @@ export async function mockRequest<T>(path: string, opts: RequestOptions): Promis
 	if (path === '/api/positions/close') {
 		assertWritable();
 		const b = opts.body as { symbol: string | null; side: 'buy' | 'sell' | null; all: boolean };
+		// The UI sends the broker's symbol; the book is kept under canonical names.
+		const wanted = b.symbol ? toCanonical(b.symbol) : null;
 		const targets = book.filter(
-			(p) => (b.all || b.symbol || b.side) && (!b.symbol || p.symbol === b.symbol) && (!b.side || p.side === b.side)
+			(p) => (b.all || wanted || b.side) && (!wanted || p.symbol === wanted) && (!b.side || p.side === b.side)
 		);
 		return closePreview(targets, { batch: true }) as T;
 	}

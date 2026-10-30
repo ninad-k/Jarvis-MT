@@ -18,7 +18,7 @@ export const SYMS: Sym[] = [
 	{ symbol: 'EURUSD', digits: 5, mid: 1.08432, vol: 0.00006, spread: 9, point: 0.00001, contract: 100000 },
 	{ symbol: 'GBPUSD', digits: 5, mid: 1.27118, vol: 0.00007, spread: 12, point: 0.00001, contract: 100000 },
 	{ symbol: 'USDJPY', digits: 3, mid: 156.234, vol: 0.00007, spread: 14, point: 0.001, contract: 100000 },
-	{ symbol: 'NAS100', digits: 2, mid: 19842.5, vol: 0.00016, spread: 180, point: 0.01, contract: 1 },
+	{ symbol: 'US100', digits: 2, mid: 19842.5, vol: 0.00016, spread: 180, point: 0.01, contract: 1 },
 	{ symbol: 'BTCUSD', digits: 2, mid: 67210.4, vol: 0.00035, spread: 1500, point: 0.01, contract: 1 }
 ];
 export const BAD_SYMBOL = 'US30';
@@ -63,7 +63,7 @@ export function symbolFromText(text: string): string | null {
 	if (/gbp|cable|pound/.test(text)) return 'GBPUSD';
 	if (/jpy|yen/.test(text)) return 'USDJPY';
 	if (/btc|bitcoin/.test(text)) return 'BTCUSD';
-	if (/nas/.test(text)) return 'NAS100';
+	if (/nas/.test(text)) return 'US100';
 	return null;
 }
 
@@ -96,7 +96,7 @@ export function seedBook(): void {
 		{ ticket: 884201552, symbol: 'EURUSD', side: 'sell', volume: 0.5, price_open: 1.0861, sl: 1.09, tp: 1.08, swap: -1.2, time: ago(18000) },
 		{ ticket: 884202019, symbol: 'USDJPY', side: 'buy', volume: 0.2, price_open: 156.41, sl: 155.8, tp: null, swap: 0.4, time: ago(900) },
 		// Closing this one is rejected by the mock market ("Market closed"), to show a partial failure.
-		{ ticket: 884202230, symbol: 'NAS100', side: 'sell', volume: 0.05, price_open: 19860, sl: null, tp: null, swap: 0, time: ago(2400) }
+		{ ticket: 884202230, symbol: 'US100', side: 'sell', volume: 0.05, price_open: 19860, sl: null, tp: null, swap: 0, time: ago(2400) }
 	);
 	pending.push(
 		{ ticket: 884300101, symbol: 'EURUSD', type: 'buy_limit', volume_initial: 0.1, volume_current: 0.1, price_open: 1.08, sl: null, tp: 1.09, time_setup: ago(3000), comment: '' },

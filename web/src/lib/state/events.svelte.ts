@@ -4,6 +4,7 @@ import { killSwitch } from './killswitch.svelte';
 import { refreshTrading, status, watchlist } from './hud.svelte';
 import { preview } from './preview.svelte';
 import { settings } from './settings.svelte';
+import { symbolMap } from './symbols.svelte';
 
 export type EventsLink = 'idle' | 'connecting' | 'open' | 'retrying';
 
@@ -23,16 +24,40 @@ class EventsStore {
 	private timer: ReturnType<typeof setTimeout> | undefined;
 	private stopMock: (() => void) | null = null;
 	private wanted = false;
+	/** Pages that want every event (the HUD), and pages that only follow the broker symbol map. */
+	private full = 0;
+	private symbolsOnly = 0;
 
 	start(): () => void {
-		if (this.wanted) return () => this.stop();
-		this.wanted = true;
-		void this.connect();
-		return () => this.stop();
+		return this.hold('full');
+	}
+
+	/** Settings page: only `symbol_map_changed` matters there (the HUD pollers are not running). */
+	watchSymbols(): () => void {
+		return this.hold('symbols');
+	}
+
+	private hold(kind: 'full' | 'symbols'): () => void {
+		if (kind === 'full') this.full++;
+		else this.symbolsOnly++;
+		if (!this.wanted) {
+			this.wanted = true;
+			void this.connect();
+		}
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			if (kind === 'full') this.full = Math.max(0, this.full - 1);
+			else this.symbolsOnly = Math.max(0, this.symbolsOnly - 1);
+			if (this.full + this.symbolsOnly <= 0) this.stop();
+		};
 	}
 
 	stop(): void {
 		this.wanted = false;
+		this.full = 0;
+		this.symbolsOnly = 0;
 		clearTimeout(this.timer);
 		this.stopMock?.();
 		this.stopMock = null;
@@ -46,6 +71,17 @@ class EventsStore {
 
 	/** Apply one event. Public so tests and the mock can feed it directly. */
 	handle(e: WsEvent): void {
+		if (e.type === 'symbol_map_changed') {
+			symbolMap.onChanged(e.broker);
+			if (this.full > 0) {
+				status.refresh();
+				watchlist.refresh();
+				refreshTrading();
+			}
+			return;
+		}
+		// With only the settings page listening, the HUD pollers are not running: nothing to refresh.
+		if (this.full === 0) return;
 		switch (e.type) {
 			case 'kill_switch':
 				killSwitch.applyEvent(e);

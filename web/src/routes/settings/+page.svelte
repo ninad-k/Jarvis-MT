@@ -7,9 +7,11 @@
 	import ModelSection from '#lib/components/settings/ModelSection.svelte';
 	import PersonaSection from '#lib/components/settings/PersonaSection.svelte';
 	import VoiceSection from '#lib/components/settings/VoiceSection.svelte';
+	import SymbolsSection from '#lib/components/settings/SymbolsSection.svelte';
 	import WatchlistSection from '#lib/components/settings/WatchlistSection.svelte';
 	import ConfirmModal from '#lib/components/ConfirmModal.svelte';
 	import { DirtyRegistry } from '#lib/state/draft.svelte.ts';
+	import { events } from '#lib/state/events.svelte.ts';
 	import { persona } from '#lib/state/persona.svelte.ts';
 	import { provideDirtyRegistry } from '#lib/state/settings-context.ts';
 	import { settings } from '#lib/state/settings.svelte.ts';
@@ -26,6 +28,7 @@
 		{ id: 'model', label: 'Model' },
 		{ id: 'watchlist', label: 'Watchlist' },
 		{ id: 'aliases', label: 'Aliases' },
+		{ id: 'symbols', label: 'Symbols' },
 		{ id: 'limits', label: 'Limits' }
 	];
 
@@ -39,7 +42,12 @@
 			if (dirty.any) e.preventDefault();
 		};
 		window.addEventListener('beforeunload', warn);
-		return () => window.removeEventListener('beforeunload', warn);
+		// A broker switch in MT5 re-maps the symbols; the Symbols section follows it live.
+		const stopEvents = events.watchSymbols();
+		return () => {
+			window.removeEventListener('beforeunload', warn);
+			stopEvents();
+		};
 	});
 
 	// Leaving with unsaved edits asks first (in-app links; closing the tab uses beforeunload above).
@@ -95,6 +103,7 @@
 				<ModelSection llm={status?.llm ?? null} />
 				<WatchlistSection />
 				<AliasesSection />
+				<SymbolsSection authEnabled={status ? (status.auth?.enabled ?? null) : null} />
 				<LimitsSection authEnabled={status ? (status.auth?.enabled ?? null) : null} />
 			{/if}
 		</div>

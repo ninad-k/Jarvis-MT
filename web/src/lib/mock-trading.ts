@@ -187,8 +187,8 @@ export function closePreview(
 			est_pnl: { current: floating, at_sl: null, at_tp: null },
 			is_batch,
 			count: targets.length,
-			warnings: targets.some((p) => p.symbol === 'NAS100')
-				? ['NAS100: market is closed, this position may be rejected']
+			warnings: targets.some((p) => p.symbol === 'US100')
+				? ['US100: market is closed, this position may be rejected']
 				: []
 		},
 		{ kind: 'close', items: targets.map((p) => ({ ticket: p.ticket, volume: partial ? vol : null })) },
@@ -295,7 +295,7 @@ function execute(a: Action): TradeResult[] {
 		if (i < 0)
 			return { ticket, ok: false, retcode: 10013, retcode_description: 'Invalid request', error: 'position not found' };
 		const p = book[i];
-		if (p.symbol === 'NAS100')
+		if (p.symbol === 'US100')
 			return { ticket, ok: false, retcode: 10018, retcode_description: 'Market is closed', error: 'Market is closed' };
 		const closeVol = volume ?? p.volume;
 		const price = fillPrice(p.symbol, p.side === 'buy' ? 'sell' : 'buy');

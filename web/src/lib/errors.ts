@@ -20,7 +20,8 @@ export const SERVER_ERROR_CODES = [
 	'voice_unavailable',
 	'trade_failed',
 	'outcome_unknown',
-	'limit_not_stricter'
+	'limit_not_stricter',
+	'unknown_broker_symbol'
 ] as const;
 
 export type ApiErrorCode = (typeof SERVER_ERROR_CODES)[number];
@@ -132,6 +133,8 @@ export function describeError(err: ApiError): string {
 			return err.message || 'The request was rejected by a safety limit.';
 		case 'limit_not_stricter':
 			return err.message || 'That value is looser than the config file allows.';
+		case 'unknown_broker_symbol':
+			return err.message || "That symbol is not in this broker's catalog.";
 		case 'unauthorized':
 			return 'Your session has ended. Sign in again.';
 		case 'network':

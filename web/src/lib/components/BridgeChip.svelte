@@ -29,6 +29,7 @@
 			return `EA ${b.ea_version ?? '?'} · protocol v${b.protocol_version ?? '?'} · terminal ${b.terminal_connected ? 'connected' : 'disconnected'}`;
 		return 'Waiting for the first status reply.';
 	});
+	const broker = $derived(s?.broker ?? null);
 	const realAccount = $derived(tradeMode === 'real');
 </script>
 
@@ -54,6 +55,13 @@
 		>
 			<p class="mb-1 {tone}">{label}</p>
 			{detail}
+			{#if broker}
+				<p class="mt-1.5 border-t border-line pt-1.5 break-words" data-testid="bridge-broker">
+					<span class="text-faint">Broker</span> <span class="text-ink">{broker.company}</span>
+					{#if broker.server}<span class="text-faint"> · </span>{broker.server}{/if}
+					<span class="block text-faint">{broker.mapped} of {broker.total} instruments mapped</span>
+				</p>
+			{/if}
 		</div>
 	</div>
 

@@ -59,7 +59,7 @@ test('settings fits at 375 px with every section open', async ({ page }) => {
 			return { id: e.id, left: r.left, right: r.right };
 		})
 	);
-	expect(boxes.length).toBe(6);
+	expect(boxes.length).toBe(7);
 	for (const b of boxes) {
 		expect(b.left, b.id).toBeGreaterThanOrEqual(0);
 		expect(b.right, b.id).toBeLessThanOrEqual(375);

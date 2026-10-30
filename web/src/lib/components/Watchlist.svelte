@@ -3,6 +3,7 @@
 	import PollNote from './PollNote.svelte';
 	import { moves, watchlist } from '#lib/state/hud.svelte.ts';
 	import { fmtPrice } from '#lib/format.ts';
+	import { symbolLabel } from '#lib/symbols.ts';
 
 	const prices = $derived(watchlist.data?.prices ?? []);
 	const errors = $derived(watchlist.data?.errors ?? []);
@@ -38,6 +39,7 @@
 			<ul class="pb-2">
 				{#each prices as p, i (`${p.symbol}#${i}`)}
 					{@const m = moves.map[p.symbol]}
+					{@const label = symbolLabel(p)}
 					<li class="border-t border-line/60 first:border-t-0">
 						{#key m?.n}
 							<div
@@ -47,8 +49,11 @@
 										: 'flash-down'
 									: ''}"
 							>
-								<span class="flex items-center gap-1.5 truncate font-medium">
-									{p.symbol}
+								<span class="flex min-w-0 items-center gap-1.5 font-medium">
+									<span class="truncate" data-testid="wl-symbol">{label.primary}</span>
+									{#if label.secondary}
+										<span class="num truncate text-2xs font-normal text-faint" title="Broker symbol" data-testid="wl-broker-symbol">{label.secondary}</span>
+									{/if}
 									{#if m}
 										<span class="text-[0.6rem] {m.dir === 'up' ? 't-up' : 't-down'}">
 											<span aria-hidden="true">{m.dir === 'up' ? '▲' : '▼'}</span>

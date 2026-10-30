@@ -10,6 +10,7 @@ import {
 import { writeBlockReason } from '#lib/trading.ts';
 import { killSwitch } from './killswitch.svelte';
 import { Poller } from './poller.svelte';
+import { symbolMap } from './symbols.svelte';
 
 const POLL_MS = 2000;
 const STATUS_MS = 3000;
@@ -48,6 +49,7 @@ export const status = new Poller<Status>((s) => api.status(s), {
 	maxInterval: MAX_BACKOFF_MS,
 	onData: (next) => {
 		if (next.kill_switch) killSwitch.apply(next.kill_switch);
+		symbolMap.noteCompany(next.broker?.company);
 	}
 });
 export const account = new Poller<Account>((s) => api.account(s), {

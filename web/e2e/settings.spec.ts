@@ -83,17 +83,17 @@ test('watchlist: add, reorder, remove, validate, save, and the HUD follows', asy
 	await page.getByRole('button', { name: 'Remove US30' }).click();
 	await page.getByRole('button', { name: 'Move BTCUSD up' }).click();
 	await expect(items.nth(4)).toContainText('BTCUSD');
-	await expect(items.nth(5)).toContainText('NAS100');
+	await expect(items.nth(5)).toContainText('US100');
 
 	await save(page, 'watchlist').click();
 	await expect(feedback(page, 'watchlist')).toContainText('Watchlist saved (7 symbols).');
 
 	await page.getByTestId('back-to-hud').click();
 	const wl = page.getByRole('region', { name: 'Watchlist' });
-	await expect(wl.getByText('BTCUSD')).toBeVisible();
-	await expect(wl.getByText('US30')).toHaveCount(0);
+	await expect(wl.getByText('BTCUSD', { exact: true })).toBeVisible();
+	await expect(wl.getByText('US30', { exact: true })).toHaveCount(0);
 	// "yellow metal" resolves to XAUUSD, so gold now appears twice.
-	await expect(wl.getByText('XAUUSD')).toHaveCount(2);
+	await expect(wl.getByText('XAUUSD', { exact: true })).toHaveCount(2);
 });
 
 test('the watchlist stops at 30', async ({ page }) => {

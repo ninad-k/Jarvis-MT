@@ -37,13 +37,13 @@ export const PERSONAS: Persona[] = [
 	}
 ];
 
-export const CONFIG_ALIASES: Record<string, string> = { gold: 'XAUUSD', nasdaq: 'NAS100', dow: 'US30' };
+export const CONFIG_ALIASES: Record<string, string> = { gold: 'XAUUSD', nasdaq: 'US100', dow: 'US30' };
 
 export const CONFIG_LIMITS: Limits = {
 	max_lot: 1,
 	max_positions: 5,
 	max_daily_loss: 500,
-	allowed_symbols: ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'NAS100', 'BTCUSD'],
+	allowed_symbols: ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'US100', 'BTCUSD'],
 	trading_hours: { days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '00:05', end: '23:55' }
 };
 
@@ -54,7 +54,7 @@ const DEFAULT_SETTINGS: Settings = {
 	persona: 'jarvis',
 	llm_provider: null,
 	voice: { read_aloud: false, input_mode: 'hold', language: 'en' },
-	watchlist: ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'NAS100', 'BTCUSD', 'US30'],
+	watchlist: ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'US100', 'BTCUSD', 'US30'],
 	aliases: { 'yellow metal': 'XAUUSD' }
 };
 

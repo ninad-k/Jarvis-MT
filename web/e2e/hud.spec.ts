@@ -8,7 +8,7 @@ test('HUD loads with watchlist, positions and demo badge', async ({ page }) => {
 
 	await expect(page.getByRole('heading', { name: /ARC/ })).toBeVisible();
 	await expect(page.getByText('Demo', { exact: true })).toBeVisible();
-	await expect(page.getByRole('region', { name: 'Watchlist' }).getByText('XAUUSD')).toBeVisible();
+	await expect(page.getByRole('region', { name: 'Watchlist' }).getByText('XAUUSD', { exact: true })).toBeVisible();
 	await expect(page.getByTestId('position-row')).toHaveCount(5);
 	await expect(page.getByTestId('order-row')).toHaveCount(2);
 	await expect(page.getByText(/MT5 connected/).first()).toBeVisible();

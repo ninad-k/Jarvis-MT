@@ -7,6 +7,7 @@
 	import { tradeActions } from '#lib/state/trade-actions.svelte.ts';
 	import { decimalsOf, fmtPrice, fmtSigned, fmtVolume, tone } from '#lib/format.ts';
 	import { countSide, groupBySymbol, halfVolume } from '#lib/trading.ts';
+	import { symbolLabel } from '#lib/symbols.ts';
 	import type { Position } from '#lib/api.ts';
 
 	const list = $derived(positions.data ?? []);
@@ -32,7 +33,7 @@
 			{ id: 'sells', label: 'Close sells', hint: String(sells), disabled: sells === 0 },
 			...groupBySymbol(list).map((g, i) => ({
 				id: `sym:${g.symbol}`,
-				label: `Close ${g.symbol}`,
+				label: `Close ${symbolLabel(list.find((p) => p.symbol === g.symbol) ?? g).primary}`,
 				hint: String(g.count),
 				divider: i === 0
 			}))
@@ -99,10 +100,14 @@
 			<ul>
 				{#each list as p (p.ticket)}
 					{@const d = digits(p)}
+					{@const label = symbolLabel(p)}
 					<li class="border-b border-line/60 px-3 py-2.5" data-testid="position-row" data-ticket={p.ticket}>
 						<div class="flex items-center justify-between gap-2">
 							<div class="flex min-w-0 items-center gap-2">
-								<span class="truncate font-medium">{p.symbol}</span>
+								<span class="truncate font-medium" data-testid="position-symbol">{label.primary}</span>
+								{#if label.secondary}
+									<span class="num truncate text-2xs text-faint" title="Broker symbol" data-testid="position-broker-symbol">{label.secondary}</span>
+								{/if}
 								<span class="pill {p.side === 'buy' ? 't-up' : 't-down'} h-5 px-1.5">{p.side}</span>
 								<span class="num text-xs text-mute">{fmtVolume(p.volume)}</span>
 							</div>
@@ -125,7 +130,7 @@
 								class="{btn} border-down/60 text-down hover:bg-down/10"
 								disabled={blocked !== null || busy}
 								title={blocked ?? `Preview closing ticket ${p.ticket}`}
-								aria-label="Close {p.symbol} {p.side} {fmtVolume(p.volume)} (ticket {p.ticket})"
+								aria-label="Close {label.primary} {p.side} {fmtVolume(p.volume)} (ticket {p.ticket})"
 								onclick={() => tradeActions.closePosition(p.ticket)}
 							>
 								{tradeActions.busy === `close:${p.ticket}` ? 'Preparing…' : 'Close'}
