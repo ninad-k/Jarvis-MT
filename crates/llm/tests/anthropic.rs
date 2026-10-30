@@ -455,3 +455,35 @@ fn invalid_base_url_is_config_error() {
         Some(LlmError::Config(_))
     ));
 }
+
+#[test]
+fn a_key_is_never_sent_over_plain_http_to_a_remote_host() {
+    for url in [
+        "http://api.example.com",
+        "http://10.0.0.5:8080",
+        "http://127.0.0.1.example.com",
+        "ftp://api.example.com",
+    ] {
+        let err = AnthropicProvider::new(&config(ProviderKind::Anthropic, url, 5), "sk-ant-key")
+            .err()
+            .unwrap_or_else(|| panic!("{url} must be refused"));
+        match err {
+            LlmError::Config(m) => {
+                assert!(m.contains("https"), "{m}");
+                assert!(!m.contains("sk-ant-key"), "the key must not appear: {m}");
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+    for url in [
+        "https://api.anthropic.com",
+        "http://localhost:8080",
+        "http://127.0.0.1:1",
+        "http://[::1]:8080",
+    ] {
+        assert!(
+            AnthropicProvider::new(&config(ProviderKind::Anthropic, url, 5), "k").is_ok(),
+            "{url}"
+        );
+    }
+}

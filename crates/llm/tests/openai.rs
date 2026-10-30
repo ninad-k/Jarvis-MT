@@ -314,3 +314,19 @@ fn build_provider_ok_with_key() {
     assert_eq!(p.name(), "test");
     assert_eq!(p.model(), "test-model");
 }
+
+#[test]
+fn a_key_is_never_sent_over_plain_http_to_a_remote_host() {
+    for url in ["http://api.example.com/v1", "http://192.168.1.2:8000/v1"] {
+        let err = OpenAiProvider::new(&config(ProviderKind::Openai, url, 5), "sk-key")
+            .err()
+            .unwrap_or_else(|| panic!("{url} must be refused"));
+        assert!(matches!(err, LlmError::Config(_)), "{err:?}");
+    }
+    for url in ["https://api.openai.com/v1", "http://localhost:11434/v1"] {
+        assert!(
+            OpenAiProvider::new(&config(ProviderKind::Openai, url, 5), "k").is_ok(),
+            "{url}"
+        );
+    }
+}

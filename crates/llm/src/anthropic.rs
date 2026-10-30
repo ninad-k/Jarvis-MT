@@ -49,6 +49,7 @@ impl AnthropicProvider {
     /// Build with an explicit API key (used by tests and `from_config`).
     pub fn new(config: &ProviderConfig, api_key: &str) -> Result<Self, LlmError> {
         let mut base = util::resolve_base_url(config, DEFAULT_BASE_URL)?;
+        util::require_secure_transport(config, &base)?;
         if let Some(stripped) = base.strip_suffix("/v1") {
             base = stripped.to_string();
         }

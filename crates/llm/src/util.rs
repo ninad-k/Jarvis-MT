@@ -26,6 +26,33 @@ pub(crate) fn resolve_base_url(cfg: &ProviderConfig, default: &str) -> Result<St
     Ok(trimmed)
 }
 
+/// Providers that send an API key must use TLS: `http://` is only accepted for a loopback host
+/// (a local gateway or a test double). Otherwise the key would cross the network in clear text.
+pub(crate) fn require_secure_transport(
+    cfg: &ProviderConfig,
+    base_url: &str,
+) -> Result<(), LlmError> {
+    let url = reqwest::Url::parse(base_url)
+        .map_err(|e| LlmError::Config(format!("provider '{}': invalid base_url: {e}", cfg.name)))?;
+    let host = url
+        .host_str()
+        .unwrap_or("")
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
+        Ok(())
+    } else {
+        Err(LlmError::Config(format!(
+            "provider '{}': base_url '{base_url}' must use https, because the API key is sent with every request (http is accepted for localhost only)",
+            cfg.name
+        )))
+    }
+}
+
 /// Read the API key named by `cfg.api_key_env`. The error names the variable, never the value.
 pub(crate) fn read_api_key(cfg: &ProviderConfig) -> Result<String, LlmError> {
     let var = cfg
@@ -139,10 +166,10 @@ pub(crate) fn extract_error_message(body: &str) -> String {
             v.get("detail"),
         ];
         for c in candidates.into_iter().flatten() {
-            if let Some(s) = c.as_str() {
-                if !s.trim().is_empty() {
-                    return s.trim().to_string();
-                }
+            if let Some(s) = c.as_str()
+                && !s.trim().is_empty()
+            {
+                return s.trim().to_string();
             }
         }
     }
