@@ -11,12 +11,13 @@ async-trait = "0.1.92"
 hound = "3.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["process", "fs", "io-util", "time"] }
+tokio = { version = "1.54.1", features = ["process", "fs", "io-util", "macros", "time"] }
 tracing = "0.1.44"
+whisper-rs = { version = "0.16.0", optional = true, features = ["tracing_backend"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["full"] }
 
 [features]
 # Local speech-to-text via whisper.cpp. Needs CMake and LLVM (libclang) to build.
-whisper = []
+whisper = ["dep:whisper-rs"]

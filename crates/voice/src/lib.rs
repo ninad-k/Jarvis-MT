@@ -5,8 +5,15 @@
 //! stereo), converted with [`decode_wav`] to 16 kHz mono f32 for Whisper.
 //! Audio out: WAV bytes from Piper.
 //!
-//! CONTRACT STUB: public types and signatures are fixed; bodies are implemented in
-//! the Sprint 3 voice task.
+//! Build notes: the `whisper` feature compiles whisper.cpp, which needs CMake and
+//! LLVM (libclang) on the machine. Without it the crate still provides WAV decoding,
+//! transcript clean-up and Piper TTS, and [`WhisperStt::new`] returns
+//! [`VoiceError::NotAvailable`].
+
+mod audio;
+mod stt;
+mod text;
+mod tts;
 
 use std::path::PathBuf;
 
@@ -25,24 +32,10 @@ karo, sab band karo, haan, nahi, sona, chandi.";
 /// e.g. `("cold", "gold")`, `("sell all", "sell all")`. Default list in [`default_corrections`].
 pub type Corrections = Vec<(String, String)>;
 
-/// Common mishearings in trading speech: cold→gold, bold→gold, goal→gold,
-/// nas daq→nasdaq, take profits→take profit, stop lost→stop loss, lot's→lots, ...
-pub fn default_corrections() -> Corrections {
-    todo!("Sprint 3 voice task")
-}
-
-/// Apply `corrections` to a transcript (whole-word, case-insensitive, keeps the rest).
-pub fn normalize_transcript(text: &str, corrections: &Corrections) -> String {
-    let _ = (text, corrections);
-    todo!("Sprint 3 voice task")
-}
-
-/// Decode a 16-bit PCM (or 32-bit float) WAV into 16 kHz mono f32 samples in [-1, 1].
-/// Rejects other formats and clips longer than `max_seconds`.
-pub fn decode_wav(bytes: &[u8], max_seconds: f32) -> Result<Vec<f32>, VoiceError> {
-    let _ = (bytes, max_seconds);
-    todo!("Sprint 3 voice task")
-}
+pub use audio::decode_wav;
+pub use stt::WhisperStt;
+pub use text::{default_corrections, normalize_transcript};
+pub use tts::PiperTts;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transcript {
@@ -112,47 +105,4 @@ fn default_threads() -> u32 {
 }
 fn default_max_seconds() -> f32 {
     30.0
-}
-
-/// Whisper STT. Loads the model once; transcription runs on a blocking thread.
-/// Without the `whisper` feature, [`WhisperStt::new`] returns `VoiceError::NotAvailable`.
-pub struct WhisperStt {
-    _private: (),
-}
-
-impl WhisperStt {
-    pub fn new(config: &VoiceConfig, corrections: Corrections) -> Result<Self, VoiceError> {
-        let _ = (config, corrections);
-        todo!("Sprint 3 voice task")
-    }
-}
-
-#[async_trait]
-impl SpeechToText for WhisperStt {
-    async fn transcribe(&self, samples: Vec<f32>) -> Result<Transcript, VoiceError> {
-        let _ = samples;
-        todo!("Sprint 3 voice task")
-    }
-}
-
-/// Piper TTS: spawns `piper --model <voice> --output_file <tmp.wav>` with the text on
-/// stdin, with a timeout, and returns the WAV bytes. Text is length-limited and
-/// stripped of control characters before it reaches the process.
-pub struct PiperTts {
-    _private: (),
-}
-
-impl PiperTts {
-    pub fn new(config: &VoiceConfig) -> Result<Self, VoiceError> {
-        let _ = config;
-        todo!("Sprint 3 voice task")
-    }
-}
-
-#[async_trait]
-impl TextToSpeech for PiperTts {
-    async fn synthesize(&self, text: &str) -> Result<Vec<u8>, VoiceError> {
-        let _ = text;
-        todo!("Sprint 3 voice task")
-    }
 }
