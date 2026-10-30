@@ -6,7 +6,7 @@
 .DESCRIPTION
   Copies, from <repo>\mql5 into <DataFolder>\MQL5:
     Experts\JarvisMT\          (the EA)
-    Scripts\JarvisMT\          (JarvisSelfTest: offline JSON/protocol checks)
+    Scripts\JarvisMT\          (JarvisSelfTest: offline JSON/protocol checks; sends no trades)
     Include\Jarvis\            (our JSON / protocol / handlers)
     Include\Zmq\, Include\Mql\ (vendored mql-zmq + mql4-lib subset)
     Libraries\*.dll            (libzmq.dll, libsodium.dll)
@@ -16,16 +16,17 @@
 
 .PARAMETER DataFolder
   MT5 data folder (File > Open Data Folder in the terminal), or just its 32-character id.
-  Default: this machine's "C:\Program Files\MetaTrader 5" terminal data folder (pass -DataFolder for any other terminal).
+  Default: the only terminal data folder under %APPDATA%\MetaQuotes\Terminal. With several
+  terminals installed the script stops and asks for -DataFolder.
 
 .EXAMPLE
   pwsh scripts\install-ea.ps1
-  pwsh scripts\install-ea.ps1 -DataFolder D0E8209F77C8CF37AD8BF550E51FF075
+  pwsh scripts\install-ea.ps1 -DataFolder <32-character terminal id>
 #>
 [CmdletBinding()]
 param(
     [Alias('Terminal')]
-    [string]$DataFolder = 'C:\Users\Ninad\AppData\Roaming\MetaQuotes\Terminal\D0E8209F77C8CF37AD8BF550E51FF075'
+    [string]$DataFolder
 )
 
 Set-StrictMode -Version Latest
@@ -33,6 +34,19 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $srcRoot = Join-Path $repoRoot 'mql5'
+
+# No -DataFolder: use the only MT5 terminal data folder on this PC, or ask which one.
+if (-not $DataFolder) {
+    $terminalsRoot = Join-Path $env:APPDATA 'MetaQuotes\Terminal'
+    $found = @(Get-ChildItem -LiteralPath $terminalsRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'MQL5') })
+    if ($found.Count -ne 1) {
+        $names = ($found | ForEach-Object { $_.Name }) -join ', '
+        if (-not $names) { $names = 'none' }
+        throw "Pass -DataFolder <data folder or 32-character id> (File > Open Data Folder in MT5). Terminals found: $names"
+    }
+    $DataFolder = $found[0].FullName
+}
 
 # A bare terminal id is accepted too.
 if ($DataFolder -match '^[0-9A-Fa-f]{32}$') {
@@ -121,6 +135,8 @@ Next steps
      (right-click Refresh if it is not listed). Drag it onto any chart.
   3. In the EA's Common tab tick "Allow DLL imports" for THIS EA only.
      Do not enable it globally under Tools > Options > Expert Advisors.
-  4. The Algo Trading button state does not matter: this EA version is read-only.
-  5. The Experts journal should show: JarvisBridge 0.1.0 listening on 127.0.0.1:5555
+  4. Write commands (order_send, ...) need the Algo Trading button ON and "Allow Algo Trading"
+     for this EA. Without them the EA answers writes with retcode -3. Reads work either way.
+  5. Real accounts are refused unless you set the EA input InpAllowReal = true (default false).
+  6. The Experts journal should show: JarvisBridge 0.2.0 listening on 127.0.0.1:5555
 "@

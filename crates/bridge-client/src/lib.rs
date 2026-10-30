@@ -11,6 +11,8 @@ pub mod protocol;
 
 #[cfg(feature = "mock")]
 pub mod mock;
+#[cfg(feature = "mock")]
+mod mock_trade;
 
-pub use client::{BridgeClient, BridgeConfig};
+pub use client::{BridgeClient, BridgeConfig, MIN_WRITE_TIMEOUT};
 pub use error::BridgeError;

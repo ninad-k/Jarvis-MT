@@ -1,9 +1,10 @@
 # Bridge protocol (version 1)
 
 Wire contract between the Rust backend (`jarvis-bridge-client`) and the MQL5 EA `JarvisBridge`.
-Sprint 1 covers **read commands only**. Write commands (`order_send`, `position_modify`,
-`position_close`, `position_close_partial`, `order_cancel`) are reserved for Sprint 2 and must
-answer `retcode -2` ("unknown command") until then.
+Read commands (`ping`, `get_price`, `get_account`, `get_positions`, `get_orders`, `get_history`,
+`get_symbol`) and write commands (`order_send`, `position_modify`, `position_close`,
+`position_close_partial`, `order_cancel`) are specified below. EA 0.2.0 implements both;
+`protocol_version` stays `1` because the write commands and `get_symbol` are additive.
 
 Source of truth in code: `crates/bridge-client/src/protocol.rs`. The JSON examples below are the
 golden files in `crates/bridge-client/tests/fixtures/`; the Rust tests round-trip every one of them,
@@ -78,7 +79,8 @@ The client rejects a reply whose `id` differs from the request's (`BridgeError::
 | `0` | success (`ok: true`) |
 | `-1` | request invalid: not JSON, not an object, missing/ill-typed `id`, `cmd` or arguments, argument out of range (`limit`, `from > to`), request too large |
 | `-2` | unknown command, or a command not implemented in this protocol version |
-| `> 0` | MT5 `GetLastError()` value for read commands, for example `4301` (`ERR_MARKET_UNKNOWN_SYMBOL`). For write commands in Sprint 2 it will be the trade server retcode (`10009` done, `10013` invalid request, and so on). |
+| `-3` | write refused by the EA safety gate (real account without `InpAllowReal`, Algo Trading off); nothing was sent to the trade server |
+| `> 0` | For read commands the MT5 `GetLastError()` value, for example `4301` (`ERR_MARKET_UNKNOWN_SYMBOL`). For write commands the trade server retcode: `10009` done, `10008` placed, `10010` done partially (success), `10018` market closed, `10019` no money, `10013` invalid request, and so on. |
 
 `ok: false` always comes with a non-empty `error`. The Rust client maps it to
 `BridgeError::Remote { message, retcode }`.
@@ -89,7 +91,9 @@ including malformed ones (answer `retcode -1`, `id` `""` if unknown) and unknown
 peer reconnects. The EA must never block inside a handler, and should answer from its `OnTimer`
 poll loop within a few milliseconds. It must never send an unsolicited message.
 
-## Commands (Sprint 1)
+## Commands
+
+Read commands first, then `get_symbol`, then the write commands.
 
 ### `ping`
 
@@ -306,6 +310,267 @@ the range to see older deals.
 (anything else the EA does not model, such as commission or bonus deals). Deal `entry`: `in`, `out`,
 `inout`, `out_by`.
 
+
+### `get_symbol`
+
+Args: `symbol` (string, required, exact broker symbol). Trading specification, read from MT5
+(`SymbolInfoInteger/Double/String`). The backend uses it to round volumes and prices and to size
+risk. The symbol is added to Market Watch if needed. Unknown symbol: `4301`.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1009", "cmd": "get_symbol", "args": {"symbol": "XAUUSD"}}
+```
+
+```json
+{
+  "id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1009",
+  "ok": true,
+  "data": {
+    "symbol": "XAUUSD",
+    "description": "Gold vs US Dollar",
+    "digits": 2,
+    "point": 0.01,
+    "volume_min": 0.01,
+    "volume_max": 100.0,
+    "volume_step": 0.01,
+    "contract_size": 100.0,
+    "tick_value": 1.0,
+    "tick_size": 0.01,
+    "stops_level": 10,
+    "trade_allowed": true,
+    "currency_profit": "USD"
+  },
+  "retcode": 0
+}
+```
+
+| data field | MT5 property | notes |
+|---|---|---|
+| `digits`, `point` | `SYMBOL_DIGITS`, `SYMBOL_POINT` | |
+| `volume_min/max/step` | `SYMBOL_VOLUME_MIN/MAX/STEP` | lots |
+| `contract_size` | `SYMBOL_TRADE_CONTRACT_SIZE` | |
+| `tick_value`, `tick_size` | `SYMBOL_TRADE_TICK_VALUE`, `SYMBOL_TRADE_TICK_SIZE` | account-currency value of one `tick_size` move for 1.0 lot |
+| `stops_level` | `SYMBOL_TRADE_STOPS_LEVEL` | minimum SL/TP/pending distance, in points |
+| `trade_allowed` | `SYMBOL_TRADE_MODE` | `true` for full, long-only and short-only symbols; `false` for close-only and disabled ones. `order_send` enforces the direction of long-only and short-only symbols. |
+| `currency_profit` | `SYMBOL_CURRENCY_PROFIT` | |
+
+## Write commands
+
+Write commands change the account. Only a user-confirmed, gate-approved request may produce them
+(SPEC core rules 1 to 4). The EA never trades on its own: it executes a write only as the answer to
+a request, through `CTrade`.
+
+### Order of checks
+
+The EA handles every write in the same order. The first failing step answers the request and
+nothing reaches the trade server:
+
+1. **Idempotency**: a request `id` that is already in the reply cache gets the cached reply
+   (see below). Nothing else runs.
+2. **Shape**: argument types, required arguments, `comment` length, price rules per order type,
+   negative sl/tp, deviation range. Failure: `retcode -1`.
+3. **Safety gate**: failure: `retcode -3`.
+4. **Market state and ticket checks**: symbol, volume, price format, stops, ticket exists.
+   Failure: `retcode -1`.
+5. **Execution** through `CTrade`. The reply carries the trade server retcode.
+
+Because step 2 comes before step 3, a malformed request reports `-1` even on an account the EA
+would refuse; a well-formed one reports `-3` before any market-dependent validation.
+
+### Safety gate (`retcode -3`)
+
+The EA refuses with `retcode -3` and `ok:false` (nothing is sent to the trade server) when:
+
+| condition | error text |
+|---|---|
+| `ACCOUNT_TRADE_MODE` is real and the EA input `InpAllowReal` is `false` (the default) | `writes refused on a real account (InpAllowReal is false)` |
+| `TERMINAL_TRADE_ALLOWED` is false | `writes refused: Algo Trading is disabled in the terminal (enable Algo Trading)` |
+| `MQL_TRADE_ALLOWED` is false (Algo Trading is off for this EA) | `writes refused: trading is not allowed for this EA (enable Algo Trading for the EA)` |
+| the account does not allow trading or automated trading (`ACCOUNT_TRADE_ALLOWED`, `ACCOUNT_TRADE_EXPERT`) | `writes refused: trading is disabled for this account` or `writes refused: automated trading is disabled for this account` |
+| no connected trading account, or the strategy tester | `writes refused: ...` |
+
+Reads are never refused.
+
+### Validation (`retcode -1`)
+
+An invalid request answers `ok:false`, `retcode -1` and a clear `error`; nothing is sent. The
+EA **rejects, never rounds**: the caller rounds volumes and prices first (using `get_symbol`).
+
+| rule | detail |
+|---|---|
+| symbol | must exist and have quotes (`unknown symbol: X`); `trade_allowed` must be true; a long-only symbol rejects sells and a short-only symbol rejects buys |
+| volume | finite, within `volume_min..=volume_max`, and a whole multiple of `volume_step` (tolerance `1e-8`) |
+| prices | `price`, `sl`, `tp` finite, positive and expressed in at most `digits` decimals |
+| stops | buy: `sl` below and `tp` above the reference price; sell: the reverse; each at least `max(stops_level, 1)` points away. Reference price: market order: the close-side price (bid for a buy, ask for a sell); pending order: its own `price` |
+| pending price | buy limit below the ask, buy stop above the ask, sell limit above the bid, sell stop below the bid, each at least `max(stops_level, 1)` points away |
+| `price` | required for `limit` and `stop`; must be absent for `market` |
+| `comment` | at most 31 characters |
+| `deviation_points` | `0..=10000`, default `20` |
+| `magic` | required, not negative |
+| tickets | positive integers; the position or pending order must exist |
+
+### Reply
+
+A successful write answers `ok:true` with `data` = **TradeResult**, and the envelope `retcode`
+equals `data.retcode`. `ok` is true exactly for the success retcodes `10008` (placed), `10009`
+(done) and `10010` (done partially).
+
+| data field | type | notes |
+|---|---|---|
+| `retcode` | integer | trade server retcode |
+| `retcode_description` | string | text from `CTrade`, e.g. `done`, `done at 2391.40` |
+| `order` | integer | order ticket created or affected; `0` for `position_modify` |
+| `deal` | integer | deal ticket; `0` when there is none (pending order placed or cancelled, modify) |
+| `volume` | number | executed volume; for a pending order the requested volume; `0` for modify and cancel |
+| `price` | number | execution price; `0` when there is none |
+| `comment` | string | trade server comment, usually `Request executed` |
+
+If the trade server rejects the request, the reply is `ok:false`, `retcode` = the trade retcode
+and `error` = `trade failed: <description> (<retcode>)`. **Error replies omit `data`**; the
+description is in `error`. For example market closed is `10018`, not enough margin is `10019`.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1010", "ok": false, "error": "trade failed: no money (10019)", "retcode": 10019}
+```
+
+### `order_send`
+
+Opens a position (`market`) or places a pending order (`limit`, `stop`).
+
+| arg | type | rules |
+|---|---|---|
+| `symbol` | string | required |
+| `side` | `"buy"` or `"sell"` | required |
+| `volume` | number | required |
+| `type` | `"market"`, `"limit"` or `"stop"` | required |
+| `price` | number | required for `limit`/`stop`, absent for `market` |
+| `sl`, `tp` | number | optional; `0` or absent means not set |
+| `deviation_points` | integer | optional, max slippage for market orders |
+| `magic` | integer | required; the backend sends `770077` (`JARVIS_MAGIC`) |
+| `comment` | string | at most 31 characters, may be empty |
+
+The filling mode is chosen from `SYMBOL_FILLING_MODE` (FOK, then IOC, then RETURN).
+
+Market order (`order_send.request.json`, `order_send.reply.json`):
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1010", "cmd": "order_send", "args": {"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "type": "market", "sl": 2380.0, "tp": 2410.0, "deviation_points": 20, "magic": 770077, "comment": "jarvis:3f9a2c1d"}}
+```
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1010", "ok": true, "data": {"retcode": 10009, "retcode_description": "done at 2391.40", "order": 4000001, "deal": 6000001, "volume": 0.1, "price": 2391.4, "comment": "Request executed"}, "retcode": 10009}
+```
+
+Pending order (`order_send_limit.request.json`, `order_send_limit.reply.json`):
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1011", "cmd": "order_send", "args": {"symbol": "EURUSD", "side": "buy", "volume": 0.2, "type": "limit", "price": 1.07, "sl": 1.06, "tp": 1.09, "magic": 770077, "comment": "jarvis:7b2e90aa"}}
+```
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1011", "ok": true, "data": {"retcode": 10009, "retcode_description": "done", "order": 4000001, "deal": 0, "volume": 0.2, "price": 0.0, "comment": "Request executed"}, "retcode": 10009}
+```
+
+Rejected volume (`order_send_invalid_volume.*`):
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1016", "ok": false, "error": "volume 0.015 is not a multiple of the volume step 0.01", "retcode": -1}
+```
+
+Refused (`order_send_refused.reply.json`, the answer to `order_send.request.json` on a real account):
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1010", "ok": false, "error": "writes refused on a real account (InpAllowReal is false)", "retcode": -3}
+```
+
+### `position_modify`
+
+Changes the stops of an open position. **Absent keeps the current value, `0` removes it.** At least
+one of `sl` and `tp` is required. A value equal to the current one is not re-validated against the
+moving market. Args: `ticket` (required), `sl`, `tp`. The same stops rules as `order_send` apply,
+with the close-side price as reference.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1012", "cmd": "position_modify", "args": {"ticket": 1001001, "sl": 2380.0}}
+```
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1012", "ok": true, "data": {"retcode": 10009, "retcode_description": "done", "order": 0, "deal": 0, "volume": 0.0, "price": 0.0, "comment": "Request executed"}, "retcode": 10009}
+```
+
+### `position_close`
+
+Closes the whole position at market. Args: `ticket` (required), `deviation_points` (optional).
+The reply carries the closing order and deal and the closing price.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1013", "cmd": "position_close", "args": {"ticket": 1001001, "deviation_points": 30}}
+```
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1013", "ok": true, "data": {"retcode": 10009, "retcode_description": "done at 2391.12", "order": 4000001, "deal": 6000001, "volume": 0.1, "price": 2391.12, "comment": "Request executed"}, "retcode": 10009}
+```
+
+### `position_close_partial`
+
+Closes part of a position. Args: `ticket`, `volume`, `deviation_points` (optional). `volume` must be
+valid for the symbol (min, max, step), **strictly less than the position volume** (use
+`position_close` to close it fully), and the remaining volume must be at least `volume_min`. On
+hedging accounts the position keeps its ticket with a smaller volume; netting accounts reduce the
+net position with an opposite deal.
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1014", "cmd": "position_close_partial", "args": {"ticket": 1001002, "volume": 0.2}}
+```
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1014", "ok": true, "data": {"retcode": 10009, "retcode_description": "done at 19823.3", "order": 4000001, "deal": 6000001, "volume": 0.2, "price": 19823.3, "comment": "Request executed"}, "retcode": 10009}
+```
+
+Some brokers blank the comment of the remaining position after a partial close (observed on the
+demo server used for the live tests). Identify a position by its ticket and `magic`, not by its
+comment.
+
+### `order_cancel`
+
+Deletes a pending order. Args: `ticket` (required). Unknown ticket: `-1`
+(`pending order not found: <ticket>`).
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1015", "cmd": "order_cancel", "args": {"ticket": 2001001}}
+```
+
+```json
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1015", "ok": true, "data": {"retcode": 10009, "retcode_description": "done", "order": 2001001, "deal": 0, "volume": 0.0, "price": 0.0, "comment": "Request executed"}, "retcode": 10009}
+```
+
+### Idempotency
+
+The EA keeps a ring cache of the **last 64 write replies**, keyed by request `id`. A write whose
+`id` is already in the cache returns the cached reply **verbatim** and is **not executed again**
+(the EA logs this). This holds for every write reply, including validation errors (`-1`), refusals
+(`-3`) and trade failures. Reads are never cached. The cache lives in the EA process: it is empty
+after the EA restarts or is reloaded. Entries are evicted oldest first, so only the 64 most recent
+writes are protected.
+
+The Rust client generates a fresh UUID for every call and never resends a write, so the cache is a
+second line of defence for any other sender (a script, a retrying proxy).
+
+### A timeout after sending means the outcome is unknown
+
+A write is a request the EA may already have executed even though no reply arrived (slow trade
+server, lost reply, client timeout). Therefore:
+
+- The client returns `BridgeError::Timeout` and **never retries a write after it was sent**. The
+  only automatic re-send is for a reused socket that failed at send time, when nothing was
+  delivered.
+- The caller must treat the outcome as **unknown** (the API reports `outcome_unknown`) and
+  reconcile by reading `get_positions`, `get_orders` and `get_history` before deciding anything.
+- A trade round trip can take seconds, so give the client that sends writes a generous timeout
+  (the live tests and `bridge_cli` use 15 s; the default 3 s is meant for reads).
+- Sending the same request again with the **same `id`** is safe while the EA is up (the cache
+  answers it). Sending a new request with a new `id` is a new trade.
+
 ## Error example
 
 Unknown symbol (`error.reply.json`):
@@ -323,7 +588,7 @@ Malformed request (not JSON), where the EA cannot know the id:
 Unknown command:
 
 ```json
-{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1008", "ok": false, "error": "unknown command: order_send", "retcode": -2}
+{"id": "6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1008", "ok": false, "error": "unknown command: launch_missiles", "retcode": -2}
 ```
 
 ## Client behaviour (`BridgeClient`)
@@ -346,8 +611,8 @@ Unknown command:
   2 s). Once the EA starts, the next call succeeds without restarting anything.
 - **Dead reused socket.** If sending on a reused socket fails (the EA restarted), the client
   reconnects once and re-sends within the same call. Nothing was delivered in that case, so
-  this is safe even for the write commands of Sprint 2. A failure after the request was sent
-  is never retried.
+  this is safe even for write commands. A failure after the request was sent (including a
+  timeout) is never retried; for a write the outcome is then unknown, see above.
 - **Logging** (`tracing`): per call `id`, `cmd`, `duration_ms`, `ok`, `retcode` at `debug`;
   failures and `ok: false` replies at `warn`.
 
@@ -360,16 +625,38 @@ Unknown command:
 
 ## Requirements for the EA
 
-1. `bind` `tcp://127.0.0.1:<port>` only. Log the endpoint on start.
+1. `bind` `tcp://127.0.0.1:<port>` only. Log the endpoint on start (including whether real accounts are allowed).
 2. Poll with `ZMQ_DONTWAIT` from `OnTimer` (about 20 ms); handle at most 10 requests per tick.
 3. Exactly one single-frame JSON reply per request, always, including errors. Echo `id`.
 4. Validate every field (types, ranges, symbol) before using it. Never crash or hang on bad input.
 5. Never include login, name, server or company in any reply.
 6. Requests larger than 64 KB are dropped by ZeroMQ (`ZMQ_MAXMSGSIZE`), so the client sees a timeout, not a reply.
-7. In Sprint 1 answer every command other than the six above with `retcode -2`.
+7. Answer every unknown command with `retcode -2`.
+8. Write commands: validate before touching `CTrade`, apply the safety gate (`-3`), execute only on
+   request, cache the last 64 replies by `id`, log every write (command, id, retcode) and every
+   cache hit, and never trade from `OnTick` or on a timer.
 
 ## Mock for tests and offline work
 
 `jarvis_bridge_client::mock::MockBridge` (cargo feature `mock`) is an in-process REP server that follows
 this document. `cargo run -p jarvis-bridge-client --features mock --example mock_server`
 serves it on `tcp://127.0.0.1:5555` so `bridge_cli` and the API can be exercised without MT5.
+
+The mock implements `get_symbol` and every write command with real state changes: `order_send`
+adds a position (filled at the ask or bid, new ticket) or a pending order, `position_modify` updates
+sl/tp, closes remove or reduce positions and realise profit into the account and the deal history,
+`order_cancel` removes an order. It applies the same validation, safety gate, error texts and
+64-entry reply cache as the EA. Test hooks on `MockState` and `MockBridge`:
+
+| hook | effect |
+|---|---|
+| `refuse_writes(true)`, `MockState::refuse_writes` | every write answers `-3` like a real account without `InpAllowReal` |
+| `MockState::allow_real` | mirrors `InpAllowReal`; a `Real` `ping.trade_mode` refuses writes unless set |
+| `fail_next_write(10019)`, `MockState::fail_next_write` | the next write that passes validation fails with that trade retcode and changes nothing |
+| `drop_next(n)` | swallow the next `n` requests without replying (timeout tests) |
+| `state()`, `update_state(f)` | read back or change positions, orders, deals, prices, symbols |
+| `executed_writes()`, `cache_hits()` | how many writes ran, and how many were answered from the cache |
+
+`MockState::symbols` holds realistic trading specifications for the six mock symbols.
+`bridge_cli` offers `symbol`, `buy`, `sell`, `modify`, `close` and `cancel`; each write needs `--yes`
+and refuses unless `ping` reports a demo account.

@@ -6,8 +6,8 @@
 //! the next `recv`), so [`MockBridge::drop_next`] is just "receive and do not reply". A client
 //! that times out and reconnects is served normally afterwards; its old connection ends and
 //! the mock ignores the resulting disconnect.
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -17,29 +17,40 @@ use tokio::task::JoinHandle;
 use zeromq::{RepSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
 use crate::error::BridgeError;
+use crate::mock_trade::Engine;
 use crate::protocol::{
     Account, Command, Deal, DealEntry, DealType, HISTORY_LIMIT_DEFAULT, HISTORY_LIMIT_MAX, History,
     HistoryQuery, Order, OrderType, Orders, PingInfo, Position, Positions, Price,
-    RETCODE_INVALID_REQUEST, RETCODE_UNKNOWN_COMMAND, Reply, Request, Side, TradeMode,
+    RETCODE_INVALID_REQUEST, RETCODE_UNKNOWN_COMMAND, Reply, Request, Side, SymbolInfo, TradeMode,
 };
 
 /// MT5 `ERR_MARKET_UNKNOWN_SYMBOL`.
 const RETCODE_UNKNOWN_SYMBOL: i64 = 4301;
 
 /// Every command name the mock (and protocol version 1) knows.
-const KNOWN_COMMANDS: [&str; 6] = [
+const KNOWN_COMMANDS: [&str; 12] = [
     "ping",
     "get_price",
     "get_account",
     "get_positions",
     "get_orders",
     "get_history",
+    "get_symbol",
+    "order_send",
+    "position_modify",
+    "position_close",
+    "position_close_partial",
+    "order_cancel",
 ];
 
-/// Canned state served by [`MockBridge`]. `Default` gives a demo account with
-/// XAUUSD, US100, US30, EURUSD, GBPUSD, BTCUSD prices, two open positions, one pending
-/// order and five deals (one of them a balance deal). Deal and position times are relative
-/// to "now" at the moment `default()` is called.
+/// State served by [`MockBridge`]. `Default` gives a demo account with
+/// XAUUSD, US100, US30, EURUSD, GBPUSD, BTCUSD prices and trading specifications, two open
+/// positions, one pending order and five deals (one of them a balance deal). Deal and position
+/// times are relative to "now" at the moment `default()` is called.
+///
+/// Write commands change this state: `order_send` adds a position or a pending order,
+/// `position_modify` updates sl/tp, closes remove or reduce positions (and realise profit into
+/// `account`), `order_cancel` removes an order. Read it back with [`MockBridge::state`].
 #[derive(Debug, Clone)]
 pub struct MockState {
     pub ping: PingInfo,
@@ -50,6 +61,17 @@ pub struct MockState {
     pub deals: Vec<Deal>,
     /// When set, the mock swallows this many requests without replying (timeout tests).
     pub drop_next: usize,
+    /// Trading specification per symbol (`get_symbol`, and the validation of write commands).
+    pub symbols: Vec<SymbolInfo>,
+    /// Simulate an account the EA refuses to write to: every write answers `-3` after its
+    /// arguments were validated. A `Real` `ping.trade_mode` behaves the same unless
+    /// `allow_real` is set (the EA input `InpAllowReal`).
+    pub refuse_writes: bool,
+    /// Mirrors the EA input `InpAllowReal`.
+    pub allow_real: bool,
+    /// The next write that passes validation fails with this trade retcode (for example
+    /// `10019` no money, `10018` market closed) and changes nothing. Consumed by that write.
+    pub fail_next_write: Option<i64>,
 }
 
 impl Default for MockState {
@@ -231,21 +253,126 @@ impl Default for MockState {
                 ),
             ],
             drop_next: 0,
+            symbols: default_symbols(),
+            refuse_writes: false,
+            allow_real: false,
+            fail_next_write: None,
         }
     }
 }
 
-fn unix_now() -> i64 {
+/// Realistic trading specifications for the six mock symbols.
+fn default_symbols() -> Vec<SymbolInfo> {
+    fn spec(
+        symbol: &str,
+        description: &str,
+        digits: u32,
+        volume: (f64, f64, f64),
+        contract_size: f64,
+        tick_value: f64,
+        stops_level: i64,
+    ) -> SymbolInfo {
+        let point = 10f64.powi(-i32::try_from(digits).unwrap_or(0));
+        SymbolInfo {
+            symbol: symbol.to_owned(),
+            description: description.to_owned(),
+            digits,
+            point,
+            volume_min: volume.0,
+            volume_max: volume.1,
+            volume_step: volume.2,
+            contract_size,
+            tick_value,
+            tick_size: point,
+            stops_level,
+            trade_allowed: true,
+            currency_profit: "USD".to_owned(),
+        }
+    }
+    vec![
+        spec(
+            "XAUUSD",
+            "Gold vs US Dollar",
+            2,
+            (0.01, 100.0, 0.01),
+            100.0,
+            1.0,
+            10,
+        ),
+        spec(
+            "US100",
+            "US Tech 100 Index",
+            1,
+            (0.1, 100.0, 0.1),
+            1.0,
+            0.1,
+            50,
+        ),
+        spec(
+            "US30",
+            "Wall Street 30 Index",
+            1,
+            (0.1, 100.0, 0.1),
+            1.0,
+            0.1,
+            50,
+        ),
+        spec(
+            "EURUSD",
+            "Euro vs US Dollar",
+            5,
+            (0.01, 100.0, 0.01),
+            100_000.0,
+            1.0,
+            0,
+        ),
+        spec(
+            "GBPUSD",
+            "Great Britain Pound vs US Dollar",
+            5,
+            (0.01, 100.0, 0.01),
+            100_000.0,
+            1.0,
+            0,
+        ),
+        spec(
+            "BTCUSD",
+            "Bitcoin vs US Dollar",
+            2,
+            (0.01, 10.0, 0.01),
+            1.0,
+            0.01,
+            100,
+        ),
+    ]
+}
+
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// Counters shared between the handle and the server task.
-#[derive(Debug, Default)]
+/// Mutable world: the served state plus the write engine (ticket counters, reply cache).
+#[derive(Debug)]
+struct Inner {
+    state: MockState,
+    engine: Engine,
+}
+
+/// Counters and state shared between the handle and the server task.
+#[derive(Debug)]
 struct Shared {
     drop_next: AtomicUsize,
     requests: AtomicUsize,
+    inner: Mutex<Inner>,
+}
+
+impl Shared {
+    /// Lock the world. A panic in another holder cannot corrupt plain data, so poisoning is ignored.
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// A running mock EA. Dropping it stops the server.
@@ -283,10 +410,16 @@ impl MockBridge {
             .bind(endpoint)
             .await
             .map_err(|e| BridgeError::Transport(format!("mock bind failed: {e}")))?;
-        let shared = Arc::new(Shared::default());
-        shared.drop_next.store(state.drop_next, Ordering::SeqCst);
+        let shared = Arc::new(Shared {
+            drop_next: AtomicUsize::new(state.drop_next),
+            requests: AtomicUsize::new(0),
+            inner: Mutex::new(Inner {
+                state,
+                engine: Engine::default(),
+            }),
+        });
         let (stop, stopped) = oneshot::channel();
-        let task = tokio::spawn(serve(socket, Arc::new(state), shared.clone(), stopped));
+        let task = tokio::spawn(serve(socket, shared.clone(), stopped));
         Ok(Self {
             endpoint: bound.to_string(),
             shared,
@@ -305,6 +438,37 @@ impl MockBridge {
         self.shared.requests.load(Ordering::SeqCst)
     }
 
+    /// A copy of the current state (positions, orders, deals, account after any writes).
+    pub fn state(&self) -> MockState {
+        self.shared.lock().state.clone()
+    }
+
+    /// Change the state while the server runs, e.g. `mock.update_state(|s| s.prices[0].ask += 1.0)`.
+    pub fn update_state(&self, change: impl FnOnce(&mut MockState)) {
+        change(&mut self.shared.lock().state);
+    }
+
+    /// Make every write answer `-3` (a real account without `InpAllowReal`) until switched off.
+    pub fn refuse_writes(&self, refuse: bool) {
+        self.shared.lock().state.refuse_writes = refuse;
+    }
+
+    /// Make the next write that passes validation fail with this trade retcode and change nothing.
+    pub fn fail_next_write(&self, retcode: i64) {
+        self.shared.lock().state.fail_next_write = Some(retcode);
+    }
+
+    /// Writes that reached execution (passed validation and were not answered from the cache),
+    /// including ones forced to fail with [`MockBridge::fail_next_write`].
+    pub fn executed_writes(&self) -> usize {
+        self.shared.lock().engine.executed()
+    }
+
+    /// Writes answered from the idempotency cache instead of being executed.
+    pub fn cache_hits(&self) -> usize {
+        self.shared.lock().engine.cache_hits()
+    }
+
     /// Stop the server and wait until its port is released.
     pub async fn stop(mut self) {
         drop(self.stop.take());
@@ -321,12 +485,7 @@ impl Drop for MockBridge {
     }
 }
 
-async fn serve(
-    mut socket: RepSocket,
-    state: Arc<MockState>,
-    shared: Arc<Shared>,
-    mut stopped: oneshot::Receiver<()>,
-) {
+async fn serve(mut socket: RepSocket, shared: Arc<Shared>, mut stopped: oneshot::Receiver<()>) {
     loop {
         let request = tokio::select! {
             _ = &mut stopped => break,
@@ -353,7 +512,11 @@ async fn serve(
             .get(0)
             .map(|frame| frame.as_ref())
             .unwrap_or_default();
-        let reply = handle(&state, payload);
+        let reply = {
+            let mut inner = shared.lock();
+            let Inner { state, engine } = &mut *inner;
+            handle(state, engine, payload)
+        };
         let reply = match serde_json::to_vec(&reply) {
             Ok(bytes) => bytes,
             Err(_) => continue,
@@ -365,7 +528,7 @@ async fn serve(
     socket.close().await;
 }
 
-fn ok_reply<T: Serialize>(id: &str, data: &T) -> Reply {
+pub(crate) fn ok_reply<T: Serialize>(id: &str, data: &T) -> Reply {
     match serde_json::to_value(data) {
         Ok(value) => Reply {
             id: id.to_owned(),
@@ -378,7 +541,7 @@ fn ok_reply<T: Serialize>(id: &str, data: &T) -> Reply {
     }
 }
 
-fn err_reply(id: &str, retcode: i64, message: &str) -> Reply {
+pub(crate) fn err_reply(id: &str, retcode: i64, message: &str) -> Reply {
     Reply {
         id: id.to_owned(),
         ok: false,
@@ -397,7 +560,7 @@ fn unknown_symbol(id: &str, symbol: &str) -> Reply {
 }
 
 /// Decode one request and produce its reply. Never panics on bad input.
-fn handle(state: &MockState, payload: &[u8]) -> Reply {
+fn handle(state: &mut MockState, engine: &mut Engine, payload: &[u8]) -> Reply {
     let value: Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
         Err(e) => {
@@ -436,18 +599,19 @@ fn handle(state: &MockState, payload: &[u8]) -> Reply {
         }
     };
 
+    if request.command.is_write() {
+        return engine.write(state, id, request.command);
+    }
     match request.command {
-        // CONTRACT STUB (Sprint 2): implemented by the bridge-writes task.
-        Command::GetSymbol { .. }
-        | Command::OrderSend(_)
+        Command::GetSymbol { symbol } => match state.symbols.iter().find(|s| s.symbol == symbol) {
+            Some(info) => ok_reply(id, info),
+            None => unknown_symbol(id, &symbol),
+        },
+        Command::OrderSend(_)
         | Command::PositionModify(_)
         | Command::PositionClose(_)
         | Command::PositionClosePartial(_)
-        | Command::OrderCancel(_) => err_reply(
-            id,
-            RETCODE_UNKNOWN_COMMAND,
-            "not implemented in the mock yet",
-        ),
+        | Command::OrderCancel(_) => err_reply(id, RETCODE_UNKNOWN_COMMAND, "unreachable write"),
         Command::Ping {} => ok_reply(id, &state.ping),
         Command::GetAccount {} => ok_reply(id, &state.account),
         Command::GetPrice { symbol } => match state.prices.iter().find(|p| p.symbol == symbol) {

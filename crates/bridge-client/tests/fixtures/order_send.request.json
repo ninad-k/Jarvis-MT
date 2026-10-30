@@ -1,0 +1,1 @@
+{"id":"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1010","cmd":"order_send","args":{"symbol":"XAUUSD","side":"buy","volume":0.1,"type":"market","sl":2380.0,"tp":2410.0,"deviation_points":20,"magic":770077,"comment":"jarvis:3f9a2c1d"}}

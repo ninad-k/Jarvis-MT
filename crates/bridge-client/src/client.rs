@@ -33,9 +33,14 @@ pub struct BridgeConfig {
     /// (`127.0.0.1`, `localhost` or `[::1]`); `localhost` is connected as `127.0.0.1`.
     pub endpoint: String,
     /// Per-request timeout. It covers the whole call: time spent waiting behind other
-    /// calls, connecting, sending and waiting for the reply.
+    /// calls, connecting, sending and waiting for the reply. Write commands use at least
+    /// [`MIN_WRITE_TIMEOUT`], because a trade round trip can take seconds.
     pub timeout: Duration,
 }
+
+/// Lower bound on the timeout of write commands. A write that times out has an
+/// unknown outcome, so a generous budget avoids needless "outcome unknown" results.
+pub const MIN_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl Default for BridgeConfig {
     fn default() -> Self {
@@ -62,6 +67,16 @@ impl BridgeClient {
     /// The actor is spawned with the current Tokio runtime, so this must be called
     /// from inside one (otherwise it returns `BridgeError::Transport`, it does not panic).
     pub fn new(config: BridgeConfig) -> Result<Self, BridgeError> {
+        let write_timeout = config.timeout.max(MIN_WRITE_TIMEOUT);
+        Self::with_write_timeout(config, write_timeout)
+    }
+
+    /// Like [`BridgeClient::new`], with an explicit timeout for write commands instead
+    /// of `max(config.timeout, MIN_WRITE_TIMEOUT)`. Mainly for tests.
+    pub fn with_write_timeout(
+        config: BridgeConfig,
+        write_timeout: Duration,
+    ) -> Result<Self, BridgeError> {
         let target = Target::parse(&config.endpoint)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             BridgeError::Transport("BridgeClient::new must be called inside a Tokio runtime".into())
@@ -70,6 +85,7 @@ impl BridgeClient {
         let actor = Actor {
             target,
             timeout: config.timeout,
+            write_timeout,
             socket: None,
         };
         runtime.spawn(actor.run(rx));
@@ -129,7 +145,10 @@ impl BridgeClient {
     }
 
     pub async fn get_symbol(&self, symbol: &str) -> Result<SymbolInfo, BridgeError> {
-        self.call(Command::GetSymbol { symbol: symbol.to_owned() }).await
+        self.call(Command::GetSymbol {
+            symbol: symbol.to_owned(),
+        })
+        .await
     }
 
     // ---- Write commands. Callers must only use these after a confirmed gate
@@ -148,7 +167,10 @@ impl BridgeClient {
         self.call(Command::PositionModify(args)).await
     }
 
-    pub async fn position_close(&self, args: PositionCloseArgs) -> Result<TradeResult, BridgeError> {
+    pub async fn position_close(
+        &self,
+        args: PositionCloseArgs,
+    ) -> Result<TradeResult, BridgeError> {
         self.call(Command::PositionClose(args)).await
     }
 
@@ -226,6 +248,7 @@ impl Target {
 struct Actor {
     target: Target,
     timeout: Duration,
+    write_timeout: Duration,
     /// Connected socket, kept between calls. `None` until the first call and after any failure.
     socket: Option<ReqSocket>,
 }
@@ -237,8 +260,13 @@ impl Actor {
                 // Caller gave up while queued; nothing was sent, so skip it.
                 continue;
             }
-            let deadline = job.enqueued + self.timeout;
-            let result = self.handle(job.command, deadline).await;
+            let budget = if job.command.is_write() {
+                self.write_timeout
+            } else {
+                self.timeout
+            };
+            let deadline = job.enqueued + budget;
+            let result = self.handle(job.command, deadline, budget).await;
             // The caller may have been cancelled meanwhile; the exchange still ran to completion
             // (or reset the socket), so lock-step stays intact.
             let _ = job.reply.send(result);
@@ -246,7 +274,12 @@ impl Actor {
         tracing::debug!(endpoint = %self.target.endpoint, "bridge client stopped");
     }
 
-    async fn handle(&mut self, command: Command, deadline: Instant) -> Result<Reply, BridgeError> {
+    async fn handle(
+        &mut self,
+        command: Command,
+        deadline: Instant,
+        budget: Duration,
+    ) -> Result<Reply, BridgeError> {
         let id = Uuid::new_v4().to_string();
         let cmd = command.name();
         let started = Instant::now();
@@ -254,7 +287,7 @@ impl Actor {
             id: id.clone(),
             command,
         }) {
-            Ok(payload) => self.exchange(&id, payload, deadline).await,
+            Ok(payload) => self.exchange(&id, payload, deadline, budget).await,
             Err(e) => Err(BridgeError::Protocol(format!(
                 "could not encode request: {e}"
             ))),
@@ -284,8 +317,9 @@ impl Actor {
         id: &str,
         payload: Vec<u8>,
         deadline: Instant,
+        budget: Duration,
     ) -> Result<Reply, BridgeError> {
-        let timeout_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX);
+        let timeout_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
         if Instant::now() >= deadline {
             // Spent the whole budget waiting behind earlier calls. Nothing was sent.
             return Err(BridgeError::Timeout(timeout_ms));

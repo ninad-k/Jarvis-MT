@@ -1,10 +1,12 @@
 //+------------------------------------------------------------------+
 //| JarvisBridge.mq5                                                 |
-//| Jarvis MT - localhost ZeroMQ bridge (Sprint 1: READ-ONLY).       |
+//| Jarvis MT - localhost ZeroMQ bridge.                             |
 //|                                                                  |
 //| - ZeroMQ REP socket, bound to 127.0.0.1 only.                    |
 //| - Polled with ZMQ_DONTWAIT from OnTimer (20 ms), at most 10      |
-//|   requests per tick. Never blocks, never trades, no OnTick logic.|
+//|   requests per tick. No OnTick logic.                            |
+//| - Trades ONLY in response to a request (order_send, ...), never  |
+//|   on its own. Real accounts are refused unless InpAllowReal.     |
 //| - Exactly one reply for every request received.                  |
 //| Wire format: crates/bridge-client/src/protocol.rs                |
 //|                                                                  |
@@ -12,14 +14,15 @@
 //+------------------------------------------------------------------+
 #property copyright   "Jarvis MT"
 #property link        "https://github.com/dingmaotu/mql-zmq"
-#property description "Read-only localhost bridge for the Jarvis MT assistant."
-#property description "Binds a ZeroMQ REP socket on 127.0.0.1. Never places trades."
+#property description "Localhost bridge for the Jarvis MT assistant."
+#property description "Binds a ZeroMQ REP socket on 127.0.0.1. Trades only on request, and refuses real accounts unless InpAllowReal is set."
 
 #include <Zmq/Zmq.mqh>
 #include <Jarvis/Protocol.mqh>
 
 input string InpEndpoint = "tcp://127.0.0.1:5555"; // ZeroMQ endpoint (must be tcp://127.0.0.1:<port>)
 input bool   InpVerbose  = false;                  // Log one line per request
+input bool   InpAllowReal = false;                 // Allow write commands on a REAL account (default: demo only)
 
 #define BRIDGE_TIMER_MS          20
 #define BRIDGE_MAX_PER_TICK      10
@@ -121,6 +124,7 @@ int OnInit()
       return INIT_FAILED;
      }
 
+   g_jarvisAllowReal=InpAllowReal;
    g_ctx=new Context();
    if(CheckPointer(g_ctx)!=POINTER_DYNAMIC || g_ctx.ref()==0)
      {
@@ -146,7 +150,8 @@ int OnInit()
      }
 
    g_hostPort=StringSubstr(InpEndpoint,6);   // strip "tcp://"
-   PrintFormat("JarvisBridge %s listening on %s (libzmq %s, read-only)",JARVIS_EA_VERSION,g_hostPort,Zmq::getVersion());
+   PrintFormat("JarvisBridge %s listening on %s (libzmq %s, writes only on request, real accounts %s)",
+               JARVIS_EA_VERSION,g_hostPort,Zmq::getVersion(),InpAllowReal?"ALLOWED (InpAllowReal=true)":"refused");
    return INIT_SUCCEEDED;
   }
 

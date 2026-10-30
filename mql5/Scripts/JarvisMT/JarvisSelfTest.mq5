@@ -1,8 +1,12 @@
 //+------------------------------------------------------------------+
 //| JarvisSelfTest.mq5                                               |
 //| Offline checks of the JSON module and the request dispatcher.    |
-//| No ZeroMQ, no DLLs, no trading: it calls Jarvis_Process() with   |
+//| No ZeroMQ, no DLLs, no trades: it calls Jarvis_Process() with    |
 //| canned requests and prints PASS/FAIL to the Experts journal.     |
+//| The write-command tests send ONLY requests that must be rejected |
+//| (bad arguments, unknown tickets, wrong-side stops, cached ids);  |
+//| they run on demo accounts only, and the script verifies that the |
+//| number of positions and orders did not change.                   |
 //| Live-data replies (ping, account, positions, ...) are printed so |
 //| they can be compared with the terminal by eye.                   |
 //+------------------------------------------------------------------+
@@ -13,6 +17,8 @@
 #include <Jarvis/Protocol.mqh>
 
 input bool InpPrintReplies = true;   // Print live-data replies
+
+#define JARVIS_SELFTEST_MAGIC 770078
 
 int g_pass=0;
 int g_fail=0;
@@ -168,8 +174,11 @@ void TestProtocol()
    ExpectError("proto: args not object","{\"id\":\"x3\",\"cmd\":\"ping\",\"args\":[1]}",-1,"x3","args");
    string writes[]={"order_send","position_modify","position_close","position_close_partial","order_cancel"};
    for(int i=0; i<ArraySize(writes); i++)
-      ExpectError("proto: write command "+writes[i]+" rejected","{\"id\":\"w"+IntegerToString(i)+"\",\"cmd\":\""+writes[i]+"\",\"args\":{}}",
-                  -2,"w"+IntegerToString(i),"not implemented in this EA version");
+      ExpectError("proto: write command "+writes[i]+" without arguments is invalid",
+                  "{\"id\":\"w"+IntegerToString(i)+"\",\"cmd\":\""+writes[i]+"\",\"args\":{}}",
+                  -1,"w"+IntegerToString(i));
+   ExpectError("proto: get_symbol without symbol","{\"id\":\"s1\",\"cmd\":\"get_symbol\"}",-1,"s1","symbol");
+   ExpectError("proto: get_symbol unknown symbol","{\"id\":\"s2\",\"cmd\":\"get_symbol\",\"args\":{\"symbol\":\"NOPE_X\"}}",4301,"s2","unknown symbol");
    ExpectError("proto: get_price without symbol","{\"id\":\"p1\",\"cmd\":\"get_price\"}",-1,"p1","symbol");
    ExpectError("proto: get_price symbol wrong type","{\"id\":\"p2\",\"cmd\":\"get_price\",\"args\":{\"symbol\":7}}",-1,"p2","symbol");
    ExpectError("proto: get_price unknown symbol","{\"id\":\"p3\",\"cmd\":\"get_price\",\"args\":{\"symbol\":\"XAUUS_NOPE\"}}",4301,"p3","unknown symbol: XAUUS_NOPE");
@@ -205,7 +214,7 @@ void TestLive()
      }
    ExpectOk("live: ping","{\"id\":\"l1\",\"cmd\":\"ping\"}",rep,true);
    int d=rep.Get(rep.Root(),"data");
-   Check(rep.Int(rep.Get(d,"protocol_version"))==1 && rep.Str(rep.Get(d,"ea_version"))=="0.1.0" &&
+   Check(rep.Int(rep.Get(d,"protocol_version"))==1 && rep.Str(rep.Get(d,"ea_version"))==JARVIS_EA_VERSION &&
          rep.Type(rep.Get(d,"terminal_connected"))==JV_BOOL && rep.Type(rep.Get(d,"trade_allowed"))==JV_BOOL &&
          rep.IsWhole(rep.Get(d,"server_time")),"live: ping fields");
 
@@ -233,7 +242,197 @@ void TestLive()
      {
       string sym=SymbolName(0,true);
       ExpectOk("live: get_price "+sym,"{\"id\":\"l6\",\"cmd\":\"get_price\",\"args\":{\"symbol\":\""+CJsonWriter::Escape(sym)+"\"}}",rep,true);
+      ExpectOk("live: get_symbol "+sym,"{\"id\":\"l7\",\"cmd\":\"get_symbol\",\"args\":{\"symbol\":\""+CJsonWriter::Escape(sym)+"\"}}",rep,true);
+      d=rep.Get(rep.Root(),"data");
+      Check(rep.Count(d)==13 && rep.Str(rep.Get(d,"symbol"))==sym && rep.Num(rep.Get(d,"volume_step"))>0.0 &&
+            rep.Num(rep.Get(d,"volume_min"))>0.0 && rep.Num(rep.Get(d,"volume_max"))>=rep.Num(rep.Get(d,"volume_min")) &&
+            rep.Num(rep.Get(d,"tick_size"))>0.0 && rep.Num(rep.Get(d,"point"))>0.0 && rep.IsWhole(rep.Get(d,"stops_level")) &&
+            rep.Type(rep.Get(d,"trade_allowed"))==JV_BOOL && rep.Type(rep.Get(d,"description"))==JV_STRING &&
+            rep.Type(rep.Get(d,"currency_profit"))==JV_STRING && rep.IsWhole(rep.Get(d,"digits")),"live: get_symbol fields");
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Write commands: requests that MUST be rejected. Nothing is traded|
+//+------------------------------------------------------------------+
+string BuildOrder(const string id,const string sym,const string side,const string type,const double vol,
+                  const double price,const double sl,const double tp,const string comment="jarvis:selftest")
+  {
+   CJsonWriter w;
+   w.BeginObject();
+   w.PutStr("id",id);
+   w.PutStr("cmd","order_send");
+   w.Key("args");
+   w.BeginObject();
+   w.PutStr("symbol",sym);
+   w.PutStr("side",side);
+   w.PutNum("volume",vol);
+   w.PutStr("type",type);
+   if(price>=0.0)
+      w.PutNum("price",price);
+   if(sl>=0.0)
+      w.PutNum("sl",sl);
+   if(tp>=0.0)
+      w.PutNum("tp",tp);
+   w.PutInt("magic",JARVIS_SELFTEST_MAGIC);
+   w.PutStr("comment",comment);
+   w.EndObject();
+   w.EndObject();
+   return w.ToString();
+  }
+
+//--- a tradable symbol with quotes from Market Watch, "" if none
+string FindTradableSymbol()
+  {
+   int total=SymbolsTotal(true);
+   for(int i=0; i<total; i++)
+     {
+      string s=SymbolName(i,true);
+      MqlTick t;
+      if(SymbolInfoInteger(s,SYMBOL_TRADE_MODE)==SYMBOL_TRADE_MODE_FULL && SymbolInfoTick(s,t) && t.bid>0.0 && t.ask>0.0 &&
+         SymbolInfoDouble(s,SYMBOL_VOLUME_MIN)>0.0 && SymbolInfoDouble(s,SYMBOL_VOLUME_STEP)>0.0)
+         return s;
+     }
+   return "";
+  }
+
+void TestWrites()
+  {
+   //--- structurally invalid requests: rejected with -1 on every account, before the safety gate
+   ExpectError("write: order_send bad side",BuildOrder("ws1","EURUSD","hold","market",0.01,-1,-1,-1),-1,"ws1","side");
+   ExpectError("write: order_send bad type",BuildOrder("ws2","EURUSD","buy","fok",0.01,-1,-1,-1),-1,"ws2","type");
+   ExpectError("write: order_send market with price",BuildOrder("ws3","EURUSD","buy","market",0.01,1.1,-1,-1),-1,"ws3","price");
+   ExpectError("write: order_send limit without price",BuildOrder("ws4","EURUSD","buy","limit",0.01,-1,-1,-1),-1,"ws4","price");
+   ExpectError("write: order_send comment too long",BuildOrder("ws5","EURUSD","buy","market",0.01,-1,-1,-1,"0123456789012345678901234567890X"),-1,"ws5","comment");
+   ExpectError("write: order_send volume as string",
+               "{\"id\":\"ws6\",\"cmd\":\"order_send\",\"args\":{\"symbol\":\"EURUSD\",\"side\":\"buy\",\"type\":\"market\",\"volume\":\"0.01\",\"magic\":1}}",
+               -1,"ws6","volume");
+   ExpectError("write: order_send without magic",
+               "{\"id\":\"ws7\",\"cmd\":\"order_send\",\"args\":{\"symbol\":\"EURUSD\",\"side\":\"buy\",\"type\":\"market\",\"volume\":0.01}}",
+               -1,"ws7","magic");
+   ExpectError("write: position_modify without sl and tp","{\"id\":\"ws8\",\"cmd\":\"position_modify\",\"args\":{\"ticket\":5}}",-1,"ws8","sl");
+   ExpectError("write: position_modify negative sl","{\"id\":\"ws9\",\"cmd\":\"position_modify\",\"args\":{\"ticket\":5,\"sl\":-1}}",-1,"ws9","negative");
+   ExpectError("write: position_close ticket 0","{\"id\":\"ws10\",\"cmd\":\"position_close\",\"args\":{\"ticket\":0}}",-1,"ws10","ticket");
+   ExpectError("write: order_cancel ticket as string","{\"id\":\"ws11\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":\"7\"}}",-1,"ws11","ticket");
+   ExpectError("write: position_close_partial without volume","{\"id\":\"ws12\",\"cmd\":\"position_close_partial\",\"args\":{\"ticket\":5}}",-1,"ws12","volume");
+   ExpectError("write: position_close bad deviation","{\"id\":\"ws13\",\"cmd\":\"position_close\",\"args\":{\"ticket\":5,\"deviation_points\":-1}}",-1,"ws13","deviation");
+
+   //--- everything below depends on the account and the market: demo accounts only
+   string mode="";
+   if(!Jarvis_TradeMode(mode))
+     {
+      Print("      SKIP state-dependent write tests: no connected trading account");
+      return;
+     }
+   if(mode!="demo")
+     {
+      PrintFormat("      SKIP state-dependent write tests: account trade mode is %s (demo required)",mode);
+      return;
+     }
+   string gateErr="";
+   int gate=Jarvis_WriteGate(gateErr);
+   string sym=FindTradableSymbol();
+   if(sym=="")
+     {
+      Print("      SKIP state-dependent write tests: no tradable symbol with quotes in Market Watch");
+      return;
+     }
+   if(gate!=0)
+     {
+      PrintFormat("      safety gate is closed (%s): checking that well-formed writes are refused with -3",gateErr);
+      ExpectError("write: well-formed order_send is refused by the gate",
+                  BuildOrder("wg1",sym,"buy","market",SymbolInfoDouble(sym,SYMBOL_VOLUME_MIN),-1,-1,-1),JARVIS_RC_WRITE_REFUSED,"wg1","refused");
+      ExpectError("write: position_close is refused by the gate","{\"id\":\"wg2\",\"cmd\":\"position_close\",\"args\":{\"ticket\":5}}",
+                  JARVIS_RC_WRITE_REFUSED,"wg2","refused");
+      return;
+     }
+
+   int posBefore=PositionsTotal();
+   int ordBefore=OrdersTotal();
+   MqlTick tk;
+   SymbolInfoTick(sym,tk);
+   double vmin=SymbolInfoDouble(sym,SYMBOL_VOLUME_MIN);
+   double vmax=SymbolInfoDouble(sym,SYMBOL_VOLUME_MAX);
+   double vstep=SymbolInfoDouble(sym,SYMBOL_VOLUME_STEP);
+   double point=SymbolInfoDouble(sym,SYMBOL_POINT);
+   int digits=Jarvis_Digits(sym);
+   long stops=0;
+   SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL,stops);
+   double gap=(double)(stops+100)*point;     // a distance that is certainly beyond the stops level
+   double ask=tk.ask,bid=tk.bid;
+   PrintFormat("      write tests on %s (bid %s ask %s, volume %s..%s step %s, stops level %I64d)",sym,
+               DoubleToString(bid,digits),DoubleToString(ask,digits),CJsonWriter::FormatNum(vmin),
+               CJsonWriter::FormatNum(vmax),CJsonWriter::FormatNum(vstep),stops);
+
+   //--- volume
+   ExpectError("write: volume 0",BuildOrder("wv1",sym,"buy","market",0.0,-1,-1,-1),-1,"wv1","volume");
+   ExpectError("write: volume below minimum",BuildOrder("wv2",sym,"buy","market",vmin*0.5,-1,-1,-1),-1,"wv2","below the minimum");
+   ExpectError("write: volume above maximum",BuildOrder("wv3",sym,"buy","market",vmax+vstep,-1,-1,-1),-1,"wv3","above the maximum");
+   ExpectError("write: volume not a multiple of the step",BuildOrder("wv4",sym,"buy","market",vmin+vstep*0.5,-1,-1,-1),-1,"wv4","multiple of the volume step");
+   ExpectError("write: unknown symbol",BuildOrder("wv5","NOPE_X","buy","market",vmin,-1,-1,-1),-1,"wv5","unknown symbol");
+
+   //--- stops on the wrong side of the market
+   ExpectError("write: buy with sl above the market",BuildOrder("wl1",sym,"buy","market",vmin,-1,NormalizeDouble(ask+gap,digits),-1),-1,"wl1","sl");
+   ExpectError("write: buy with tp below the market",BuildOrder("wl2",sym,"buy","market",vmin,-1,-1,NormalizeDouble(bid-gap,digits)),-1,"wl2","tp");
+   ExpectError("write: sell with sl below the market",BuildOrder("wl3",sym,"sell","market",vmin,-1,NormalizeDouble(bid-gap,digits),-1),-1,"wl3","sl");
+   ExpectError("write: sell with tp above the market",BuildOrder("wl4",sym,"sell","market",vmin,-1,-1,NormalizeDouble(ask+gap,digits)),-1,"wl4","tp");
+   ExpectError("write: buy with sl at the bid (inside the stops level)",BuildOrder("wl5",sym,"buy","market",vmin,-1,NormalizeDouble(bid,digits),-1),-1,"wl5","sl");
+   ExpectError("write: price with too many decimals",BuildOrder("wl6",sym,"buy","limit",vmin,NormalizeDouble(bid-gap,digits)+point*0.1,-1,-1),-1,"wl6","decimals");
+
+   //--- pending order prices on the wrong side
+   ExpectError("write: buy limit above the ask",BuildOrder("wp1",sym,"buy","limit",vmin,NormalizeDouble(ask+gap,digits),-1,-1),-1,"wp1","below");
+   ExpectError("write: buy stop below the ask",BuildOrder("wp2",sym,"buy","stop",vmin,NormalizeDouble(ask-gap,digits),-1,-1),-1,"wp2","above");
+   ExpectError("write: sell limit below the bid",BuildOrder("wp3",sym,"sell","limit",vmin,NormalizeDouble(bid-gap,digits),-1,-1),-1,"wp3","above");
+   ExpectError("write: sell stop above the bid",BuildOrder("wp4",sym,"sell","stop",vmin,NormalizeDouble(bid+gap,digits),-1,-1),-1,"wp4","below");
+   double farBuy=NormalizeDouble(ask-gap*4.0,digits);
+   ExpectError("write: buy limit with sl above its price",BuildOrder("wp5",sym,"buy","limit",vmin,farBuy,NormalizeDouble(farBuy+gap,digits),-1),-1,"wp5","sl");
+
+   //--- unknown tickets
+   ExpectError("write: position_modify unknown ticket","{\"id\":\"wt1\",\"cmd\":\"position_modify\",\"args\":{\"ticket\":999999999999,\"sl\":1.0}}",-1,"wt1","position not found");
+   ExpectError("write: position_close unknown ticket","{\"id\":\"wt2\",\"cmd\":\"position_close\",\"args\":{\"ticket\":999999999999}}",-1,"wt2","position not found");
+   ExpectError("write: position_close_partial unknown ticket","{\"id\":\"wt3\",\"cmd\":\"position_close_partial\",\"args\":{\"ticket\":999999999999,\"volume\":0.01}}",-1,"wt3","position not found");
+   ExpectError("write: order_cancel unknown ticket","{\"id\":\"wt4\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":999999999999}}",-1,"wt4","pending order not found");
+
+   //--- partial close volume must be less than the position volume (needs a position to look at)
+   if(PositionsTotal()>0)
+     {
+      ulong pt=PositionGetTicket(0);
+      double pvol=PositionGetDouble(POSITION_VOLUME);
+      if(pt>0)
+         ExpectError("write: partial close of the whole position volume",
+                     StringFormat("{\"id\":\"wt5\",\"cmd\":\"position_close_partial\",\"args\":{\"ticket\":%I64u,\"volume\":%s}}",pt,CJsonWriter::FormatNum(pvol)),
+                     -1,"wt5","less than the position volume");
+      else
+         Print("      SKIP partial-close test: could not read the first position");
+     }
+   else
+      Print("      SKIP partial-close test: no open position");
+
+   //--- reply cache: a repeated id returns the first reply verbatim and executes nothing
+   JarvisResult r1,r2,r3;
+   string firstReq=BuildOrder("dup-1",sym,"buy","market",0.0,-1,-1,-1);                 // rejected: volume 0
+   Jarvis_Process(firstReq,r1);
+   ulong hits=g_jarvisCacheHits;
+   string otherReq="{\"id\":\"dup-1\",\"cmd\":\"position_close\",\"args\":{\"ticket\":999999999999}}";   // other command, same id
+   Jarvis_Process(otherReq,r2);
+   Check(!r1.ok && !r1.cached && r2.reply==r1.reply && r2.cached && g_jarvisCacheHits==hits+1,
+         "write cache: a repeated id returns the cached reply, nothing runs again",r2.reply);
+   Jarvis_Process(firstReq,r3);
+   Check(r3.reply==r1.reply && r3.cached && g_jarvisCacheHits==hits+2,"write cache: still cached on the third request");
+   //--- the ring holds 64 replies: after 64 other ids the first one is forgotten
+   for(int i=0; i<JARVIS_CACHE_SIZE; i++)
+     {
+      JarvisResult rx;
+      Jarvis_Process(StringFormat("{\"id\":\"ring-%d\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":999999999999}}",i),rx);
+     }
+   Jarvis_Process(otherReq,r2);
+   Check(!r2.cached && r2.reply!=r1.reply,"write cache: the oldest reply is evicted after 64 newer ones");
+   ulong h2=g_jarvisCacheHits;
+   JarvisResult r4;
+   Jarvis_Process("{\"id\":\"ring-63\",\"cmd\":\"order_cancel\",\"args\":{\"ticket\":999999999999}}",r4);
+   Check(r4.cached && g_jarvisCacheHits==h2+1,"write cache: a recent id is still cached");
+
+   Check(PositionsTotal()==posBefore && OrdersTotal()==ordBefore,"write: no position or order was created or changed by the rejected requests");
   }
 
 void OnStart()
@@ -242,5 +441,6 @@ void OnStart()
    TestJson();
    TestProtocol();
    TestLive();
+   TestWrites();
    PrintFormat("=== JarvisSelfTest done: %d passed, %d failed ===",g_pass,g_fail);
   }

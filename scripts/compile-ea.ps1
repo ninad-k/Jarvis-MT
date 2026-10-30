@@ -12,7 +12,8 @@
   Run scripts\install-ea.ps1 first: this compiles the copy inside the terminal data folder.
 
 .PARAMETER DataFolder
-  MT5 data folder (or its 32-character id). Default: the "C:\Program Files\MetaTrader 5" terminal.
+  MT5 data folder (or its 32-character id). Default: the only terminal data folder under
+  %APPDATA%\MetaQuotes\Terminal. With several terminals installed the script asks for it.
 
 .PARAMETER MetaEditor
   Path to MetaEditor64.exe.
@@ -26,7 +27,7 @@
 [CmdletBinding()]
 param(
     [Alias('Terminal')]
-    [string]$DataFolder = 'C:\Users\Ninad\AppData\Roaming\MetaQuotes\Terminal\D0E8209F77C8CF37AD8BF550E51FF075',
+    [string]$DataFolder,
     [string]$MetaEditor = 'C:\Program Files\MetaTrader 5\MetaEditor64.exe',
     [string]$Source,
     [string]$LogFile = (Join-Path ([IO.Path]::GetTempPath()) 'jarvis-compile.log'),
@@ -35,6 +36,19 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# No -DataFolder: use the only MT5 terminal data folder on this PC, or ask which one.
+if (-not $DataFolder) {
+    $terminalsRoot = Join-Path $env:APPDATA 'MetaQuotes\Terminal'
+    $found = @(Get-ChildItem -LiteralPath $terminalsRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'MQL5') })
+    if ($found.Count -ne 1) {
+        $names = ($found | ForEach-Object { $_.Name }) -join ', '
+        if (-not $names) { $names = 'none' }
+        throw "Pass -DataFolder <data folder or 32-character id> (File > Open Data Folder in MT5). Terminals found: $names"
+    }
+    $DataFolder = $found[0].FullName
+}
 
 if ($DataFolder -match '^[0-9A-Fa-f]{32}$') {
     $DataFolder = Join-Path (Join-Path $env:APPDATA 'MetaQuotes\Terminal') $DataFolder

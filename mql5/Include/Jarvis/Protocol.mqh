@@ -14,6 +14,7 @@
 
 #include "Json.mqh"
 #include "ReadHandlers.mqh"
+#include "TradeHandlers.mqh"
 
 #define JARVIS_MAX_ID_LEN     128
 #define JARVIS_MAX_ERROR_LEN  240
@@ -26,6 +27,7 @@ struct JarvisResult
    bool              ok;
    int               retcode;
    string            reply;
+   bool              cached;   // a write answered from the reply cache (not executed again)
   };
 
 string Jarvis_ErrorReply(const string id,const string message,const int retcode)
@@ -55,6 +57,19 @@ string Jarvis_OkReply(const string id,const string dataJson)
    return w.ToString();
   }
 
+//--- success reply of a write command: the envelope retcode is the trade retcode
+string Jarvis_TradeOkReply(const string id,const int retcode,const string dataJson)
+  {
+   CJsonWriter w;
+   w.BeginObject();
+   w.PutStr("id",id);
+   w.PutBool("ok",true);
+   w.PutRaw("data",dataJson);
+   w.PutInt("retcode",retcode);
+   w.EndObject();
+   return w.ToString();
+  }
+
 //--- record a failure in r and build the error reply
 void Jarvis_SetError(JarvisResult &r,const string message,const int retcode)
   {
@@ -70,6 +85,39 @@ bool Jarvis_IsWriteCommand(const string cmd)
   }
 
 //+------------------------------------------------------------------+
+//| Execute (or replay) one write command. r.id and r.cmd are set.  |
+//| Every write reply, including refusals and validation errors, is  |
+//| cached by request id; a repeated id returns the cached reply     |
+//| verbatim and does not touch the trade server again.              |
+//+------------------------------------------------------------------+
+void Jarvis_Write(const string cmd,CJson &req,const int args,JarvisResult &r)
+  {
+   int hit=Jarvis_CacheFind(r.id);
+   if(hit>=0)
+     {
+      g_jarvisCacheHits++;
+      r.reply=g_jarvisCacheReply[hit];
+      r.ok=g_jarvisCacheOk[hit];
+      r.retcode=g_jarvisCacheRc[hit];
+      r.cached=true;
+      PrintFormat("JarvisBridge: duplicate write id=%s cmd=%s: returned the cached reply, nothing executed",
+                  StringSubstr(r.id,0,36),cmd);
+      return;
+     }
+   JarvisTradeOut out;
+   Jarvis_WriteCommand(cmd,req,args,out);
+   r.ok=out.ok;
+   r.retcode=out.retcode;
+   if(out.ok)
+      r.reply=Jarvis_TradeOkReply(r.id,out.retcode,out.data);
+   else
+      r.reply=Jarvis_ErrorReply(r.id,out.error,out.retcode);
+   Jarvis_CacheStore(r.id,r.reply,r.ok,r.retcode);
+   PrintFormat("JarvisBridge: write cmd=%s id=%s ok=%s retcode=%d%s%s",cmd,StringSubstr(r.id,0,36),
+               r.ok?"true":"false",r.retcode,r.ok?"":" error=",r.ok?"":out.error);
+  }
+
+//+------------------------------------------------------------------+
 //| Handle one raw request text and fill r (r.reply is always set).  |
 //+------------------------------------------------------------------+
 void Jarvis_Process(const string raw,JarvisResult &r)
@@ -79,6 +127,7 @@ void Jarvis_Process(const string raw,JarvisResult &r)
    r.ok=false;
    r.retcode=JARVIS_RC_INVALID;
    r.reply="";
+   r.cached=false;
    ResetLastError();
 
    CJson req;
@@ -134,10 +183,11 @@ void Jarvis_Process(const string raw,JarvisResult &r)
       return;
      }
 
-   //--- write commands arrive in a later EA version
+   //--- write commands: answered from the reply cache when the id was seen before,
+   //--- otherwise executed once and cached
    if(Jarvis_IsWriteCommand(cmd))
      {
-      Jarvis_SetError(r,"not implemented in this EA version",JARVIS_RC_UNKNOWN_CMD);
+      Jarvis_Write(cmd,req,args,r);
       return;
      }
 
@@ -163,10 +213,13 @@ void Jarvis_Process(const string raw,JarvisResult &r)
                   if(cmd=="get_history")
                      rc=Jarvis_CmdGetHistory(req,args,data,err);
                   else
-                    {
-                     Jarvis_SetError(r,"unknown command: "+cmd,JARVIS_RC_UNKNOWN_CMD);
-                     return;
-                    }
+                     if(cmd=="get_symbol")
+                        rc=Jarvis_CmdGetSymbol(req,args,data,err);
+                     else
+                       {
+                        Jarvis_SetError(r,"unknown command: "+cmd,JARVIS_RC_UNKNOWN_CMD);
+                        return;
+                       }
 
    if(rc!=0)
      {

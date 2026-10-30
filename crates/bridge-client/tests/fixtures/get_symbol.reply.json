@@ -1,0 +1,1 @@
+{"id":"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1009","ok":true,"data":{"symbol":"XAUUSD","description":"Gold vs US Dollar","digits":2,"point":0.01,"volume_min":0.01,"volume_max":100.0,"volume_step":0.01,"contract_size":100.0,"tick_value":1.0,"tick_size":0.01,"stops_level":10,"trade_allowed":true,"currency_profit":"USD"},"retcode":0}

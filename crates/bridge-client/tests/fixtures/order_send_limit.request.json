@@ -1,0 +1,1 @@
+{"id":"6f1c2c1e-3b5a-4d0e-9a53-0d2a6f8d1011","cmd":"order_send","args":{"symbol":"EURUSD","side":"buy","volume":0.2,"type":"limit","price":1.07,"sl":1.06,"tp":1.09,"magic":770077,"comment":"jarvis:7b2e90aa"}}

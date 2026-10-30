@@ -464,7 +464,7 @@ async fn mock_answers_malformed_and_unknown_requests_with_error_replies() {
     let mut socket = ReqSocket::new();
     socket.connect(&mock.endpoint).await.unwrap();
     for (request, retcode) in [
-        (r#"{"id":"1","cmd":"order_send","args":{}}"#, -2),
+        (r#"{"id":"1","cmd":"order_send","args":{}}"#, -1), // known command, invalid arguments
         (r#"{"id":"2","cmd":"nope","args":{}}"#, -2),
         (r#"{"id":"3","cmd":"get_price","args":{}}"#, -1),
         (r#"{"cmd":"ping","args":{}}"#, -1),

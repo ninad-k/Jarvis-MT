@@ -16,7 +16,7 @@
 #include "Json.mqh"
 
 #define JARVIS_PROTOCOL_VERSION   1
-#define JARVIS_EA_VERSION         "0.1.0"
+#define JARVIS_EA_VERSION         "0.2.0"
 
 #define JARVIS_RC_INVALID         (-1)
 #define JARVIS_RC_UNKNOWN_CMD     (-2)
@@ -220,6 +220,48 @@ int Jarvis_CmdGetPrice(CJson &req,const int args,CJsonWriter &w,string &err)
    w.PutInt("spread_points",spread);
    w.PutInt("digits",(digits<0)?0:digits);
    w.PutInt("time",(long)tick.time);
+   w.EndObject();
+   return 0;
+  }
+
+//+------------------------------------------------------------------+
+//| get_symbol {symbol}                                              |
+//| Trading specification. trade_allowed is true for full, long-only |
+//| and short-only symbols (order_send enforces the direction) and   |
+//| false for close-only or disabled ones.                           |
+//+------------------------------------------------------------------+
+int Jarvis_CmdGetSymbol(CJson &req,const int args,CJsonWriter &w,string &err)
+  {
+   string sym;
+   bool present;
+   if(!Jarvis_ArgString(req,args,"symbol",sym,present,err))
+      return JARVIS_RC_INVALID;
+   if(!present)
+      return Jarvis_Invalid(err,"missing argument 'symbol'");
+   int rc=0;
+   if(!Jarvis_CheckSymbol(sym,true,rc,err))
+      return rc;
+
+   long digits=0,stops=0,tmode=0;
+   SymbolInfoInteger(sym,SYMBOL_DIGITS,digits);
+   SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL,stops);
+   SymbolInfoInteger(sym,SYMBOL_TRADE_MODE,tmode);
+   bool allowed=(tmode==SYMBOL_TRADE_MODE_FULL || tmode==SYMBOL_TRADE_MODE_LONGONLY || tmode==SYMBOL_TRADE_MODE_SHORTONLY);
+
+   w.BeginObject();
+   w.PutStr("symbol",sym);
+   w.PutStr("description",SymbolInfoString(sym,SYMBOL_DESCRIPTION));
+   w.PutInt("digits",digits);
+   w.PutNum("point",SymbolInfoDouble(sym,SYMBOL_POINT));
+   w.PutNum("volume_min",SymbolInfoDouble(sym,SYMBOL_VOLUME_MIN));
+   w.PutNum("volume_max",SymbolInfoDouble(sym,SYMBOL_VOLUME_MAX));
+   w.PutNum("volume_step",SymbolInfoDouble(sym,SYMBOL_VOLUME_STEP));
+   w.PutNum("contract_size",SymbolInfoDouble(sym,SYMBOL_TRADE_CONTRACT_SIZE));
+   w.PutNum("tick_value",SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_VALUE));
+   w.PutNum("tick_size",SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE));
+   w.PutInt("stops_level",stops);
+   w.PutBool("trade_allowed",allowed);
+   w.PutStr("currency_profit",SymbolInfoString(sym,SYMBOL_CURRENCY_PROFIT));
    w.EndObject();
    return 0;
   }

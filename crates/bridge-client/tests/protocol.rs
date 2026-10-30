@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use jarvis_bridge_client::protocol::{
     Account, Command, HISTORY_LIMIT_MAX, History, HistoryQuery, Orders, PingInfo, Positions, Price,
-    Reply, ReplyError, Request,
+    Reply, ReplyError, Request, SymbolInfo, TradeResult,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -155,7 +155,7 @@ fn request_without_id_is_rejected() {
 
 #[test]
 fn request_with_unknown_command_is_rejected() {
-    for cmd in ["order_send", "get_pricee", "PING", ""] {
+    for cmd in ["order_sen", "get_pricee", "PING", "", "get_symbols"] {
         let value = json!({"id": "x", "cmd": cmd, "args": {}});
         assert!(
             serde_json::from_value::<Request>(value).is_err(),
@@ -263,4 +263,186 @@ fn integers_are_accepted_where_floats_are_expected() {
 #[test]
 fn limits_match_the_documented_contract() {
     assert_eq!(HISTORY_LIMIT_MAX, 500);
+}
+
+// ---- Sprint 2: get_symbol and the write commands ---------------------------------------------------
+
+/// `(fixture base name, wire command)` for every request/reply pair added in Sprint 2.
+const WRITE_FIXTURES: [(&str, &str); 7] = [
+    ("get_symbol", "get_symbol"),
+    ("order_send", "order_send"),
+    ("order_send_limit", "order_send"),
+    ("position_modify", "position_modify"),
+    ("position_close", "position_close"),
+    ("position_close_partial", "position_close_partial"),
+    ("order_cancel", "order_cancel"),
+];
+
+#[test]
+fn write_and_symbol_request_fixtures_round_trip() {
+    for (base, cmd) in WRITE_FIXTURES
+        .iter()
+        .copied()
+        .chain([("order_send_invalid_volume", "order_send")])
+    {
+        let name = format!("{base}.request.json");
+        let request: Request = round_trip(&name, &fixture(&name));
+        assert_eq!(request.command.name(), cmd, "{name}");
+        assert_eq!(request.command.is_write(), cmd != "get_symbol", "{name}");
+    }
+}
+
+#[test]
+fn write_and_symbol_reply_fixtures_round_trip_and_decode() {
+    for (base, cmd) in WRITE_FIXTURES {
+        let name = format!("{base}.reply.json");
+        let value = fixture(&name);
+        let reply: Reply = round_trip(&name, &value);
+        assert!(reply.ok, "{name}");
+        let data = value["data"].clone();
+        if cmd == "get_symbol" {
+            assert_eq!(reply.retcode, 0, "{name}");
+            let spec: SymbolInfo = round_trip(&name, &data);
+            assert_eq!(spec.stops_level, 10);
+            assert!(spec.trade_allowed);
+        } else {
+            // A trade reply carries the trade retcode in the envelope, equal to the data's.
+            let result: TradeResult = round_trip(&name, &data);
+            assert_eq!(reply.retcode, result.retcode, "{name}");
+            assert!(
+                matches!(result.retcode, 10008..=10010),
+                "{name}: a success reply has a success retcode"
+            );
+            assert!(!result.comment.is_empty());
+        }
+    }
+}
+
+#[test]
+fn failed_write_fixtures_map_to_remote_errors_without_data() {
+    for (name, retcode, part) in [
+        ("order_send_refused.reply.json", -3, "InpAllowReal"),
+        ("order_send_no_money.reply.json", 10019, "no money"),
+        ("order_send_invalid_volume.reply.json", -1, "volume step"),
+    ] {
+        let value = fixture(name);
+        let reply: Reply = round_trip(name, &value);
+        assert!(
+            !reply.ok && reply.data.is_none(),
+            "{name}: error replies omit data"
+        );
+        match reply.decode::<TradeResult>() {
+            Err(ReplyError::Remote {
+                message,
+                retcode: got,
+            }) => {
+                assert_eq!(got, retcode, "{name}");
+                assert!(message.contains(part), "{name}: {message}");
+            }
+            other => panic!("{name}: expected Remote, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn write_arguments_are_serialised_without_nulls() {
+    use jarvis_bridge_client::protocol::{
+        ExecType, JARVIS_MAGIC, OrderCancelArgs, OrderSendArgs, PositionCloseArgs,
+        PositionClosePartialArgs, PositionModifyArgs, Side,
+    };
+    let wire = |command: Command| {
+        serde_json::to_value(Request {
+            id: "i".into(),
+            command,
+        })
+        .unwrap()
+    };
+
+    assert_eq!(
+        wire(Command::OrderSend(OrderSendArgs {
+            symbol: "EURUSD".into(),
+            side: Side::Sell,
+            volume: 0.5,
+            exec: ExecType::Stop,
+            price: Some(1.07),
+            sl: None,
+            tp: None,
+            deviation_points: None,
+            magic: JARVIS_MAGIC,
+            comment: String::new(),
+        })),
+        json!({"id": "i", "cmd": "order_send", "args": {
+            "symbol": "EURUSD", "side": "sell", "volume": 0.5, "type": "stop", "price": 1.07,
+            "magic": 770077, "comment": ""
+        }})
+    );
+    // Absent = keep the current value, 0 = remove it: both are distinct on the wire.
+    assert_eq!(
+        wire(Command::PositionModify(PositionModifyArgs {
+            ticket: 7,
+            sl: Some(0.0),
+            tp: None
+        })),
+        json!({"id": "i", "cmd": "position_modify", "args": {"ticket": 7, "sl": 0.0}})
+    );
+    assert_eq!(
+        wire(Command::PositionClose(PositionCloseArgs {
+            ticket: 7,
+            deviation_points: None
+        })),
+        json!({"id": "i", "cmd": "position_close", "args": {"ticket": 7}})
+    );
+    assert_eq!(
+        wire(Command::PositionClosePartial(PositionClosePartialArgs {
+            ticket: 7,
+            volume: 0.1,
+            deviation_points: Some(30)
+        })),
+        json!({"id": "i", "cmd": "position_close_partial", "args": {"ticket": 7, "volume": 0.1, "deviation_points": 30}})
+    );
+    assert_eq!(
+        wire(Command::OrderCancel(OrderCancelArgs { ticket: 9 })),
+        json!({"id": "i", "cmd": "order_cancel", "args": {"ticket": 9}})
+    );
+    assert_eq!(
+        wire(Command::GetSymbol {
+            symbol: "XAUUSD".into()
+        }),
+        json!({"id": "i", "cmd": "get_symbol", "args": {"symbol": "XAUUSD"}})
+    );
+}
+
+#[test]
+fn only_the_five_write_commands_are_writes() {
+    for cmd in COMMANDS.iter().copied().chain(["get_symbol"]) {
+        let request: Request =
+            serde_json::from_value(fixture(&format!("{cmd}.request.json"))).unwrap();
+        assert!(!request.command.is_write(), "{cmd}");
+    }
+    for (base, _) in WRITE_FIXTURES.iter().skip(1) {
+        let request: Request =
+            serde_json::from_value(fixture(&format!("{base}.request.json"))).unwrap();
+        assert!(request.command.is_write(), "{base}");
+    }
+}
+
+#[test]
+fn write_requests_with_bad_arguments_are_rejected() {
+    for value in [
+        json!({"id": "x", "cmd": "order_send", "args": {}}),
+        json!({"id": "x", "cmd": "order_send", "args": {"symbol": "EURUSD", "side": "long", "volume": 0.1, "type": "market", "magic": 1, "comment": ""}}),
+        json!({"id": "x", "cmd": "order_send", "args": {"symbol": "EURUSD", "side": "buy", "volume": 0.1, "type": "fok", "magic": 1, "comment": ""}}),
+        json!({"id": "x", "cmd": "order_send", "args": {"symbol": "EURUSD", "side": "buy", "volume": "0.1", "type": "market", "magic": 1, "comment": ""}}),
+        json!({"id": "x", "cmd": "order_send", "args": {"symbol": "EURUSD", "side": "buy", "volume": 0.1, "type": "market", "comment": ""}}),
+        json!({"id": "x", "cmd": "position_modify", "args": {"sl": 1.0}}),
+        json!({"id": "x", "cmd": "position_modify", "args": {"ticket": -1, "sl": 1.0}}),
+        json!({"id": "x", "cmd": "position_close", "args": {"ticket": "7"}}),
+        json!({"id": "x", "cmd": "position_close_partial", "args": {"ticket": 7}}),
+        json!({"id": "x", "cmd": "order_cancel", "args": {}}),
+    ] {
+        assert!(
+            serde_json::from_value::<Request>(value.clone()).is_err(),
+            "{value}"
+        );
+    }
 }
