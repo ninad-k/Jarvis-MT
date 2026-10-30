@@ -14,6 +14,8 @@ export default defineConfig({
 		// so an inlined font would be blocked; emit them as files instead.
 		assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf|eot)$/i.test(file) ? false : undefined)
 	},
+	// Audio worklets are bundled as ES modules and loaded by URL (see src/lib/voice/*.worklet.js).
+	worker: { format: 'es' },
 	plugins: [
 		tailwindcss(),
 		sveltekit({

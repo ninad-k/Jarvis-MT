@@ -8,42 +8,9 @@
  */
 import { audioCtor } from './audio';
 import { VadSegmenter } from './vad-core.js';
-import vadSource from './vad-core.js?raw';
+// Same-origin module file bundled by Vite (a blob: URL would be blocked by the CSP).
+import handsFreeWorkletUrl from './handsfree.worklet.js?worker&url';
 
-const PROCESSOR = `
-class ArcHandsFree extends AudioWorkletProcessor {
-	constructor() {
-		super();
-		this.vad = new VadSegmenter(sampleRate);
-		this.paused = false;
-		this.sum = 0;
-		this.n = 0;
-		this.port.onmessage = (e) => {
-			if (e.data && e.data.type === 'pause') {
-				this.paused = !!e.data.value;
-				this.vad.reset();
-			}
-		};
-	}
-	process(inputs) {
-		const ch = inputs[0] && inputs[0][0];
-		if (!ch || this.paused) return true;
-		for (let i = 0; i < ch.length; i++) this.sum += ch[i] * ch[i];
-		this.n += ch.length;
-		if (this.n >= sampleRate / 20) {
-			this.port.postMessage({ type: 'level', rms: Math.sqrt(this.sum / this.n) });
-			this.sum = 0;
-			this.n = 0;
-		}
-		for (const e of this.vad.push(ch)) {
-			if (e.type === 'segment') this.port.postMessage({ type: 'segment', samples: e.samples, rate: sampleRate }, [e.samples.buffer]);
-			else this.port.postMessage({ type: e.type });
-		}
-		return true;
-	}
-}
-registerProcessor('arcmt-handsfree', ArcHandsFree);
-`;
 
 export interface ListenerOptions {
 	/** Mic level 0..1, about 20 times a second. */
@@ -89,12 +56,7 @@ export class HandsFreeListener {
 			let setPaused: (on: boolean) => void;
 
 			if (ctx.audioWorklet) {
-				const url = URL.createObjectURL(new Blob([vadSource, '\n', PROCESSOR], { type: 'text/javascript' }));
-				try {
-					await ctx.audioWorklet.addModule(url);
-				} finally {
-					URL.revokeObjectURL(url);
-				}
+				await ctx.audioWorklet.addModule(handsFreeWorkletUrl);
 				const node = new AudioWorkletNode(ctx, 'arcmt-handsfree', { numberOfOutputs: 1, channelCount: 1 });
 				node.port.onmessage = (ev: MessageEvent<{ type: string; rms?: number; samples?: Float32Array; rate?: number }>) => {
 					const m = ev.data;

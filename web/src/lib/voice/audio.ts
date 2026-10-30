@@ -52,16 +52,9 @@ export function micErrorMessage(e: unknown): string {
 
 // ---- Capture --------------------------------------------------------------
 
-const WORKLET = `
-class Tap extends AudioWorkletProcessor {
-	process(inputs) {
-		const ch = inputs[0] && inputs[0][0];
-		if (ch && ch.length) this.port.postMessage(ch.slice(0));
-		return true;
-	}
-}
-registerProcessor('jarvis-tap', Tap);
-`;
+// The capture tap runs in an AudioWorklet loaded from a same-origin module file
+// (see tap.worklet.js); a blob: URL would be blocked by the server's CSP.
+import tapWorkletUrl from './tap.worklet.js?worker&url';
 
 export interface RecordingResult {
 	wav: ArrayBuffer;
@@ -112,12 +105,7 @@ export class Recorder {
 			let cleanup: () => void;
 
 			if (ctx.audioWorklet) {
-				const url = URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }));
-				try {
-					await ctx.audioWorklet.addModule(url);
-				} finally {
-					URL.revokeObjectURL(url);
-				}
+				await ctx.audioWorklet.addModule(tapWorkletUrl);
 				const node = new AudioWorkletNode(ctx, 'jarvis-tap', { numberOfOutputs: 1, channelCount: 1 });
 				node.port.onmessage = (ev: MessageEvent<Float32Array>) => push(ev.data);
 				source.connect(node).connect(sink);
