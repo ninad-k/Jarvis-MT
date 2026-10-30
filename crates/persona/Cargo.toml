@@ -1,0 +1,16 @@
+[package]
+name = "jarvis-persona"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.1.8"
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -463,3 +463,96 @@ make it faster.
 - Startup refuses: DEMO mode on a real account, login enabled with no usable `JARVIS_JWT_SECRET`,
   a non-loopback bind without TLS and login, and an unreadable TLS certificate or key. A bridge that
   is down, a missing voice model or a missing LLM key only log a warning.
+
+---
+
+# Personas and user settings
+
+Arc MT has selectable personas (Jarvis, Friday, and any pack added to `personas/`).
+A persona changes the name, personality, voice, wake phrase and HUD colours only.
+Tools, limits, previews, confirmation tokens, the kill switch and all safety rules are
+shared and identical for every persona (ADR-0017). Every audit row records the persona
+that was active (`persona` column).
+
+## GET /api/personas
+
+```json
+{
+  "default": "jarvis",
+  "active": "friday",
+  "personas": [
+    { "id": "jarvis", "name": "Jarvis", "description": "Calm, formal and concise.",
+      "wake_word": "hey jarvis", "voice_available": true,
+      "theme": { "accent": "#38bdf8", "accent_soft": "#0c4a6e", "orb_core": "#7dd3fc", "orb_glow": "#0ea5e9" } },
+    { "id": "friday", "name": "Friday", "description": "Warm, upbeat and casual.",
+      "wake_word": "hey friday", "voice_available": true,
+      "theme": { "accent": "#f5b942", "accent_soft": "#5c3d0a", "orb_core": "#fcd77f", "orb_glow": "#f59e0b" } }
+  ]
+}
+```
+
+`active` is the current user's chosen persona (from settings). `voice_available` is false
+when that persona's Piper model file is missing.
+
+## GET /api/settings
+
+The signed-in user's preferences (with login off: one shared local profile).
+
+```json
+{
+  "persona": "jarvis",
+  "llm_provider": null,
+  "voice": { "read_aloud": true, "input_mode": "hold", "language": "en" },
+  "watchlist": ["XAUUSD", "EURUSD", "GBPUSD"],
+  "aliases": { "yellow metal": "XAUUSD" }
+}
+```
+
+- `llm_provider`: provider name from `/api/status`, or `null` for the server default.
+- `voice.input_mode`: `"hold"` (press and hold), `"toggle"` (tap to start/stop) or
+  `"wake_word"` (hands-free: speech segments are transcribed and only acted on when
+  they start with a persona's wake phrase).
+- `voice.language`: `"en"` or `"auto"`.
+- `watchlist`: up to 30 symbols (aliases allowed; resolved like chat input).
+- `aliases`: up to 100 extra spoken-name → broker-symbol entries, merged over the config
+  aliases (a user entry wins). Keys are lower-cased; values `[A-Za-z0-9._#]{1,32}`.
+
+## PUT /api/settings
+
+Partial update: send only the fields to change; returns the full settings. Unknown
+fields → 400. An unknown persona or provider → 400. Changing the persona takes effect
+on the next chat turn; open chat sessions keep their history. Emits the WebSocket event
+`{"type":"settings_changed"}`.
+
+## Trading limits from the UI (tighten-only)
+
+The config file sets the limits. The UI can only make them **stricter**.
+
+- `GET /api/settings/limits` →
+  `{ "config": Limits, "overrides": PartialLimits | null, "effective": Limits }` where
+  `Limits` is the shape in `/api/status` and `effective` is what the gate enforces.
+- `PUT /api/settings/limits` `{ "totp": "123456", "max_lot": 0.5, "max_positions": 3,
+  "max_daily_loss": 200.0, "allowed_symbols": ["XAUUSD"], "trading_hours": {...} }`
+  (all limit fields optional). Each value must be at least as strict as the config:
+  `max_lot`, `max_positions`, `max_daily_loss` ≤ config; `allowed_symbols` ⊆ config;
+  `trading_hours` days ⊆ config days and the window inside the config window (same-day
+  windows only). Anything looser → 422 `limit_not_stricter`. Needs a valid TOTP code
+  when login is on (401 `unauthorized` "code not accepted" otherwise).
+- `DELETE /api/settings/limits` `{ "totp": "123456" }` → removes the overrides (back to
+  the config values). Needs a TOTP code when login is on.
+
+Overrides are stored in SQLite and apply to every persona and session. Previews already
+issued keep the limits they were checked against; the confirm-time re-check (TRD-2) uses
+the effective limits at that moment.
+
+## Changes to existing endpoints
+
+- `GET /api/status` gains `"persona": {"id": "jarvis", "name": "Jarvis"}` (active) and
+  `limits` now reports the effective limits.
+- `POST /api/chat` uses the active persona; the response gains `"persona": "jarvis"`.
+- `POST /api/voice/speak` speaks with the active persona's voice (or `{"persona": "id"}`
+  in the body to preview another persona's voice in settings).
+- `POST /api/voice/transcribe?wake=1`: in wake-word mode the response gains
+  `"wake": {"detected": true, "persona": "friday", "command": "what's gold at"}`.
+  A detected wake phrase also switches the active persona to the one that was called.
+  Without a wake phrase, `detected` is false and the UI ignores the segment.

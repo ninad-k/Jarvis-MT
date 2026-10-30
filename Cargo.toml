@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/api", "crates/bridge-client", "crates/gate", "crates/llm", "crates/voice"]
+members = ["crates/api", "crates/bridge-client", "crates/gate", "crates/llm", "crates/persona", "crates/voice"]
 # The Tauri shell has its own lockfile and heavy dependencies.
 exclude = ["apps/desktop/src-tauri"]
 

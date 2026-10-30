@@ -127,3 +127,10 @@ threads = 4
 piper_exe = "models/piper/piper.exe"
 piper_voice = "models/piper/en_US-lessac-medium.onnx"
 max_seconds = 30
+
+# ---- Personas. Packs live in this folder as <id>.toml (see personas/jarvis.toml).
+# A persona changes name, personality, voice, wake phrase and colours only; all safety
+# rules, limits and confirmations are shared. Users pick theirs in Settings.
+[personas]
+dir = "personas"
+default = "jarvis"
