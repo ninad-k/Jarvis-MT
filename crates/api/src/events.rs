@@ -29,6 +29,11 @@ pub enum Event {
     /// A user changed their settings, or the trading limits were tightened or reset.
     /// Clients re-read `/api/settings` (and `/api/status`).
     SettingsChanged,
+    /// A broker's symbol map was detected or edited, or the account switched to another
+    /// broker. Clients re-read `/api/symbols` (and `/api/status`).
+    SymbolMapChanged {
+        broker: String,
+    },
 }
 
 const CAPACITY: usize = 64;
@@ -84,6 +89,13 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Event::SettingsChanged).unwrap(),
             json!({"type":"settings_changed"})
+        );
+        assert_eq!(
+            serde_json::to_value(Event::SymbolMapChanged {
+                broker: "CFI".into()
+            })
+            .unwrap(),
+            json!({"type":"symbol_map_changed","broker":"CFI"})
         );
         assert_eq!(
             serde_json::to_value(Event::PreviewExpired { token: "t".into() }).unwrap(),

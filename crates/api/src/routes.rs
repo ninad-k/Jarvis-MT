@@ -10,7 +10,7 @@ use axum::http::request::Parts;
 use axum::http::{Extensions, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use jarvis_bridge_client::BridgeError;
 use jarvis_bridge_client::protocol::{Account, Orders, Positions, Price, Side};
@@ -30,7 +30,7 @@ use crate::security::{self, Security};
 use crate::state::{AppState, Budget, ProviderSlot};
 use crate::static_site::StaticSite;
 use crate::trading::{ConfirmResponse, PreviewDto, ProposeRequest, ProposeSource, TradingError};
-use crate::{settings_routes, voice, ws};
+use crate::{settings_routes, symbols_routes, voice, ws};
 
 /// Longest accepted chat message, in characters.
 pub const MAX_MESSAGE_CHARS: usize = 2000;
@@ -99,6 +99,11 @@ pub fn app(state: AppState) -> Router {
                 .put(settings_routes::limits_put)
                 .delete(settings_routes::limits_delete),
         )
+        .route("/api/symbols", get(symbols_routes::symbols_get))
+        .route("/api/symbols/map", put(symbols_routes::map_put))
+        .route("/api/symbols/detect", post(symbols_routes::detect_post))
+        .route("/api/symbols/catalog", get(symbols_routes::catalog_get))
+        .route("/api/symbols/export", get(symbols_routes::export_get))
         .route("/api/cancel/{token}", post(cancel))
         .route("/api/readback/{token}", post(readback))
         .route("/api/positions/{ticket}/close", post(close_position))
@@ -260,6 +265,12 @@ pub enum ApiError {
     TokenUsed,
     /// 423: the kill switch is engaged.
     KillSwitch,
+    /// 409: MT5 is on another broker account than the one a preview was made for.
+    BrokerChanged,
+    /// 422: a symbol override names a symbol the broker's catalog does not have.
+    UnknownBrokerSymbol(String),
+    /// 503: the instrument catalog could not be loaded, so symbols cannot be mapped.
+    SymbolsUnavailable(String),
     RateLimited {
         retry_after_secs: u64,
     },
@@ -337,6 +348,23 @@ impl ApiError {
                 "kill_switch",
                 "the kill switch is engaged; trading is disabled".to_owned(),
             ),
+            ApiError::BrokerChanged => (
+                StatusCode::CONFLICT,
+                "broker_changed",
+                "the broker account in MetaTrader 5 changed since this was proposed; nothing \
+                 was sent. Ask for the action again."
+                    .to_owned(),
+            ),
+            ApiError::SymbolsUnavailable(m) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "symbols_unavailable",
+                m.clone(),
+            ),
+            ApiError::UnknownBrokerSymbol(m) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unknown_broker_symbol",
+                m.clone(),
+            ),
             ApiError::RateLimited { retry_after_secs } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",
@@ -395,6 +423,7 @@ impl From<TradingError> for ApiError {
             TradingError::Token(TokenError::AlreadyUsed) => ApiError::TokenUsed,
             TradingError::Token(TokenError::KillSwitchEngaged) => ApiError::KillSwitch,
             TradingError::ModeMismatch => ApiError::ModeMismatch,
+            TradingError::BrokerChanged => ApiError::BrokerChanged,
             TradingError::Bridge(b) => b.into(),
             TradingError::Snapshot(m) => ApiError::BridgeError(m),
             TradingError::RateLimited { retry_after_secs } => {
@@ -439,8 +468,12 @@ async fn status(State(state): State<AppState>, MaybeSession(session): MaybeSessi
     let settings = state.user_settings(session.as_ref()).await;
     let persona = state.persona_for(&settings);
     let started = Instant::now();
-    let ping = state.ping_bridge().await;
+    let ping = state.ping_only().await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if ping.is_ok() {
+        // The same ping tells whether the account switched to another broker.
+        state.broker().observe().await;
+    }
     let bridge = match ping {
         Ok(info) => json!({
             "connected": true,
@@ -484,6 +517,7 @@ async fn status(State(state): State<AppState>, MaybeSession(session): MaybeSessi
         "voice": state.voice_status(),
         "limits": state.trading().limits(),
         "persona": { "id": persona.id, "name": persona.name },
+        "broker": state.broker().book().status_view(),
     }))
 }
 
@@ -497,13 +531,37 @@ async fn account(State(state): State<AppState>) -> Result<Json<Account>, ApiErro
     Ok(Json(account))
 }
 
-async fn positions(State(state): State<AppState>) -> Result<Json<Positions>, ApiError> {
-    Ok(Json(state.bridge().get_positions(None).await?))
+/// Serialise rows that carry a broker `symbol` and add `canonical` next to it.
+fn with_canonical<T: Serialize>(state: &AppState, rows: &[T]) -> Vec<Value> {
+    let book = state.broker().book();
+    rows.iter()
+        .filter_map(|row| serde_json::to_value(row).ok())
+        .map(|mut value| {
+            if let Some(object) = value.as_object_mut()
+                && let Some(symbol) = object.get("symbol").and_then(Value::as_str)
+            {
+                let canonical = book.canonical_of_broker_symbol(symbol);
+                object.insert("canonical".to_owned(), Value::String(canonical));
+            }
+            value
+        })
+        .collect()
 }
 
-/// `GET /api/orders`: pending orders, in the bridge's `Order` shape.
-async fn orders(State(state): State<AppState>) -> Result<Json<Orders>, ApiError> {
-    Ok(Json(state.bridge().get_orders(None).await?))
+/// `GET /api/positions`: the bridge's `Positions` shape, each row with its `canonical` name.
+async fn positions(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let positions: Positions = state.bridge().get_positions(None).await?;
+    Ok(Json(
+        json!({ "positions": with_canonical(&state, &positions.positions) }),
+    ))
+}
+
+/// `GET /api/orders`: pending orders, in the bridge's `Order` shape, with `canonical`.
+async fn orders(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let orders: Orders = state.bridge().get_orders(None).await?;
+    Ok(Json(
+        json!({ "orders": with_canonical(&state, &orders.orders) }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -512,13 +570,16 @@ async fn orders(State(state): State<AppState>) -> Result<Json<Orders>, ApiError>
 
 #[derive(Serialize)]
 struct WatchlistError {
+    /// The name as it is on the watchlist (canonical).
     symbol: String,
+    canonical: String,
     message: String,
 }
 
 #[derive(Serialize)]
 struct Watchlist {
-    prices: Vec<Price>,
+    /// Prices as the bridge returned them (`symbol` is the broker's name), with `canonical`.
+    prices: Vec<Value>,
     errors: Vec<WatchlistError>,
 }
 
@@ -535,7 +596,7 @@ async fn watchlist(
     for (index, name) in names.iter().enumerate() {
         let bridge = state.bridge().clone();
         let resolved = resolver.resolve(name);
-        let name = name.clone();
+        let name = resolver.canonical(name).unwrap_or_else(|| name.clone());
         tasks.spawn(async move {
             let result = match resolved {
                 Some(symbol) => bridge.get_price(&symbol).await,
@@ -559,7 +620,7 @@ async fn watchlist(
     }
     results.sort_by_key(|(index, _, _)| *index);
 
-    let mut prices = Vec::new();
+    let mut prices: Vec<Price> = Vec::new();
     let mut errors = Vec::new();
     let mut unreachable: Option<BridgeError> = None;
     for (_, name, result) in results {
@@ -570,6 +631,7 @@ async fn watchlist(
                     unreachable.get_or_insert_with(|| e.clone());
                 }
                 errors.push(WatchlistError {
+                    canonical: name.clone(),
                     symbol: name,
                     message: e.to_string(),
                 });
@@ -582,7 +644,10 @@ async fn watchlist(
     {
         return Err(e.into());
     }
-    Ok(Json(Watchlist { prices, errors }))
+    Ok(Json(Watchlist {
+        prices: with_canonical(&state, &prices),
+        errors,
+    }))
 }
 
 // ---------------------------------------------------------------------------

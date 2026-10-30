@@ -1988,10 +1988,12 @@ async fn suffix_applies_to_proposed_and_allowed_symbols() {
     .await;
     assert!(body["preview"].is_object(), "{body}");
     assert_eq!(body["preview"]["symbols"], json!(["XAUUSD.m"]));
+    // Limits are canonical; the gate compares them as the broker's symbols.
     assert_eq!(
         app.state.config().effective_limits().allowed_symbols[0],
-        "XAUUSD.m"
+        "XAUUSD"
     );
+    assert_eq!(app.state.trading().limits().allowed_symbols[0], "XAUUSD");
     let (status, _) = post(
         &app,
         &format!("/api/confirm/{}", token_of(&body["preview"])),
@@ -2043,8 +2045,8 @@ mod config {
         let limits = c.effective_limits();
         assert_eq!(limits.max_lot, 0.5);
         assert_eq!(limits.max_positions, 3);
-        // The broker suffix is applied once, like for every resolved symbol.
-        assert_eq!(limits.allowed_symbols, ["XAUUSD.m", "EURUSD.m"]);
+        // Limits hold canonical names: the broker suffix is not part of them.
+        assert_eq!(limits.allowed_symbols, ["XAUUSD", "EURUSD"]);
         assert_eq!(limits.trading_hours.unwrap().days.len(), 2);
         assert_eq!(c.trading.token_ttl_secs, 10);
         assert_eq!(c.trading.voice_token_cap_secs, 25);

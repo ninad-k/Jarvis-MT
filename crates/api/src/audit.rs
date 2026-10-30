@@ -45,6 +45,10 @@ pub enum AuditKind {
     UngroundedReply,
     /// The retried reply was ungrounded again and was replaced with a safe reply.
     UngroundedReplyBlocked,
+    /// A broker's symbols were read and mapped (start-up, account switch or on request).
+    SymbolMapDetected,
+    /// The user set or cleared a symbol mapping in Settings.
+    SymbolMapOverride,
 }
 
 impl AuditKind {
@@ -71,6 +75,8 @@ impl AuditKind {
             AuditKind::LimitsChanged => "limits_changed",
             AuditKind::UngroundedReply => "ungrounded_reply",
             AuditKind::UngroundedReplyBlocked => "ungrounded_reply_blocked",
+            AuditKind::SymbolMapDetected => "symbol_map_detected",
+            AuditKind::SymbolMapOverride => "symbol_map_override",
         }
     }
 }

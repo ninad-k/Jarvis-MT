@@ -10,6 +10,7 @@
 pub mod agent;
 pub mod audit;
 pub mod auth;
+pub mod broker;
 pub mod cli;
 pub mod clock;
 pub mod config;
@@ -27,6 +28,7 @@ pub mod settings_routes;
 pub mod state;
 pub mod static_site;
 pub mod symbols;
+pub mod symbols_routes;
 pub mod tools;
 pub mod trading;
 pub mod users;

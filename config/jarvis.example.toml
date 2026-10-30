@@ -43,19 +43,37 @@ key_file = 'C:\Users\<you>\AppData\Roaming\MetaQuotes\Terminal\<terminal id>\MQL
 url = "sqlite://data/jarvis.db"
 
 [symbols]
-# Appended to every resolved symbol, for brokers that use names like "XAUUSD.m".
+# Arc MT uses canonical instrument names (XAUUSD, US100, US30, EURUSD ...) everywhere; each
+# broker's own names (XAUUSD_, US100_Spot, USTEC, EURUSD.pr ...) are mapped per broker, keyed
+# by the MT5 company name. Maps are detected automatically at start-up and whenever the
+# account in MT5 switches to another broker; see docs/symbol-mapping.md.
+#
+# The canonical instruments and their generic aliases (GOLD, NAS100, USTEC ...).
+instruments = "config/instruments.toml"
+# Curated per-broker maps (checked into the repository; beat the detected ones).
+broker_map = "config/broker_symbols.toml"
+# Where the detected map, your overrides from Settings and the broker catalog snapshots are
+# written (broker_symbols.generated.toml, broker_symbols.user.toml, broker-catalogs/).
+data_dir = "data"
+# false: do not detect automatically; only the curated and user maps apply (the Settings page
+# can still run a detection).
+auto_detect = true
+# Last resort only: appended to every symbol while the current broker has no map in any layer
+# (for example detection is off and the broker is not in broker_map). Normally empty.
 suffix = ""
-# Symbols shown in the UI watchlist.
-watchlist = ["XAUUSD", "USTEC", "US30", "EURUSD", "GBPUSD", "BTCUSD"]
+# Symbols shown in the UI watchlist: canonical names.
+watchlist = ["XAUUSD", "US100", "US30", "EURUSD", "GBPUSD", "BTCUSD"]
 
-# Spoken/typed name -> broker symbol (before suffix). Matching is case-insensitive.
+# Spoken/typed name -> canonical instrument. Matching is case-insensitive. Older configs that
+# name broker symbols here (for example USTEC) keep working: generic aliases are mapped to
+# the canonical name.
 [symbols.aliases]
 gold = "XAUUSD"
 cold = "XAUUSD"     # common speech-to-text mishearing
 sona = "XAUUSD"     # Hindi
 silver = "XAGUSD"
-nasdaq = "USTEC"         # IC Markets name; other brokers use US100 or NAS100
-nas = "USTEC"
+nasdaq = "US100"
+nas = "US100"
 dow = "US30"
 "dow jones" = "US30"
 "s&p" = "US500"
@@ -95,7 +113,8 @@ api_key_env = "OPENAI_API_KEY"
 max_lot = 1.0                 # per new order (closing is never limited by this)
 max_positions = 5             # open positions + pending orders after a new order
 max_daily_loss = 500.0        # account currency; new orders blocked at -500 today
-allowed_symbols = ["XAUUSD", "XAGUSD", "USTEC", "US30", "US500", "EURUSD", "GBPUSD", "BTCUSD"]
+# Canonical names: they apply on every broker, whatever the broker calls the instrument.
+allowed_symbols = ["XAUUSD", "XAGUSD", "US100", "US30", "US500", "EURUSD", "GBPUSD", "BTCUSD"]
 
 # New orders only inside this window (broker server time). Remove to allow any time.
 [limits.trading_hours]

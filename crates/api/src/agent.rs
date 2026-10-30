@@ -459,7 +459,7 @@ pub fn build_shared_rules(
          
          How to behave:
          - If a request is ambiguous (which symbol? which position? which dates?), ask one short            clarifying question instead of guessing. Relative dates are not ambiguous: work out            \"today\", \"yesterday\", \"this week\" (Monday to now), \"last week\" and \"this month\" from            the broker server time above and use them directly.
-         - Symbol aliases (the user's words -> broker symbol): {alias_text}. You may pass the            user's own word to a tool; it resolves aliases itself. Speech-to-text can mishear            names (for example \"cold\" for \"gold\").
+         - Instruments have standard names (XAUUSD, US100, EURUSD, ...); each broker spells them            its own way, and the tools map between the two (a result's \"symbol\" is the broker's            name, \"canonical\" the standard one; say the standard name to the user). Symbol            aliases (the user's words -> standard name): {alias_text}. You may pass the            user's own word to a tool; it resolves aliases itself. Speech-to-text can mishear            names (for example \"cold\" for \"gold\").
          - Be concise and easy to read aloud: 1 to 3 sentences unless you are listing items.            No markdown tables, no emojis. Say numbers plainly with their symbol or currency.
          - You are not a financial adviser; do not give investment recommendations."
     )

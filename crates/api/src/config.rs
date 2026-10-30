@@ -12,7 +12,7 @@ use jarvis_gate::Limits;
 use jarvis_llm::ProviderConfig;
 use serde::Deserialize;
 
-use crate::symbols::alias_key;
+use crate::symbols::{alias_key, clean};
 
 /// Env var that overrides the config file location.
 pub const CONFIG_ENV: &str = "JARVIS_CONFIG";
@@ -362,17 +362,61 @@ fn default_db_url() -> String {
     "sqlite://data/jarvis.db".to_owned()
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SymbolsConfig {
-    /// Appended to every resolved symbol (`.m`, `#`, ...).
+    /// Last-resort suffix (`.m`, `#`, ...), appended to resolved names only while the current
+    /// broker has no symbol map in any layer (see `docs/api.md`, "Broker symbol mapping").
     #[serde(default)]
     pub suffix: String,
-    /// Symbols shown in the UI watchlist (broker names without suffix).
+    /// Symbols shown in the UI watchlist (canonical names).
     #[serde(default)]
     pub watchlist: Vec<String>,
-    /// Spoken/typed name -> broker symbol. Keys are lowercased on load.
+    /// Spoken/typed name -> canonical instrument. Keys are lowercased on load.
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
+    /// The canonical instruments and their generic aliases.
+    #[serde(default = "default_instruments")]
+    pub instruments: PathBuf,
+    /// Curated per-broker maps (checked into the repository).
+    #[serde(default = "default_broker_map")]
+    pub broker_map: PathBuf,
+    /// Where the generated and user maps and the broker catalog snapshots are written.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    /// Detect a broker's symbols automatically (at start-up and on an account switch). Off:
+    /// only the curated and user maps apply, and `POST /api/symbols/detect` still works.
+    #[serde(default = "default_true")]
+    pub auto_detect: bool,
+}
+
+impl Default for SymbolsConfig {
+    fn default() -> Self {
+        Self {
+            suffix: String::new(),
+            watchlist: Vec::new(),
+            aliases: BTreeMap::new(),
+            instruments: default_instruments(),
+            broker_map: default_broker_map(),
+            data_dir: default_data_dir(),
+            auto_detect: true,
+        }
+    }
+}
+
+fn default_instruments() -> PathBuf {
+    PathBuf::from("config/instruments.toml")
+}
+
+fn default_broker_map() -> PathBuf {
+    PathBuf::from("config/broker_symbols.toml")
+}
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("data")
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -435,16 +479,45 @@ impl Config {
             .collect();
         self.symbols.suffix = self.symbols.suffix.trim().to_owned();
         self.symbols.watchlist.retain(|s| !s.trim().is_empty());
-        // Broker symbols in `allowed_symbols` get the same suffix as every resolved symbol,
-        // so `XAUUSD` in the config matches the `XAUUSD.m` the resolver produces.
-        let resolver =
-            crate::symbols::SymbolResolver::new(&self.symbols.aliases, &self.symbols.suffix);
+        // Symbols in the config are canonical names (upper case, no broker suffix). The
+        // instrument catalog maps generic aliases (USTEC -> US100) once it is loaded
+        // (`AppState::new_with`).
+        // A name written with the old broker suffix (`EURUSD.m`) loses it.
+        let suffix = self.symbols.suffix.to_ascii_uppercase();
+        let strip = |s: &str| {
+            let name = clean(s);
+            match name.strip_suffix(&suffix) {
+                Some(stem) if !suffix.is_empty() && !stem.is_empty() => stem.to_owned(),
+                _ => name,
+            }
+        };
         if let Some(limits) = &mut self.limits {
             limits.allowed_symbols = limits
                 .allowed_symbols
                 .iter()
-                .filter_map(|s| resolver.resolve(s))
+                .map(|s| strip(s))
+                .filter(|s| !s.is_empty())
                 .collect();
+        }
+    }
+
+    /// Rewrite every symbol name in the config (`allowed_symbols`, `watchlist`) through
+    /// `canonical`; names it rejects are dropped, duplicates removed.
+    pub fn canonicalize_symbols(&mut self, canonical: impl Fn(&str) -> Option<String>) {
+        fn dedupe(list: &[String], canonical: &impl Fn(&str) -> Option<String>) -> Vec<String> {
+            let mut out: Vec<String> = Vec::with_capacity(list.len());
+            for name in list {
+                if let Some(c) = canonical(name)
+                    && !out.contains(&c)
+                {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        self.symbols.watchlist = dedupe(&self.symbols.watchlist, &canonical);
+        if let Some(limits) = &mut self.limits {
+            limits.allowed_symbols = dedupe(&limits.allowed_symbols, &canonical);
         }
     }
 

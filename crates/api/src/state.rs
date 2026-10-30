@@ -19,6 +19,7 @@ use crate::agent::Agent;
 use crate::audit::Audit;
 use crate::auth::crypto::PasswordHasherCfg;
 use crate::auth::{AuthParts, AuthReleaseGuard, AuthService, Session};
+use crate::broker::{self, BrokerParts, BrokerService, DataPaths};
 use crate::clock::{ServerClock, TimeSource, WallClock};
 use crate::config::{Config, Mode};
 use crate::events::EventBus;
@@ -37,6 +38,9 @@ pub const JWT_SECRET_ENV: &str = "JARVIS_JWT_SECRET";
 
 /// How often expired previews and idle rate-limit keys are cleaned up.
 pub const PURGE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The broker account is re-read every this many purge ticks (30 s).
+const BROKER_CHECK_EVERY_TICKS: u32 = 6;
 
 /// Replacements for production defaults, for tests and embedding.
 #[derive(Default)]
@@ -232,6 +236,8 @@ struct Inner {
     audit: Audit,
     agent: Agent,
     resolver: Arc<SymbolResolver>,
+    /// The broker account and its symbol maps.
+    broker: Arc<BrokerService>,
     clock: ServerClock,
     /// Rule 7: set when the config says DEMO but the account reports a real trade mode.
     mode: Arc<ModeMonitor>,
@@ -278,7 +284,7 @@ impl AppState {
     /// Like [`AppState::new`] with [`Overrides`] (tests move time by hand, fake a write
     /// transport).
     pub fn new_with(
-        config: Config,
+        mut config: Config,
         bridge: BridgeClient,
         audit: Audit,
         mut slots: HashMap<String, ProviderSlot>,
@@ -290,10 +296,22 @@ impl AppState {
             Some(service) => Arc::new(AuthReleaseGuard(service.clone())),
             None => Arc::new(OpenRelease),
         };
-        let resolver = Arc::new(SymbolResolver::new(
+        // Symbol maps: names in the config become canonical, the resolver reads the book.
+        let book = broker::book_from_config(&config);
+        config.canonicalize_symbols(|name| book.canonical_loose(name));
+        let resolver = Arc::new(SymbolResolver::with_book(
             &config.symbols.aliases,
-            &config.symbols.suffix,
+            book.clone(),
         ));
+        let events = EventBus::new();
+        let broker = BrokerService::new(BrokerParts {
+            book,
+            bridge: bridge.clone(),
+            audit: audit.clone(),
+            events: events.clone(),
+            paths: DataPaths::from_dir(&config.symbols.data_dir),
+            auto_detect: config.symbols.auto_detect,
+        });
         let personas = overrides
             .personas
             .unwrap_or_else(|| load_personas_or_builtin(&config));
@@ -315,7 +333,6 @@ impl AppState {
             config.server.transcribe_rate_limit_per_minute,
         );
         let mode = Arc::new(ModeMonitor::new(config.mode));
-        let events = EventBus::new();
         let trading = Trading::new(TradingParts {
             bridge: bridge.clone(),
             write_sink: overrides.write_sink,
@@ -327,6 +344,7 @@ impl AppState {
             kill_switch: KillSwitch::new(config.trading.kill_switch_engaged),
             time,
             events: events.clone(),
+            broker: broker.clone(),
         });
         let tools = ToolRegistry::new(bridge.clone(), resolver.clone(), clock.clone())
             .with_trading(trading.clone());
@@ -338,6 +356,7 @@ impl AppState {
             audit,
             agent,
             resolver,
+            broker,
             clock,
             mode,
             trading,
@@ -480,6 +499,10 @@ impl AppState {
     pub fn resolver(&self) -> &SymbolResolver {
         &self.0.resolver
     }
+    /// The broker account and its symbol maps.
+    pub fn broker(&self) -> &Arc<BrokerService> {
+        &self.0.broker
+    }
     pub fn trading(&self) -> &Arc<Trading> {
         &self.0.trading
     }
@@ -567,6 +590,17 @@ impl AppState {
         {
             settings.llm_provider = None;
         }
+        // Older settings stored broker names (`XAUUSD.m`); the watchlist is canonical now.
+        let book = self.0.broker.book();
+        let mut watchlist: Vec<String> = Vec::with_capacity(settings.watchlist.len());
+        for name in &settings.watchlist {
+            if let Some(c) = book.canonical_loose(name)
+                && !watchlist.contains(&c)
+            {
+                watchlist.push(c);
+            }
+        }
+        settings.watchlist = watchlist;
         settings
     }
 
@@ -639,7 +673,20 @@ impl AppState {
     /// closed, like the kill switch).
     pub async fn restore_limit_overrides(&self) {
         match self.0.settings.load_limit_overrides().await {
-            Ok(Some(overrides)) => {
+            Ok(Some(mut overrides)) => {
+                // Stored by an older version as broker names; limits are canonical now.
+                if let Some(list) = &overrides.allowed_symbols {
+                    let book = self.0.broker.book();
+                    let mut canonical: Vec<String> = Vec::with_capacity(list.len());
+                    for name in list {
+                        if let Some(c) = book.canonical_loose(name)
+                            && !canonical.contains(&c)
+                        {
+                            canonical.push(c);
+                        }
+                    }
+                    overrides.allowed_symbols = Some(canonical);
+                }
                 let effective = self.0.trading.set_limit_overrides(Some(overrides));
                 tracing::info!(?effective, "tightened limits restored");
             }
@@ -695,13 +742,22 @@ impl AppState {
         self.0.mode.observe(seen);
     }
 
-    /// Ping the bridge and run the rule-7 check on success.
-    pub async fn ping_bridge(&self) -> Result<PingInfo, BridgeError> {
+    /// Ping the bridge and run the rule-7 check on success. Does not look at the broker
+    /// account (see [`AppState::ping_bridge`]).
+    pub async fn ping_only(&self) -> Result<PingInfo, BridgeError> {
         let info = self.0.bridge.ping().await?;
         self.observe_trade_mode(info.trade_mode);
         self.0
             .clock
             .observe(info.server_time, chrono::Utc::now().timestamp());
+        Ok(info)
+    }
+
+    /// [`AppState::ping_only`], then, on success, check which broker account MT5 is on: a
+    /// different broker starts a symbol detection.
+    pub async fn ping_bridge(&self) -> Result<PingInfo, BridgeError> {
+        let info = self.ping_only().await?;
+        self.0.broker.observe().await;
         Ok(info)
     }
 
@@ -713,9 +769,15 @@ impl AppState {
         let state = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(PURGE_INTERVAL);
+            let mut ticks: u32 = 0;
             loop {
                 tick.tick().await;
+                ticks = ticks.wrapping_add(1);
                 trading.purge();
+                // Notice an account switch even when nobody has the UI open.
+                if ticks.is_multiple_of(BROKER_CHECK_EVERY_TICKS) {
+                    state.0.broker.observe().await;
+                }
                 let now = trading.now_ms();
                 state.0.chat_limiter.purge(now);
                 state.0.transcribe_limiter.purge(now);

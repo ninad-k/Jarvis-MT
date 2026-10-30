@@ -420,7 +420,7 @@ pub struct ToolRegistry {
     bridge: BridgeClient,
     resolver: Arc<SymbolResolver>,
     clock: ServerClock,
-    /// Spoken alias -> broker symbol, for the intent parser.
+    /// Spoken alias -> canonical name, for the intent parser.
     intent_aliases: Arc<HashMap<String, String>>,
     trading: Option<Arc<Trading>>,
 }
@@ -429,7 +429,7 @@ impl ToolRegistry {
     /// A registry without trading: read tools work, `propose_*` calls report that trading
     /// is unavailable. [`ToolRegistry::with_trading`] connects the gate.
     pub fn new(bridge: BridgeClient, resolver: Arc<SymbolResolver>, clock: ServerClock) -> Self {
-        let intent_aliases = Arc::new(resolver.alias_list().into_iter().collect());
+        let intent_aliases = Arc::new(resolver.intent_aliases());
         Self {
             bridge,
             resolver,
@@ -449,7 +449,7 @@ impl ToolRegistry {
     /// bridge are shared.
     pub fn with_resolver(&self, resolver: Arc<SymbolResolver>) -> Self {
         let mut tools = self.clone();
-        tools.intent_aliases = Arc::new(resolver.alias_list().into_iter().collect());
+        tools.intent_aliases = Arc::new(resolver.intent_aliases());
         tools.resolver = resolver;
         tools
     }
@@ -558,10 +558,22 @@ impl ToolRegistry {
         } else {
             arguments.clone()
         };
-        let action = match self.build_action(tool, args) {
+        // Arguments are checked first: a bad request never touches the bridge.
+        let before = trading.broker().book().identity();
+        let mut action = match self.build_action(tool, args.clone()) {
             Ok(a) => a,
             Err(message) => return ToolOutcome::error(message),
         };
+        // A proposal names symbols: make sure they are resolved for the account MT5 is on
+        // now. An account switch since the last look re-reads that broker's symbols, and the
+        // names are resolved again.
+        trading.broker().observe().await;
+        if trading.broker().book().identity() != before {
+            action = match self.build_action(tool, args) {
+                Ok(a) => a,
+                Err(message) => return ToolOutcome::error(message),
+            };
+        }
         let request = ProposeRequest {
             action,
             session: Some(ctx.session_id),
@@ -573,7 +585,7 @@ impl ToolRegistry {
         };
         match trading.propose(request).await {
             Ok(preview) => ToolOutcome {
-                content: preview_content(&preview),
+                content: preview_content(&preview, &self.canonical_names(&preview.symbols)),
                 is_error: false,
                 bridge_request: None,
                 bridge_reply: None,
@@ -700,6 +712,33 @@ impl ToolRegistry {
         }
     }
 
+    /// Canonical names of broker symbols, same order.
+    fn canonical_names(&self, broker_symbols: &[String]) -> Vec<String> {
+        broker_symbols
+            .iter()
+            .map(|s| self.resolver.canonical_of_broker_symbol(s))
+            .collect()
+    }
+
+    /// Serialise rows that have a `symbol` field and add the canonical name next to it, so
+    /// the model sees both (`"symbol": "XAUUSD_", "canonical": "XAUUSD"`).
+    fn with_canonical<T: Serialize>(&self, rows: &T) -> Result<Value, String> {
+        let mut value = serde_json::to_value(rows).map_err(|e| e.to_string())?;
+        let rows_mut: Vec<&mut Value> = match &mut value {
+            Value::Array(items) => items.iter_mut().collect(),
+            single => vec![single],
+        };
+        for row in rows_mut {
+            if let Some(object) = row.as_object_mut()
+                && let Some(symbol) = object.get("symbol").and_then(Value::as_str)
+            {
+                let canonical = self.resolver.canonical_of_broker_symbol(symbol);
+                object.insert("canonical".to_owned(), Value::String(canonical));
+            }
+        }
+        Ok(value)
+    }
+
     fn symbol(&self, raw: &str) -> Result<String, String> {
         self.resolver.resolve(raw).ok_or_else(|| {
             format!("'{raw}' is not a usable symbol name. Ask the user which instrument they mean.")
@@ -729,7 +768,7 @@ impl ToolRegistry {
                 Some(&raw),
             )
             .await?;
-        compact(&price)
+        compact(&self.with_canonical(&price)?)
     }
 
     async fn get_account(&self, ex: &mut Exchange) -> Result<String, String> {
@@ -763,7 +802,7 @@ impl ToolRegistry {
             "count": list.len(),
             "total_profit": summary["profit"],
             "summary": summary,
-            "positions": list,
+            "positions": self.with_canonical(&list)?,
         }))
     }
 
@@ -781,7 +820,7 @@ impl ToolRegistry {
         for o in &mut list {
             o.comment = model_safe_comment(&o.comment);
         }
-        compact(&json!({ "count": list.len(), "orders": list }))
+        compact(&json!({ "count": list.len(), "orders": self.with_canonical(&list)? }))
     }
 
     async fn get_history(&self, args: Value, ex: &mut Exchange) -> Result<String, String> {
@@ -825,7 +864,7 @@ impl ToolRegistry {
         compact(&json!({
             "summary": summary,
             "listed": listed.len(),
-            "deals": listed,
+            "deals": self.with_canonical(&listed)?,
         }))
     }
 
@@ -891,7 +930,7 @@ fn parse_time(text: &str, end_of_day: bool, server_offset_secs: i64) -> Result<i
 }
 
 /// The tool result for a created preview: text for the model, never the token.
-fn preview_content(p: &PreviewDto) -> String {
+fn preview_content(p: &PreviewDto, canonical_symbols: &[String]) -> String {
     let confirmations = if p.is_batch { 2 } else { 1 };
     let next = if p.is_batch {
         format!(
@@ -910,6 +949,7 @@ fn preview_content(p: &PreviewDto) -> String {
         "executed": false,
         "description": p.description,
         "symbols": p.symbols,
+        "canonical_symbols": canonical_symbols,
         "tickets": p.tickets,
         "count": p.count,
         "total_volume": p.total_volume,
@@ -959,6 +999,10 @@ fn propose_error_message(e: &TradingError) -> String {
              pending preview (confirm or cancel). Confirming and cancelling are done by the user \
              in the app (the Confirm and Cancel buttons, or saying \"confirm\" or \"cancel\" by \
              voice); you cannot do it and must not propose again. Nothing has been executed yet."
+            .to_owned(),
+        TradingError::BrokerChanged => "Not proposed: the broker account in MetaTrader 5 \
+             changed while this was being prepared, so its symbols were re-read. Nothing was \
+             sent. Ask the user to repeat the request."
             .to_owned(),
         TradingError::ModeMismatch => "Trading is blocked: Jarvis is configured for a demo \
              account but MetaTrader 5 reports a real account. Tell the user to fix the account \

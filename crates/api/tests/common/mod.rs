@@ -249,6 +249,8 @@ pub struct TestApp {
     pub llm: Arc<ScriptedLlm>,
     /// Present when the app was built with `Options::clock`.
     pub clock: Option<ManualClock>,
+    /// The folder for generated and user symbol maps (`Options::maps`).
+    pub data_dir: Option<std::path::PathBuf>,
 }
 
 pub struct Options<'a> {
@@ -275,6 +277,12 @@ pub struct Options<'a> {
     pub personas: Option<PersonaRegistry>,
     /// Makes the `claude` provider available, answered by this model.
     pub claude_llm: Option<Arc<ScriptedLlm>>,
+    /// Load the repository's instrument catalog and curated broker maps and keep the generated
+    /// and user maps in a fresh temp folder (`TestApp::data_dir`). Off: the symbol maps are
+    /// not loaded, names pass through with the suffix (the behaviour before broker maps).
+    pub maps: bool,
+    /// `[symbols] auto_detect` (only matters with `maps`).
+    pub auto_detect: bool,
 }
 
 impl Default for Options<'_> {
@@ -293,6 +301,8 @@ impl Default for Options<'_> {
             audit: None,
             personas: None,
             claude_llm: None,
+            maps: false,
+            auto_detect: true,
         }
     }
 }
@@ -341,7 +351,7 @@ pub async fn build_app(
     opts: Options<'_>,
 ) -> TestApp {
     let endpoint = target.endpoint();
-    let config = Config::from_toml_str(&config_toml(
+    let mut toml = config_toml(
         opts.mode,
         &endpoint,
         opts.suffix,
@@ -350,8 +360,31 @@ pub async fn build_app(
         opts.trading,
         opts.server,
         opts.auth,
-    ))
-    .expect("test config");
+    );
+    let mut data_dir = None;
+    if opts.maps {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        let dir = std::env::temp_dir().join(format!("jarvis-symbols-{}", Uuid::new_v4()));
+        toml = toml.replacen(
+            "[symbols]
+",
+            &format!(
+                "[symbols]
+instruments = '{}'
+broker_map = '{}'
+data_dir = '{}'
+auto_detect = {}
+",
+                repo.join("instruments.toml").display(),
+                repo.join("broker_symbols.toml").display(),
+                dir.display(),
+                opts.auto_detect,
+            ),
+            1,
+        );
+        data_dir = Some(dir);
+    }
+    let config = Config::from_toml_str(&toml).expect("test config");
     let bridge = bridge_client(target, config.bridge.timeout_ms);
     let audit = match opts.audit {
         Some(audit) => audit,
@@ -402,6 +435,7 @@ pub async fn build_app(
         audit,
         llm,
         clock,
+        data_dir,
     }
 }
 

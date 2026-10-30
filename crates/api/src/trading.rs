@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::audit::{Audit, AuditKind};
+use crate::broker::{BrokerId, BrokerService};
 use crate::clock::{ServerClock, TimeSource};
 use crate::config::TradingConfig;
 use crate::events::{Event, EventBus};
@@ -164,6 +165,13 @@ pub enum TradingError {
     ModeMismatch,
     #[error("the kill switch is engaged; trading is disabled")]
     KillSwitch,
+    /// MT5 is logged into another broker account than the one a preview was made for. Nothing
+    /// was sent.
+    #[error(
+        "the broker account changed since this was proposed (symbols and tickets belong to the \
+         old account); nothing was sent. Ask for the action again."
+    )]
+    BrokerChanged,
     /// A bridge read (or the reachability check before writes) failed. Nothing was sent.
     #[error("{0}")]
     Bridge(BridgeError),
@@ -294,6 +302,8 @@ pub struct TradingParts {
     pub kill_switch: KillSwitch,
     pub time: Arc<dyn TimeSource>,
     pub events: EventBus,
+    /// Which broker account MT5 is on, and the symbol maps for it.
+    pub broker: Arc<BrokerService>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +312,8 @@ struct TokenMeta {
     /// The persona that created the preview; confirm rows are attributed to it.
     persona: Option<String>,
     preview_id: Uuid,
+    /// The broker account the preview was made on: a confirm on another account is refused.
+    broker: Option<BrokerId>,
     /// What was proposed: confirmation checks it again against the market of that moment.
     action: Option<ProposedAction>,
     stage: TokenStage,
@@ -335,6 +347,7 @@ pub struct Trading {
     tokens: TokenStore,
     time: Arc<dyn TimeSource>,
     events: EventBus,
+    broker: Arc<BrokerService>,
     registry: Mutex<Registry>,
     confirm_limiter: RateLimiter,
     /// Held while a confirmed action is re-checked and sent: writes go out one at a time and
@@ -366,6 +379,7 @@ impl Trading {
             kill_switch: parts.kill_switch,
             time: parts.time,
             events: parts.events,
+            broker: parts.broker,
             registry: Mutex::new(Registry::default()),
             confirm_limiter: RateLimiter::new(CONFIRM_RATE_LIMIT, CONFIRM_RATE_WINDOW_MS),
             write_lock: tokio::sync::Mutex::new(()),
@@ -412,6 +426,22 @@ impl Trading {
 
     pub fn events(&self) -> &EventBus {
         &self.events
+    }
+
+    pub fn broker(&self) -> &Arc<BrokerService> {
+        &self.broker
+    }
+
+    /// The limits as the gate compares them: `allowed_symbols` are canonical in the config
+    /// and the settings, and become the current broker's own symbols here (the gate compares
+    /// exact broker names).
+    fn gate_limits(&self) -> Limits {
+        let mut limits = self.limits();
+        limits.allowed_symbols = self
+            .broker
+            .book()
+            .broker_symbols_for(&limits.allowed_symbols);
+        limits
     }
 
     /// True while any confirmation token (first or second stage, from chat or the UI) is
@@ -491,11 +521,17 @@ impl Trading {
             intent::cross_check(intent, &req.action).map_err(TradingError::IntentMismatch)?;
         }
 
+        // The action's symbols were resolved for this account a moment ago.
+        let resolved_for = self.broker.book().identity();
         let snapshot = self.snapshot(&req.action).await?;
+        let broker = self.broker.book().identity();
+        if resolved_for.is_some() && resolved_for != broker {
+            return Err(TradingError::BrokerChanged);
+        }
         let preview = evaluate(
             &req.action,
             &snapshot,
-            &self.limits(),
+            &self.gate_limits(),
             self.kill_switch.is_engaged(),
         )?;
 
@@ -516,6 +552,7 @@ impl Trading {
                     session: req.session,
                     persona: req.persona.clone(),
                     preview_id: preview.id,
+                    broker,
                     action: Some(req.action.clone()),
                     stage: issued.stage,
                     source: source_name(&req.source),
@@ -585,6 +622,9 @@ impl Trading {
         if self.mode.mismatch() {
             return Err(TradingError::ModeMismatch);
         }
+        // An account switch is noticed here (and its symbols re-detected) before anything is
+        // read for the gate.
+        self.broker.observe().await;
         let account = self.bridge.get_account().await?;
         self.mode.observe(account.trade_mode);
         if self.mode.mismatch() {
@@ -698,6 +738,14 @@ impl Trading {
             .await;
             return Err(error);
         }
+        // A preview belongs to the broker account it was made on (symbols and tickets do).
+        if let Some(expected) = meta.as_ref().and_then(|m| m.broker.as_ref()) {
+            self.broker.observe().await;
+            if self.broker.book().identity().as_ref() != Some(expected) {
+                self.refuse_broker_changed(token, &who, expected).await;
+                return Err(TradingError::BrokerChanged);
+            }
+        }
         let outcome = match self.tokens.confirm(token, now) {
             Ok(o) => o,
             Err(e) => {
@@ -743,6 +791,7 @@ impl Trading {
                             session,
                             persona: who.persona.clone(),
                             preview_id: second.preview_id,
+                            broker: meta.as_ref().and_then(|m| m.broker.clone()),
                             action: meta.as_ref().and_then(|m| m.action.clone()),
                             stage: second.stage,
                             source,
@@ -794,8 +843,9 @@ impl Trading {
                 // Run the writes on their own task: if the HTTP client disconnects, a
                 // half-finished batch must still run to the end and be audited.
                 let this = Arc::clone(self);
+                let broker = meta.as_ref().and_then(|m| m.broker.clone());
                 let action = meta.and_then(|m| m.action);
-                tokio::spawn(async move { this.execute(preview, who, action).await })
+                tokio::spawn(async move { this.execute(preview, who, action, broker).await })
                     .await
                     .map_err(|e| TradingError::Internal(format!("execution task failed: {e}")))?
             }
@@ -811,6 +861,7 @@ impl Trading {
         preview: ActionPreview,
         who: Actor,
         action: Option<ProposedAction>,
+        broker: Option<BrokerId>,
     ) -> Result<ConfirmResponse, TradingError> {
         if let Some(bad) = preview.commands.iter().find(|c| !c.is_write()) {
             // Cannot happen with a correct gate; refuse rather than send a read as a "trade".
@@ -840,6 +891,24 @@ impl Trading {
                 self.clock
                     .observe(info.server_time, chrono::Utc::now().timestamp());
                 self.mode.observe(info.trade_mode);
+                // Still the account the user confirmed on?
+                self.broker.observe().await;
+                if let Some(expected) = &broker
+                    && self.broker.book().identity().as_ref() != Some(expected)
+                {
+                    self.record(
+                        &who,
+                        AuditKind::GateRejected,
+                        json!({
+                            "reason": "broker_changed",
+                            "preview_id": preview.id,
+                            "expected": expected,
+                            "sent": 0,
+                        }),
+                    )
+                    .await;
+                    return Err(TradingError::BrokerChanged);
+                }
             }
             Err(e) => {
                 self.record(
@@ -1101,7 +1170,7 @@ impl Trading {
         let fresh = match evaluate(
             action,
             &snapshot,
-            &self.limits(),
+            &self.gate_limits(),
             self.kill_switch.is_engaged(),
         ) {
             Ok(fresh) => fresh,
@@ -1226,6 +1295,35 @@ impl Trading {
             .await;
         }
         Ok(gone)
+    }
+
+    /// A confirm for a preview made on another broker account: the token is cancelled and
+    /// the refusal audited. Nothing is sent.
+    async fn refuse_broker_changed(&self, token: &str, who: &Actor, expected: &BrokerId) {
+        let now = self.time.now_ms();
+        // "Already used" is fine: the point is that it can no longer be confirmed.
+        let _ = self.tokens.cancel(token, now);
+        {
+            let mut reg = self.reg();
+            if let Some(m) = reg.tokens.get_mut(token) {
+                m.resolved = true;
+            }
+            if reg.live.get(&who.session).is_some_and(|t| t == token) {
+                reg.live.remove(&who.session);
+            }
+        }
+        self.record(
+            who,
+            AuditKind::Confirm,
+            json!({
+                "token": token_prefix(token),
+                "accepted": false,
+                "reason": "broker_changed",
+                "expected": expected,
+                "now": self.broker.book().identity(),
+            }),
+        )
+        .await;
     }
 
     async fn reject_at_confirm(

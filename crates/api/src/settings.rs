@@ -73,7 +73,7 @@ pub struct UserSettings {
     pub llm_provider: Option<String>,
     pub voice: VoiceSettings,
     pub watchlist: Vec<String>,
-    /// Lower-cased spoken name to broker symbol.
+    /// Lower-cased spoken name to canonical instrument name.
     pub aliases: BTreeMap<String, String>,
 }
 
@@ -253,8 +253,10 @@ fn validate_watchlist(
                 "watchlist entries must be 1 to {MAX_NAME_CHARS} characters, got '{entry}'"
             )));
         }
+        // The watchlist holds canonical names; the broker's own spelling is resolved when
+        // the prices are read.
         let symbol = resolver
-            .resolve(entry)
+            .canonical(entry)
             .ok_or_else(|| bad(format!("'{entry}' is not a usable symbol name")))?;
         if !out.contains(&symbol) {
             out.push(symbol);
@@ -489,7 +491,8 @@ mod tests {
             json!({ "watchlist": ["gold", "eur/usd", " XAUUSD.m ", "btc usd"] }),
         )
         .unwrap();
-        assert_eq!(s.watchlist, ["XAUUSD.m", "EURUSD.m", "BTCUSD.m"]);
+        // Canonical names: the broker's spelling is applied when prices are read.
+        assert_eq!(s.watchlist, ["XAUUSD", "EURUSD", "BTCUSD"]);
 
         let many: Vec<String> = (0..30).map(|i| format!("SYM{i}")).collect();
         assert!(apply(defaults(), json!({ "watchlist": many })).is_ok());
@@ -511,7 +514,7 @@ mod tests {
             s.aliases.get("yellow metal").map(String::as_str),
             Some("XAUUSD")
         );
-        assert_eq!(s.watchlist, ["XAUUSD.m"]);
+        assert_eq!(s.watchlist, ["XAUUSD"]);
     }
 
     #[test]

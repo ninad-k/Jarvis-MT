@@ -138,13 +138,13 @@ pub async fn limits_put(
     let req: LimitsBody = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid limits: {e}")))?;
 
-    // Symbols are named the way the config names them: resolved, with the broker suffix.
+    // Symbols are named the way the config names them: canonical.
     let allowed_symbols = match &req.allowed_symbols {
         None => None,
         Some(list) => {
             let mut out: Vec<String> = Vec::with_capacity(list.len());
             for name in list {
-                let symbol = state.resolver().resolve(name).ok_or_else(|| {
+                let symbol = state.resolver().canonical(name).ok_or_else(|| {
                     ApiError::BadRequest(format!("'{name}' is not a usable symbol name"))
                 })?;
                 if !out.contains(&symbol) {
