@@ -36,7 +36,7 @@ Health of every part. This endpoint never fails because the bridge is down; it r
   "bridge": {
     "connected": true,
     "latency_ms": 4,
-    "ea_version": "0.3.1",
+    "ea_version": "0.4.0",
     "protocol_version": 2,
     "trade_mode": "demo",
     "terminal_connected": true,
@@ -576,3 +576,107 @@ the effective limits at that moment.
 - `GET /api/watchlist` uses the caller's watchlist and aliases from settings.
 - If saved limit overrides cannot be read at startup, new orders are refused until they
   are reset with `DELETE /api/settings/limits` (fail closed, like the kill switch).
+
+---
+
+# Broker symbol mapping
+
+Arc MT uses **canonical** instrument names everywhere (`XAUUSD`, `US100`, `US30`,
+`EURUSD`, ... from `config/instruments.toml`); each broker's own names (`XAUUSD_`,
+`US100_Spot`, `USTEC`, `UT100Roll`, `EURUSD.pr`, `GOLD_CASH`) are mapped per broker,
+keyed by the MT5 company name (`ACCOUNT_COMPANY`). Resolution order: the user's
+overrides > curated `config/broker_symbols.toml` > auto-detected > the name unchanged.
+
+Detection runs automatically at startup and whenever the bridge reports a different
+broker (an account switch in MT5): the API fetches the broker's full catalog
+(`get_broker`, `list_symbols`), runs the auto-mapper, saves the result to
+`data/broker_symbols.generated.toml` and a catalog snapshot to
+`data/broker-catalogs/<broker>.json`, writes a `symbol_map_detected` audit row and
+emits the WebSocket event `{"type":"symbol_map_changed","broker":"..."}`. Limits
+(`allowed_symbols`), the watchlist, aliases and chat all keep using canonical names, so
+they keep working across brokers.
+
+## GET /api/symbols
+
+```json
+{
+  "broker": { "company": "CFI Financial Markets L.L.C", "server": "CFI3-Demo",
+              "detected_at": "2026-10-30T12:00:00Z", "catalog_size": 1834,
+              "detected_suffix": "_", "detected_prefix": "" },
+  "mappings": [
+    { "canonical": "XAUUSD", "class": "metal", "aliases": ["GOLD", "XAU"],
+      "broker_symbol": "XAUUSD_", "source": "curated", "available": true,
+      "candidates": [ { "broker_symbol": "XAUUSD_", "description": "Gold", "score": 9,
+                        "reasons": ["visible", "tradable", "matches detected suffix"] } ] },
+    { "canonical": "US100", "class": "index", "aliases": ["NASDAQ", "NAS100", "USTEC"],
+      "broker_symbol": "US100_Spot", "source": "generated", "available": true,
+      "candidates": [] }
+  ],
+  "unmapped": ["HK50"]
+}
+```
+
+`source` is `user` | `curated` | `generated` | `pattern` | `passthrough`. `available` is
+false when the resolved name is not in this broker's catalog (the entry needs attention).
+`broker` is `null` while the bridge has never been reachable.
+
+## PUT /api/symbols/map
+
+`{ "canonical": "US100", "broker_symbol": "NAS100.cash" }` sets a user override for the
+current broker (`broker_symbol` must exist in its catalog → else 422
+`unknown_broker_symbol`); `"broker_symbol": null` removes the override. Saved to
+`data/broker_symbols.user.toml`. Emits `symbol_map_changed`; audited `symbol_map_override`.
+Needs a TOTP code (`"totp"`) when login is on, because a wrong mapping could send an
+order to the wrong instrument. Errors: 400 `bad_request` (unknown canonical name, or
+`broker_symbol` missing: send a name or `null`), 401 (login/TOTP), 422
+`unknown_broker_symbol`, 409 `broker_changed` (the account switched while the request was
+being checked), 503 `bridge_unavailable` (no broker known yet). The response body is the
+same as `GET /api/symbols` (the refreshed state).
+
+## POST /api/symbols/detect
+
+Re-runs detection for the current broker now (e.g. after the broker added symbols).
+Needs a session but no TOTP. Returns the same shape as `GET /api/symbols` and emits
+`symbol_map_changed`. 503 `bridge_unavailable` when the bridge is down.
+
+## GET /api/symbols/catalog?q=nas&limit=50
+
+Search the current broker's catalog snapshot (name or description, case-insensitive):
+`{"symbols":[{"name","description","path","trade_mode","visible"}],"total"}`. Used by
+the settings page to pick an override.
+
+## GET /api/symbols/export
+
+The effective map for the current broker as a downloadable JSON file
+(`{"broker", "server", "generated_at", "map": {"XAUUSD": "XAUUSD_", ...}}`).
+
+## Changes to existing endpoints
+
+- `GET /api/status` gains `"broker": {"company", "server", "mapped", "total"}`.
+- Watchlist, positions and history rows gain `"canonical"` next to the broker `symbol`.
+- `[symbols] suffix` in the config is now only a last-resort fallback for brokers with
+  no map at all; `[limits] allowed_symbols` and `[symbols] watchlist` hold canonical
+  names.
+
+Details:
+
+- `class` is one of `fx | metal | index | energy | crypto | other`; `trade_mode` in the
+  catalog results is `full | long_only | short_only | close_only | disabled`; `unmapped` is a
+  list of canonical names (instruments whose resolved name the broker does not have).
+- `GET /api/status` `broker.mapped` counts instruments that resolve to a symbol the broker
+  has; `broker.total` is the number of canonical instruments. `broker` is `null` until the
+  bridge has reported a broker.
+- `GET /api/symbols/catalog`: `total` is the number of matches before `limit` (default 50,
+  maximum 500). With no snapshot yet: `{"symbols": [], "total": 0}`.
+- `symbol_map_changed` (`{"type":"symbol_map_changed","broker":"<company>"}`) is sent after a
+  detection (start-up, account switch, `POST /api/symbols/detect`), after a user override is
+  set or cleared, and when the account switches to another broker.
+- Selectors that take a symbol (`POST /api/positions/close` `symbol`, chat tools, the
+  watchlist, `allowed_symbols`) accept a canonical name, a generic alias or the broker's own
+  symbol; a canonical name is resolved through the current broker's map, a name that is
+  already a symbol in the broker's catalog is used as is.
+- A preview is bound to the broker account (company and trade server) it was made on.
+  `POST /api/confirm/{token}` answers 409 `broker_changed` if MT5 is on another account
+  by then; nothing is sent and the token is cancelled.
+- Positions, orders and watchlist prices rows carry `"canonical"`; the chat tools return both
+  the broker `symbol` and `canonical`.

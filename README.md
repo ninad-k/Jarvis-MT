@@ -37,6 +37,7 @@ The bridge to MT5 listens on loopback only, and remote access requires HTTPS and
 Marked **(local)** when the feature runs entirely on your PC, with no cloud service involved.
 
 - **Market data and account (local):** bid and ask prices, account summary, open positions, pending orders and closed deals with totals
+- **Broker symbol mapping (local):** you say "gold" or "nasdaq" and Arc MT uses your broker's own symbol names. The map is detected from the broker's full symbol list when you connect, and again when you switch broker in MT5. You can review and override it in Settings. See [docs/symbol-mapping.md](docs/symbol-mapping.md).
   that the backend computes. Totals are never estimated by the model.
 - **Chat (Ollama is local; Anthropic and OpenAI are cloud):** typed questions in English and Hinglish, with tool calls shown in the transcript.
 - **Personas (local):** two built-in personas. **Jarvis** has a male British voice and speaks calmly and formally. **Friday** has a female US voice and is warm and casual.
@@ -132,7 +133,7 @@ Then attach the EA to a chart: **Navigator > Expert Advisors > JarvisMT > Jarvis
 **Allow Algo Trading**. Keep the global option under Tools > Options > Expert Advisors off. The **Algo Trading** button on the toolbar must be on,
 because writes are refused while it is off.
 
-The Experts tab should show a line that starts with `JarvisBridge 0.3.1 listening on 127.0.0.1:5555`.
+The Experts tab should show a line that starts with `JarvisBridge 0.4.0 listening on 127.0.0.1:5555`.
 
 Check the bridge from the repository root:
 
@@ -284,6 +285,7 @@ pwsh scripts/check.ps1 -SkipWeb -SkipSecurity -SkipWhisper -SkipDesktop
 | [docs/architecture.md](docs/architecture.md) | Developers and reviewers: components, flows, where each rule is enforced, failure modes |
 | [docs/runbook.md](docs/runbook.md) | Operators: start and stop, health, logs, audit queries, users, kill switch, recovery, backups |
 | [docs/configuration.md](docs/configuration.md) | Every setting in `jarvis.toml` and every environment variable |
+| [docs/symbol-mapping.md](docs/symbol-mapping.md) | Broker symbol names: canonical names, per-broker maps, detection on account switch, overrides and adding a broker |
 | [docs/windows-service.md](docs/windows-service.md) | Installing and running the Windows service |
 | [docs/vps.md](docs/vps.md) | Running on a Windows VPS: sizing, hardening, TLS, monitoring, LIVE |
 | [docs/api.md](docs/api.md) | HTTP and WebSocket contract |

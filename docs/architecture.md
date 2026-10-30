@@ -36,6 +36,7 @@ flowchart LR
   LLMC["jarvis-llm: Ollama, Anthropic, OpenAI"]
   VOICEC["jarvis-voice: Whisper STT, Piper TTS"]
   PERSONA["jarvis-persona: persona packs, prompt frame, wake phrases, voices"]
+  SYMB["jarvis-symbols: canonical names, per-broker symbol maps, detection"]
   DB[("SQLite data/jarvis.db: audit, users, revoked_sessions, kill_switch, user_settings, limit_overrides")]
   OLLAMA["Ollama on loopback"]
   CLOUD["Anthropic or OpenAI over HTTPS"]
@@ -55,6 +56,8 @@ flowchart LR
   CHAT --> TOOLS
   CHAT --> LLMC
   TOOLS --> BRC
+  TOOLS --> SYMB
+  TRADE --> SYMB
   TOOLS --> GATE
   TRADE --> GATE
   TRADE --> BRC
@@ -89,14 +92,15 @@ Whisper build, and tagged releases). See "Build and release pipeline" below.
 | `jarvis-gate` (`crates/gate`) | The action gate: limit checks, the deterministic intent parser (English and Hinglish), previews, one-time confirmation tokens with their stages and timing, and the kill switch. No I/O, so it is tested on its own. | `src/limits.rs`, `src/intent.rs`, `src/preview.rs`, `src/tokens.rs`, `src/killswitch.rs` |
 | `jarvis-voice` (`crates/voice`) | WAV decoding, transcript clean-up and corrections, Whisper STT (feature `whisper`), Piper TTS as a child process. | `src/audio.rs`, `src/stt.rs`, `src/text.rs`, `src/tts.rs` |
 | `jarvis-persona` (`crates/persona`) | Persona packs from `personas/*.toml`: loading and validation, the registry, wake-phrase matching, and `compose_system_prompt`, which places a persona's personality inside the fixed prompt frame. It holds no tools, limits or safety rules. | `src/lib.rs` |
-| `jarvis-api` (`crates/api`) | The binary. Config and validation, HTTP and WebSocket routes, `AppState` and startup checks, the chat turn loop and read/propose tools, the trading service (confirm, execute, batch, kill switch), login and sessions, user settings and tighten-only limit overrides, persona selection, voice routes, events, security headers, static files, the SQLite audit log, the `user` CLI and the Windows service. | `src/config.rs`, `routes.rs`, `state.rs`, `serve.rs`, `symbols.rs`, `tools.rs`, `trading.rs`, `voice.rs`, `ws.rs`, `events.rs`, `security.rs`, `static_site.rs`, `ratelimit.rs`, `audit.rs`, `clock.rs`, `users.rs`, `cli.rs`, `service.rs`, `auth/{mod,http,store,crypto}.rs`; migrations `0001_audit.sql`, `0002_users.sql`, `0003_kill_switch.sql` |
+| `jarvis-symbols` (`crates/symbols`) | Broker-aware symbol mapping: the canonical instrument catalog, the three map layers (user, curated, generated) with their resolution order, and the automatic mapper that reads a broker's full symbol list. Pure logic apart from loading and saving its TOML files. | `src/lib.rs`, `catalog.rs`, `layers.rs`, `automap.rs`, `text.rs` |
+| `jarvis-api` (`crates/api`) | The binary. Config and validation, HTTP and WebSocket routes, `AppState` and startup checks, the chat turn loop and read/propose tools, the trading service (confirm, execute, batch, kill switch), broker identity and symbol-map detection (account switches, previews bound to the account), login and sessions, user settings and tighten-only limit overrides, persona selection, voice routes, events, security headers, static files, the SQLite audit log, the `user` CLI and the Windows service. | `src/config.rs`, `routes.rs`, `state.rs`, `serve.rs`, `symbols.rs`, `broker.rs`, `symbols_routes.rs`, `tools.rs`, `trading.rs`, `voice.rs`, `ws.rs`, `events.rs`, `security.rs`, `static_site.rs`, `ratelimit.rs`, `audit.rs`, `clock.rs`, `users.rs`, `cli.rs`, `service.rs`, `auth/{mod,http,store,crypto}.rs`; migrations `0001_audit.sql`, `0002_users.sql`, `0003_kill_switch.sql` |
 | `JarvisBridge` EA (`mql5/`) | ZeroMQ REP socket on loopback, polled from `OnTimer` (20 ms, at most 10 requests per tick). Validates each request before doing anything. Read commands, plus five write commands that run only on request. | `Experts/JarvisMT/JarvisBridge.mq5`; `Include/Jarvis/{Json,Protocol,ReadHandlers,TradeHandlers}.mqh`; self-test `Scripts/JarvisMT/JarvisSelfTest.mq5` |
 | Vendored mql-zmq | ZeroMQ binding for MQL5, with a local patch and its DLLs (checksums in `mql5/THIRD_PARTY.md`) | `Include/Zmq/`, `Include/Mql/`, `Libraries/*.dll` |
 | `web` | SvelteKit single-page app (adapter-static, fallback `index.html`). Typed client for the HTTP contract, state stores, components (HUD, orb, confirm modal, kill switch, audit page, login), PWA service worker, mock mode. | `src/lib/api.ts`, `src/lib/state/*.svelte.ts`, `src/lib/components/*.svelte`, `src/routes/`, `src/service-worker/`, `static/manifest.webmanifest`; `vite.config.ts` |
 | `apps/desktop` | Tauri 2 shell. A bundled launcher page asks for the backend URL, checks `/api/health`, then navigates to that origin. No trading logic. Not in the Cargo workspace. | `src-tauri/`, `ui/`, `src-tauri/tauri.conf.json` |
 | `scripts/` | Install and compile the EA (SHA-256 checks), download voice models with pinned hashes, and run every local check. | `install-ea.ps1`, `compile-ea.ps1`, `fetch-models.ps1`, `check.ps1` |
 
-Dependencies point one way. `jarvis-api` depends on the five library crates (gate, llm, voice, bridge-client and persona). The EA and the web app depend only on the wire contracts
+Dependencies point one way. `jarvis-api` depends on the six library crates (gate, llm, voice, bridge-client, persona and symbols). The EA and the web app depend only on the wire contracts
 (`docs/protocol.md`, `docs/api.md`). Library crates return typed errors. Only the binary uses `anyhow`.
 
 ## Request flow 1: a read question
@@ -131,7 +135,7 @@ The chat turn loop (the `run_turn` function in `crates/api/src`) allows at most 
 A failed bridge call does not fail the HTTP request. It becomes a tool result that tells the model MT5 is unreachable, and the model
 must say so instead of guessing. A failure of the LLM call itself becomes `502 llm_error`.
 
-Symbols are resolved before any bridge call: alias lookup, cleanup, then the broker suffix (`crates/api/src/symbols.rs`).
+Symbols are resolved before any bridge call: a spoken alias, then the canonical instrument catalog, then the current broker's symbol map. The configured suffix is only a last resort (`crates/api/src/symbols.rs`, `crates/symbols`, and [symbol-mapping.md](symbol-mapping.md)).
 
 ## Request flow 2: propose, confirm, execute
 
@@ -284,6 +288,9 @@ Other enforced controls:
 | SQLite `limit_overrides` | `data/jarvis.db` | The tighten-only trading limit overrides set from Settings. They are checked against the configured limits and apply to every persona. | Changed through `PUT` or `DELETE /api/settings/limits`, which need a TOTP code when login is on. Kept across restarts. |
 | In memory | Process | Chat sessions (at most 100, history capped at 40 messages), confirmation tokens, rate limit counters, open WebSockets. | Lost on restart. |
 | Files | `config/jarvis.toml`, `.env`, `personas/*.toml` | Settings, secrets and persona packs. | Edited by hand. Persona packs are read at startup. |
+| Files | `config/instruments.toml`, `config/broker_symbols.toml` | The canonical instruments and the curated per-broker symbol maps, checked into the repository. | Edited by hand. Read at startup. |
+| Files | `data/broker_symbols.generated.toml`, `data/broker_symbols.user.toml` | The detected symbol map of each broker seen (generated), and your overrides from Settings (user). | Generated: rebuilt by each detection, safe to delete. User: kept until you reset an override. Written by the API only. |
+| Files | `data/broker-catalogs/<slug>.json` | Each broker's full symbol list, with the detection candidates and scores. No account login or name. | Rebuilt by each detection. Safe to delete. |
 | Files | `models/` | Whisper and Piper models, pinned and hash-checked by `fetch-models.ps1`. | Replace by re-running the script. |
 | Files | `logs/` | Daily log of the service (`jarvis-api.log.<date>`). Console runs log to the console. | Not rotated by count. Delete old files yourself. |
 | Files | `web/build/` | The built UI served from `static_dir`. | Rebuild with `pnpm -C web build`, then restart the server. |
@@ -316,6 +323,7 @@ Other enforced controls:
 | Audit insert fails at runtime | Logged at error level. The request continues. | Nothing visible. | Investigate the log. Audit gaps are a defect to fix at once. |
 | TLS certificate missing or unreadable at start | Startup fails with the file names. | Process exits. | Fix the paths. Restart after every renewal. |
 | Secret changed or too short | Startup refuses while login is on. Old TOTP secrets cannot be read after a change. | Logins fail with the message that the stored secret cannot be decrypted. | Reset TOTP for each user (see the [runbook](runbook.md)). |
+| A symbol map file is malformed, or the instrument or curated file is missing | Startup still runs, with a warning. All symbol maps are off: names pass through with the configured `suffix`, and detection does not run. | Orders may be refused as unknown symbols if the names differ from the broker's. | Fix the file named in the log and restart. A corrupt generated file can be deleted, then restart. See [symbol-mapping.md](symbol-mapping.md#troubleshooting). |
 
 ## Build and release pipeline
 

@@ -160,18 +160,20 @@ Open **Settings** in the web app. Your changes are saved to your user, so they a
 
 **Hands-free privacy.** In hands-free mode the microphone listens while the mode is on. Speech is transcribed on your PC by the local Whisper engine. Speech that does not start with a wake phrase is ignored by the app, and the language model never receives it. Switch the input mode to press and hold, or to tap, when you do not want the microphone to listen.
 
-## Symbol names and aliases
+## Symbols and brokers (available from v0.2.0)
 
-You can say "gold", "nasdaq", "dow", "dow jones", "s&p", "bitcoin", "cable" or "fiber". The `[symbols.aliases]` section of the config maps each name to a symbol at your broker. Matching ignores case.
+You can say "gold", "nasdaq", "dow", "dow jones", "s&p", "bitcoin", "cable" or "fiber". Arc MT maps them to your broker's own names. "Gold" is `XAUUSD` inside Arc MT, and the order goes out under the name your broker uses, such as `XAUUSD_` or `GOLD_CASH`. Your limits and the watchlist keep the names you know (XAUUSD, US100, US30).
 
-Broker symbol names differ. You may see `XAUUSD`, `XAUUSD.m`, `GOLD`, `USTEC`, `US100` or `NAS100`. To match your broker:
+You do not set a suffix or restart for a different broker. When you switch the account in MT5, Arc MT notices the change soon after, reads the new broker's symbols and updates the map. Previews made on the old account are refused, so ask again after a switch.
 
-1. Find the exact names in MT5 Market Watch (press Ctrl+M).
-2. Set `suffix` under `[symbols]` if your broker adds one, such as `.m`.
-3. Set the aliases to the names you want to say.
-4. Restart the API.
+To check or fix a mapping, open **Settings**, then **Symbols** (the section is titled "Symbol mapping"):
 
-If a name does not match a symbol, Arc MT reports "unknown symbol". It does not pick a different symbol.
+- It shows the broker you are connected to and, for each instrument, the broker's symbol and where it came from: `user`, `curated`, `auto`, `pattern` or `unchanged`.
+- A row marked "Not in this broker's catalog", or an instrument under "Unmapped on this broker", has no symbol at your broker. Orders in it are refused.
+- **Edit** lets you pick another symbol. Saving or resetting a change asks for your current authenticator code when login is on.
+- **Re-detect** reads the broker's symbols again, for example after the broker adds an instrument. **Export JSON** saves the map as a file.
+
+The details, including how the map is built and how to add a broker, are in [symbol-mapping.md](symbol-mapping.md).
 
 ## Privacy
 
@@ -187,7 +189,7 @@ If a name does not match a symbol, Arc MT reports "unknown symbol". It does not 
 |---|---|
 | Bridge shows as disconnected, or chat says MT5 is not reachable | Start MT5, make sure JarvisBridge is attached to a chart, and check the Experts tab for the "listening" line. Arc MT retries on each question, so no restart is needed. |
 | `409 mode_mismatch` | MT5 is logged into a real account. Log it into your demo account. |
-| "unknown symbol" | Fix the alias or the suffix in the config, then restart the API. |
+| "unknown symbol" | The broker has no symbol for that instrument. Open Settings, then Symbols, and pick the broker's symbol with Edit. Or fix the alias in the config and restart the API. See [symbol-mapping.md](symbol-mapping.md#troubleshooting). |
 | The first answer takes about 100 seconds | The local model is loading. Later answers are much faster. |
 | `502 llm_error` | With the local provider, start Ollama and check the model is pulled. With a cloud provider, check the key in `.env`. |
 | Numbers look wrong | Compare them with MT5. Ask again with a narrower date range. If they still differ, report it. |

@@ -80,17 +80,67 @@ Every message to and from the EA is signed with this key, so any other program o
 
 ## `[symbols]`
 
+Arc MT uses canonical instrument names (`XAUUSD`, `US100`, ...) everywhere and maps them to each broker's own
+symbols. How the maps are built and reviewed is in [symbol-mapping.md](symbol-mapping.md).
+
 | Key | Type | Default | Effect and safety |
 |---|---|---|---|
-| `suffix` | string | `""` | Appended to every resolved symbol, for example `".m"`, or `"_"` for brokers that use that style. Whitespace is trimmed. |
-| `watchlist` | list of strings | `[]` | Symbols shown in the web watchlist, written without the suffix. Entries that are empty after trimming are dropped. |
-| `aliases` | table `spoken = "BROKER"` | `{}` | Spoken or typed names mapped to broker symbols, before the suffix is added. Keys are matched case-insensitively and whitespace is collapsed, so `"Dow  Jones"` matches `"dow jones"`. |
+| `instruments` | path | `"config/instruments.toml"` | The canonical instruments, their generic aliases and their description keywords. Read at start-up. A missing or invalid file turns broker mapping off (see [Mapping files](#mapping-files)). |
+| `broker_map` | path | `"config/broker_symbols.toml"` | The curated per-broker maps, checked into the repository. Read at start-up. A missing or invalid file turns broker mapping off. |
+| `data_dir` | path | `"data"` | Folder for the generated map (`broker_symbols.generated.toml`), your overrides from Settings (`broker_symbols.user.toml`) and the catalog snapshots (`broker-catalogs/`). Created when needed. |
+| `auto_detect` | boolean | `true` | `false` turns off detection at start-up and on an account switch. The curated and user maps still apply, and Re-detect in Settings still runs a detection. |
+| `suffix` | string | `""` | Last resort only. Appended to a name while the current broker has no map in any layer, or no broker is known yet. Whitespace is trimmed. Leave it empty when the maps work. |
+| `watchlist` | list of strings | `[]` | Symbols shown in the web watchlist, as canonical names (`"XAUUSD"`). Entries that are empty after trimming are dropped. |
+| `aliases` | table `spoken = "CANONICAL"` | `{}` | Spoken or typed names, such as `gold = "XAUUSD"`. Keys are matched case-insensitively and whitespace is collapsed, so `"Dow  Jones"` matches `"dow jones"`. Values are canonical names; an older broker symbol as a value still works. |
 
-Write `[limits] allowed_symbols` and the watchlist without the suffix. The loader resolves each entry the same
-way as a spoken name (alias lookup, then the suffix), so `"XAUUSD"` in `allowed_symbols` becomes `XAUUSD.m`
-when `suffix = ".m"`. The suffix is not added twice if an entry already ends with it.
+`[limits] allowed_symbols` and the watchlist hold canonical names, and they apply on every broker. A name written
+with the legacy suffix (`EURUSD.m` while `suffix = ".m"`) is read as its canonical name, so `"EURUSD"` is the
+entry to write. The suffix is no longer added to these lists.
 
 Unknown symbols are reported as `unknown symbol`. The API never picks a different symbol for you.
+
+### Mapping files
+
+The mapping files use TOML. Changes take effect after a restart of `jarvis-api`. All of them are read together at start-up:
+if one is malformed, the server still starts, but the maps are off, names pass through with the `suffix`, and detection
+does not run. The reason is in the log.
+
+#### `config/instruments.toml`
+
+```toml
+[[instrument]]
+canonical = "US100"                 # upper case, [A-Z0-9], 2 to 16 characters
+class = "index"                     # fx | metal | index | energy | crypto | other
+aliases = ["NASDAQ", "NAS100", "USTEC"]
+keywords = ["nasdaq 100", "us tech 100"]   # lower-case phrases seen in a broker's description
+```
+
+- An FX canonical name is six letters.
+- Every name (canonical or alias) belongs to one instrument only.
+- Keywords must not be empty. They are used by detection, not for matching what you type.
+
+#### `config/broker_symbols.toml`, `data/broker_symbols.user.toml` and `data/broker_symbols.generated.toml`
+
+All three have the same shape. Each broker is a table keyed by its exact MT5 company name (`ACCOUNT_COMPANY`):
+
+```toml
+[brokers."Example Markets Ltd"]
+note = "Free text: where the names came from and whether they were verified."
+patterns = [{ match = "^([A-Z]{6})$", replace = "${1}.r" }]
+
+[brokers."Example Markets Ltd".explicit]
+XAUUSD = "GOLD.r"        # canonical name or alias = the broker's symbol
+US100 = "NAS100.cash"
+```
+
+- `explicit`: each value is a non-empty broker symbol. The key is a canonical name or an alias.
+- `patterns`: `match` is a regular expression for the whole canonical name (it must compile). `replace` uses `$1`,
+  `${1}` or `\1` for the groups of `match`, and every group it uses must exist.
+- Explicit entries win over patterns, in every layer. Among patterns, the order is user, curated, generated.
+- The user and generated files are written by Arc MT, so edits made to them while it runs are overwritten. Make
+  permanent changes in Settings or in `config/broker_symbols.toml`.
+
+The layers and their precedence are described in [symbol-mapping.md](symbol-mapping.md#the-three-layers).
 
 ## `[llm]` and `[[llm.providers]]`
 

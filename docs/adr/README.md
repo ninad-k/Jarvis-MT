@@ -25,6 +25,7 @@ The format is a short [MADR](https://adr.github.io/madr/)-style record. Each ADR
 | [0015](0015-desktop-tauri-and-pwa.md) | Desktop app with Tauri 2, and a PWA for phones | Accepted | 2026-10-30 |
 | [0016](0016-authenticated-bridge-protocol.md) | Authenticated bridge protocol (HMAC-SHA256 over two frames) | Accepted | 2026-10-30 |
 | [0017](0017-personas.md) | Personas change how Arc MT sounds, not what it may do | Accepted | 2026-10-30 |
+| [0018](0018-broker-symbol-mapping.md) | Broker symbol mapping with canonical names and per-broker layered maps | Accepted | 2026-10-30 |
 
 ADRs 0005 to 0015 record decisions made for Sprints 2 to 5. Their features are planned and not yet implemented.
 

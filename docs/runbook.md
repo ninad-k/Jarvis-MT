@@ -271,7 +271,7 @@ Without it, any program on the PC could send `order_send` straight to the EA and
    32 random bytes from the system's cryptographic generator, as 64 hex characters. It prints the path and never the key.
    An existing key is never changed, and a damaged one stops the script.
 2. In `config\jarvis.toml` set `key_file` under `[bridge]` to the printed path (a TOML literal string, single quotes), or put the key in `.env` as `JARVIS_BRIDGE_KEY`.
-3. Compile and attach the EA (see the install script's next steps). The Experts log must say `JarvisBridge 0.3.1 listening on ... (protocol 2, authenticated, ...)`.
+3. Compile and attach the EA (see the install script's next steps). The Experts log must say `JarvisBridge 0.4.0 listening on ... (protocol 2, authenticated, ...)`.
    An EA without a usable key does not start; the log says `cannot open the key file` or `the key file ... is not usable`.
 4. Start the API. `bridge_cli --key-file <path> ping` checks the link on its own.
 
@@ -345,7 +345,7 @@ After MT5 restarts, check that JarvisBridge is still attached. The chart shows t
 an EA is running. The Experts tab should show the listening line:
 
 ```text
-JarvisBridge 0.3.1 listening on 127.0.0.1:5555 (protocol 2, authenticated, libzmq 4.3.5, writes only on request, real accounts refused, max order 1 lots)
+JarvisBridge 0.4.0 listening on 127.0.0.1:5555 (protocol 2, authenticated, libzmq 4.3.5, writes only on request, real accounts refused, max order 1 lots)
 ```
 
 With `InpAllowReal` set to `true`, the real-accounts part reads `real accounts ALLOWED (InpAllowReal=true)`. The last part shows the order cap (`InpMaxLot`).
