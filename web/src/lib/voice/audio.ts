@@ -24,6 +24,27 @@ export function primeAudio(): AudioContext | null {
 	return shared;
 }
 
+/** The shared context, but only once a user gesture has let it run; null before that. */
+export function runningAudio(): AudioContext | null {
+	return shared && shared.state === 'running' ? shared : null;
+}
+
+/**
+ * Let the first click, touch or key press unlock audio, so a sound that arrives later (a price
+ * alert) can play without a gesture of its own. Returns the function that removes the listeners.
+ */
+export function armAudioUnlock(): () => void {
+	if (typeof window === 'undefined') return () => {};
+	const events = ['pointerdown', 'keydown', 'touchstart'] as const;
+	const unlock = () => {
+		primeAudio();
+		off();
+	};
+	const off = () => events.forEach((e) => window.removeEventListener(e, unlock));
+	events.forEach((e) => window.addEventListener(e, unlock, { passive: true }));
+	return off;
+}
+
 // ---- Microphone errors ----------------------------------------------------
 
 /** Plain-language text for a getUserMedia / audio failure. */

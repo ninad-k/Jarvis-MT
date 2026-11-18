@@ -1,6 +1,8 @@
 import type { ChatResponse } from '#lib/api.ts';
+import { changedPreferences } from '#lib/market.ts';
 import { chat } from './chat.svelte';
 import { preview } from './preview.svelte';
+import { refreshPreferences } from './refresh.svelte';
 import { speech } from './speech.svelte';
 
 /**
@@ -16,6 +18,9 @@ export async function sendTurn(
 	if (!res) return null;
 
 	if (res.preview) preview.open(res.preview);
+	// A preference tool changed settings, the watchlist, an alert or the kill switch. The server
+	// pushes an event for each, but re-reading here keeps the HUD right if the socket is down.
+	if (changedPreferences(res.tool_calls ?? [])) refreshPreferences();
 
 	const spoken = (opts.voice === true || speech.readAloud) && speech.available;
 	if (spoken) {

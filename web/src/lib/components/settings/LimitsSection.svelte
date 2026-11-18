@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { api, type LimitsResponse, type Weekday } from '#lib/api.ts';
 	import { describeError, toApiError } from '#lib/errors.ts';
 	import {
@@ -18,6 +18,7 @@
 		type LimitsForm
 	} from '#lib/settings-rules.ts';
 	import type { Feedback } from '#lib/state/settings-context.ts';
+	import { settings } from '#lib/state/settings.svelte.ts';
 	import SettingsSection from './SettingsSection.svelte';
 
 	let { authEnabled }: { authEnabled: boolean | null } = $props();
@@ -67,6 +68,16 @@
 	}
 
 	onMount(() => void fetchLimits());
+
+	// A limit was tightened from chat (or another window): show the new values, but never replace
+	// what the user is in the middle of typing.
+	let seenTick = settings.limitsTick;
+	$effect(() => {
+		const tick = settings.limitsTick;
+		if (tick === seenTick) return;
+		seenTick = tick;
+		if (untrack(() => !dirty && !saving)) void fetchLimits();
+	});
 
 	function toggleDay(d: Weekday, on: boolean) {
 		if (!form) return;

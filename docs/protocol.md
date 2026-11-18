@@ -8,7 +8,9 @@ the first set of both (0.3.1 adds the `InpMaxLot` volume cap). **EA 0.4.0 adds `
 `list_symbols`** for per-broker symbol mapping. Both are new commands only: the protocol stays at
 version 2, and an older EA answers them with `retcode -2` (unknown command). **EA 0.5.0 adds
 `get_rates` and `get_calendar`** (price bars and MT5's economic calendar for the market view),
-again as new commands only.
+again as new commands only. **EA 0.6.0 extends `get_symbol`** with the current spread, swaps, the
+trade mode and today's quote and trade sessions; the new fields are optional on the Rust side, so
+an older EA's reply still parses.
 
 **Version 2 (EA 0.3.0) is not compatible with version 1.** Every message is now authenticated
 (finding BR-1, [ADR-0016](adr/0016-authenticated-bridge-protocol.md)): it travels as two ZeroMQ
@@ -431,11 +433,24 @@ risk. The symbol is added to Market Watch if needed. Unknown symbol: `4301`.
     "tick_size": 0.01,
     "stops_level": 10,
     "trade_allowed": true,
-    "currency_profit": "USD"
+    "currency_profit": "USD",
+    "spread": 28,
+    "swap_long": -38.5,
+    "swap_short": 14.2,
+    "swap_mode": "points",
+    "trade_mode": "full",
+    "sessions": {
+      "quote": [[0, 79200], [82800, 86400]],
+      "trade": [[0, 79200], [82800, 86400]]
+    },
+    "trade_open_now": true
   },
   "retcode": 0
 }
 ```
+
+The reply above is `get_symbol.reply.json` (EA 0.6.0). `get_symbol_legacy.reply.json` is what EA
+0.5.0 and older send: the thirteen fields up to `currency_profit`, nothing more.
 
 | data field | MT5 property | notes |
 |---|---|---|
@@ -446,6 +461,24 @@ risk. The symbol is added to Market Watch if needed. Unknown symbol: `4301`.
 | `stops_level` | `SYMBOL_TRADE_STOPS_LEVEL` | minimum SL/TP/pending distance, in points |
 | `trade_allowed` | `SYMBOL_TRADE_MODE` | `true` for full, long-only and short-only symbols; `false` for close-only and disabled ones. `order_send` enforces the direction of long-only and short-only symbols. |
 | `currency_profit` | `SYMBOL_CURRENCY_PROFIT` | |
+| `spread` | `SYMBOL_SPREAD` | EA 0.6.0. Current spread in points (integer). |
+| `swap_long`, `swap_short` | `SYMBOL_SWAP_LONG`, `SYMBOL_SWAP_SHORT` | EA 0.6.0. Swap for a long and a short position, in the unit that `swap_mode` names; negative is a charge. |
+| `swap_mode` | `SYMBOL_SWAP_MODE` | EA 0.6.0. The `SYMBOL_SWAP_MODE_*` constant in lower snake case: `disabled`, `points`, `currency_symbol`, `currency_margin`, `currency_deposit`, `interest_current`, `interest_open`, `reopen_current`, `reopen_bid`; `unknown` for a value the EA does not know. |
+| `trade_mode` | `SYMBOL_TRADE_MODE` | EA 0.6.0. `full`, `long_only`, `short_only`, `close_only` or `disabled`, as in `list_symbols`. `trade_allowed` is the coarse version of it. |
+| `sessions` | `SymbolInfoSessionQuote/Trade` | EA 0.6.0. Quote and trade sessions of the **current server weekday**: `{"quote": [[from, to], ...], "trade": [[from, to], ...]}`. See below. |
+| `trade_open_now` | `TimeTradeServer()` | EA 0.6.0. True when the server's time of day is inside a trade session **and** `trade_mode` is not `disabled`. A symbol with no trade session today is closed. |
+
+**Sessions.** `from` and `to` are seconds since 00:00 server time. `from` is inclusive and `to` is
+exclusive, so a session that ends at 24:00 has `to` = `86400` and covers the last second of the day.
+The EA reads the sessions of the server's current weekday one index after the other until MT5 says
+there are no more, in the order MT5 gives them (at most 16 per kind), so a day can have several
+(for example gold with a break). An empty list means no session today, such as a weekend. Times
+are **server time**, not UTC: convert with the offset between `ping.server_time` and UTC. The
+sessions belong to the weekday of the reply; they say nothing about tomorrow.
+
+Every field from `spread` on is optional in the Rust type (`SymbolInfo`, `Sessions`): an EA older
+than 0.6.0 omits them, and the client leaves them `None` and does not serialise them again. A
+0.6.0 EA always sends all seven.
 
 ### `get_broker`
 
@@ -977,6 +1010,14 @@ one you give it (`start_with_key`, `start_at_with_key`), so every test goes thro
 authenticated code path. `cargo run -p jarvis-bridge-client --features mock --example mock_server`
 serves it on `tcp://127.0.0.1:5555` so `bridge_cli` and the API can be exercised without MT5; it
 writes its key to `target/mock-bridge.key` (or uses `JARVIS_BRIDGE_KEY`) and prints the path.
+
+The mock fills the EA 0.6.0 `get_symbol` fields from its clock (`MockState.clock`, read as server
+time with no offset) for any field the state leaves unset: spread from the quote, swaps per market,
+`trade_mode` (`close_only` when `trade_allowed` is false) and the sessions of the current weekday
+with `trade_open_now`. Forex: Monday to Friday, trade 00:05-23:55, quote 00:01-23:59. Gold: Monday
+to Thursday 00:00-22:00 and 23:00-24:00, Friday 00:00-22:00. US100 and US30: 14:30-21:00 on
+weekdays. BTCUSD: every day, all day. `bridge_cli symbol <name>` prints the JSON and a short read-out
+of the new fields on stderr.
 
 The mock implements `get_symbol` and every write command with real state changes: `order_send`
 adds a position (filled at the ask or bid, new ticket) or a pending order, `position_modify` updates

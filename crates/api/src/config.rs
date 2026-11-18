@@ -87,7 +87,7 @@ pub struct MarketConfig {
     /// The least important calendar events that are fetched: low, moderate or high.
     #[serde(default = "default_calendar_importance")]
     pub calendar_min_importance: jarvis_bridge_client::protocol::Importance,
-    /// Views, news and calendar requests per minute and session (1 to 10000).
+    /// `GET /api/market/view` and `/api/market/news` requests per minute and session (1 to 10000).
     #[serde(default = "default_market_rate_limit")]
     pub rate_limit_per_minute: usize,
     #[serde(default)]
@@ -719,6 +719,7 @@ impl Config {
             max_daily_loss: 500.0,
             allowed_symbols: Vec::new(),
             trading_hours: None,
+            max_risk_percent: jarvis_gate::DEFAULT_MAX_RISK_PERCENT,
         })
     }
 

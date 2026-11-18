@@ -1,4 +1,4 @@
-export type ToastKind = 'info' | 'error';
+export type ToastKind = 'info' | 'error' | 'alert';
 
 export interface Toast {
 	id: number;
@@ -17,6 +17,11 @@ class ToastStore {
 		const id = this.next++;
 		this.items.push({ id, kind, text });
 		setTimeout(() => this.dismiss(id), ms);
+	}
+
+	/** A price alert fired: stays a little longer than a note, since it is why the user is here. */
+	alert(text: string): void {
+		this.push(text, 'alert', 12_000);
 	}
 
 	error(text: string): void {

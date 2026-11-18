@@ -7,7 +7,7 @@
 //! # How an utterance is read
 //!
 //! 1. The text is normalised: lower case, punctuation removed (except `.` inside a
-//!    number), `3,990` read as `3990`, `@` read as "at".
+//!    number), `3,990` read as `3990`, `@` read as "at", `%` as "percent".
 //! 2. A *short* utterance (at most four words once fillers such as "please" and "ji"
 //!    are dropped and repeats collapsed) that is exactly a confirm or cancel phrase is
 //!    `Confirm` or `Cancel`. Longer sentences never are, so "no stop loss" or "yes I
@@ -57,6 +57,9 @@ pub struct OrderFacts {
     pub price: Option<f64>,
     pub sl: Option<f64>,
     pub tp: Option<f64>,
+    /// "risking 1%", "1 percent risk": the size is asked for as a share of equity, not lots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -244,6 +247,10 @@ const LEVEL_FILLERS: &[&str] = &[
 ];
 const PRICE_MARKERS: &[&str] = &["at", "price", "pe", "par", "around", "near"];
 const VOLUME_WORDS: &[&str] = &["volume", "size", "qty", "quantity", "lots"];
+const RISK_WORDS: &[&str] = &["risk", "risking", "risks"];
+const PERCENT_WORDS: &[&str] = &["percent", "pct", "percentage"];
+/// Words that may sit between "risk" and its number ("risk of 1 percent", "risking just 1%").
+const RISK_FILLERS: &[&str] = &["of", "at", "is", "about", "around", "only", "just", "with"];
 const DISTANCE_UNITS: &[&str] = &[
     "pip", "pips", "point", "points", "pts", "pt", "dollar", "dollars",
 ];
@@ -284,6 +291,7 @@ fn normalize(text: &str) -> String {
                 && digit_at(i + 3)
                 && !digit_at(i + 4) => {}
             '@' => out.push_str(" at "),
+            '%' => out.push_str(" percent "),
             '\'' | '\u{2019}' | '`' | '&' => {}
             _ => out.push(' '),
         }
@@ -757,7 +765,11 @@ fn classify(tk: &[Tk], pending: Option<(usize, ExecType)>) -> Intent {
 
     if let Some(side_idx) = side_at {
         let facts = order_facts(tk, side_idx, pending);
-        if facts.symbol.is_some() || facts.volume.is_some() || facts.pending.is_some() {
+        if facts.symbol.is_some()
+            || facts.volume.is_some()
+            || facts.pending.is_some()
+            || facts.risk_percent.is_some()
+        {
             return Intent::Order(facts);
         }
     }
@@ -840,6 +852,8 @@ fn symbol_of(tk: &[Tk]) -> Option<String> {
 
 fn order_facts(tk: &[Tk], side_idx: usize, pending: Option<(usize, ExecType)>) -> OrderFacts {
     let mut used = Used::new(tk);
+    // Before anything else: "risking 1%" must not be read as a volume or a price.
+    let risk_percent = risk_percent(tk, &mut used);
     let (sl, tp) = levels(tk, &mut used);
 
     // volume: "0.1 lots", "volume 0.1"
@@ -903,7 +917,57 @@ fn order_facts(tk: &[Tk], side_idx: usize, pending: Option<(usize, ExecType)>) -
         price,
         sl,
         tp,
+        risk_percent,
     }
+}
+
+/// A number the user said as a risk: digits or a spoken digit ("one percent").
+fn percent_number(tk: &[Tk], used: &Used, i: usize) -> Option<f64> {
+    match tk.get(i)? {
+        Tk::N(n) if !n.lotted && !used.0[i] && n.v > 0.0 => Some(n.v),
+        Tk::W(w) => digit_word(w).filter(|d| *d > 0).map(f64::from),
+        _ => None,
+    }
+}
+
+/// How many words "percent" takes at `i`: "per cent" is two words, 0 when it is not there.
+fn percent_word_len(tk: &[Tk], i: usize) -> usize {
+    match tk.get(i) {
+        Some(t) if t.is_any(PERCENT_WORDS) => 1,
+        Some(t) if t.is("per") && tk.get(i + 1).is_some_and(|n| n.is("cent")) => 2,
+        _ => 0,
+    }
+}
+
+/// The risk the user asked for: "risking 1%", "risk 0.5 percent", "risk of one percent",
+/// "1% risk", "1 percent risk". The number is marked used. A risk without "percent" is not
+/// read ("risk 50" could be dollars).
+fn risk_percent(tk: &[Tk], used: &mut Used) -> Option<f64> {
+    for at in 0..tk.len() {
+        if !tk[at].is_any(RISK_WORDS) {
+            continue;
+        }
+        // "risking 1 percent"
+        let mut j = at + 1;
+        while tk.get(j).is_some_and(|t| t.is_any(RISK_FILLERS)) {
+            j += 1;
+        }
+        if let Some(v) = percent_number(tk, used, j)
+            && percent_word_len(tk, j + 1) > 0
+        {
+            used.0[j] = true;
+            return Some(v);
+        }
+        // "1 percent risk"
+        if at >= 2
+            && percent_word_len(tk, at - 1) == 1
+            && let Some(v) = percent_number(tk, used, at - 2)
+        {
+            used.0[at - 2] = true;
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// Ticket numbers: integers after "ticket"/"position"/"order" (4+ digits) or any
@@ -1027,6 +1091,10 @@ fn same_volume(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9
 }
 
+fn same_percent(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-9
+}
+
 fn same_price(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-6 * a.abs().max(b.abs())
 }
@@ -1098,12 +1166,27 @@ fn action_name(a: &ProposedAction) -> &'static str {
 /// - The parser reads "should I buy gold?" as an order with a side; telling a question from an
 ///   instruction in the same words is left to the model and to the user's confirmation.
 pub fn cross_check(utterance_intent: &Intent, proposal: &ProposedAction) -> Result<(), Mismatch> {
+    cross_check_sized(utterance_intent, proposal, None)
+}
+
+/// [`cross_check`] for a proposal that may size its order by risk. `risk_percent` is the
+/// percentage the proposal asked for; the order's `volume` is then a number computed from it,
+/// not one the user said, so it is not compared with a volume. What is compared instead:
+///
+/// - a user who said lots cannot be given a risk-sized order, and the risk must be the one said;
+/// - a user who said a risk (and no lots) cannot be given a plain volume (`risk_percent`
+///   `None`): the model must not invent a size.
+pub fn cross_check_sized(
+    utterance_intent: &Intent,
+    proposal: &ProposedAction,
+    risk_percent: Option<f64>,
+) -> Result<(), Mismatch> {
     match (utterance_intent, proposal) {
         (Intent::Order(f), ProposedAction::Order(o)) => {
             if f.side.is_none() {
                 return explicit_request_needed(NO_ORDER_SAID, action_name(proposal));
             }
-            check_order(f, o)
+            check_order(f, o, risk_percent)
         }
         (Intent::Close(f), ProposedAction::Close(c)) => check_close(f, c),
         (Intent::CancelOrders(f), ProposedAction::Cancel(c)) => check_cancel(f, c),
@@ -1140,7 +1223,7 @@ fn closes_one_position(c: &CloseSelector) -> bool {
     c.tickets.len() == 1 && c.symbol.is_none() && c.side.is_none() && !c.all
 }
 
-fn check_order(f: &OrderFacts, o: &OrderIntent) -> Result<(), Mismatch> {
+fn check_order(f: &OrderFacts, o: &OrderIntent, risk: Option<f64>) -> Result<(), Mismatch> {
     if let Some(side) = f.side
         && side != o.side
     {
@@ -1156,10 +1239,33 @@ fn check_order(f: &OrderFacts, o: &OrderIntent) -> Result<(), Mismatch> {
     {
         return mismatch("type", exec_text(kind), exec_text(o.exec));
     }
-    if let Some(volume) = f.volume
-        && !same_volume(volume, o.volume)
-    {
-        return mismatch("volume", volume, o.volume);
+    match (risk, f.volume, f.risk_percent) {
+        (Some(proposed), said_lots, said_risk) => {
+            if let Some(volume) = said_lots {
+                return mismatch(
+                    "volume",
+                    format!("{volume} lots"),
+                    format!("a size from a {proposed}% risk"),
+                );
+            }
+            if let Some(said) = said_risk
+                && !same_percent(said, proposed)
+            {
+                return mismatch("risk_percent", format!("{said}%"), format!("{proposed}%"));
+            }
+        }
+        (None, Some(volume), _) if !same_volume(volume, o.volume) => {
+            return mismatch("volume", volume, o.volume);
+        }
+        // A risk was said and no lots: the volume here is the model's own.
+        (None, None, Some(said)) => {
+            return mismatch(
+                "volume",
+                format!("a risk of {said}%"),
+                format!("{} lots", o.volume),
+            );
+        }
+        _ => {}
     }
     check_level("price", f.price, o.price)?;
     check_level("sl", f.sl, o.sl)?;

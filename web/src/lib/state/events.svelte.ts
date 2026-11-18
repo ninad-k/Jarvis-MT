@@ -1,8 +1,10 @@
 import type { WsEvent } from '#lib/api.ts';
 import { reconnectDelay } from '#lib/backoff.ts';
+import { alerts } from './alerts.svelte';
 import { killSwitch } from './killswitch.svelte';
 import { refreshTrading, status, watchlist } from './hud.svelte';
 import { preview } from './preview.svelte';
+import { refreshPreferences } from './refresh.svelte';
 import { settings } from './settings.svelte';
 import { symbolMap } from './symbols.svelte';
 
@@ -24,22 +26,25 @@ class EventsStore {
 	private timer: ReturnType<typeof setTimeout> | undefined;
 	private stopMock: (() => void) | null = null;
 	private wanted = false;
-	/** Pages that want every event (the HUD), and pages that only follow the broker symbol map. */
+	/** Pages that want every event (the HUD), and pages that only follow settings and the symbol map. */
 	private full = 0;
-	private symbolsOnly = 0;
+	private settingsPage = 0;
 
 	start(): () => void {
 		return this.hold('full');
 	}
 
-	/** Settings page: only `symbol_map_changed` matters there (the HUD pollers are not running). */
-	watchSymbols(): () => void {
-		return this.hold('symbols');
+	/**
+	 * Settings page: `symbol_map_changed` and `settings_changed` matter there (a change made from
+	 * chat in another window); the HUD pollers are not running.
+	 */
+	watchSettingsPage(): () => void {
+		return this.hold('settings');
 	}
 
-	private hold(kind: 'full' | 'symbols'): () => void {
+	private hold(kind: 'full' | 'settings'): () => void {
 		if (kind === 'full') this.full++;
-		else this.symbolsOnly++;
+		else this.settingsPage++;
 		if (!this.wanted) {
 			this.wanted = true;
 			void this.connect();
@@ -49,15 +54,15 @@ class EventsStore {
 			if (released) return;
 			released = true;
 			if (kind === 'full') this.full = Math.max(0, this.full - 1);
-			else this.symbolsOnly = Math.max(0, this.symbolsOnly - 1);
-			if (this.full + this.symbolsOnly <= 0) this.stop();
+			else this.settingsPage = Math.max(0, this.settingsPage - 1);
+			if (this.full + this.settingsPage <= 0) this.stop();
 		};
 	}
 
 	stop(): void {
 		this.wanted = false;
 		this.full = 0;
-		this.symbolsOnly = 0;
+		this.settingsPage = 0;
 		clearTimeout(this.timer);
 		this.stopMock?.();
 		this.stopMock = null;
@@ -80,6 +85,16 @@ class EventsStore {
 			}
 			return;
 		}
+		if (e.type === 'settings_changed') {
+			// The settings page re-reads what it shows; the HUD also re-reads status (model list,
+			// limits, persona name), the watchlist prices and the alerts, which chat can change too.
+			if (this.full > 0) refreshPreferences();
+			else {
+				void settings.refresh();
+				settings.bumpLimits();
+			}
+			return;
+		}
 		// With only the settings page listening, the HUD pollers are not running: nothing to refresh.
 		if (this.full === 0) return;
 		switch (e.type) {
@@ -90,10 +105,8 @@ class EventsStore {
 			case 'preview_expired':
 				preview.onExpiredEvent(e.token);
 				break;
-			case 'settings_changed':
-				void settings.refresh();
-				status.refresh();
-				watchlist.refresh();
+			case 'alert_triggered':
+				alerts.onTriggered(e);
 				break;
 			case 'trade_executed':
 			case 'positions_changed':

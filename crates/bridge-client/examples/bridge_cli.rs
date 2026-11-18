@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 use jarvis_bridge_client::protocol::{
     CALENDAR_RANGE_MAX_SECS, CalendarQuery, ExecType, HistoryQuery, Importance, JARVIS_MAGIC,
     OrderCancelArgs, OrderSendArgs, PositionCloseArgs, PositionClosePartialArgs,
-    PositionModifyArgs, RatesQuery, Side, Timeframe, TradeMode,
+    PositionModifyArgs, RatesQuery, Side, SymbolInfo, Timeframe, TradeMode,
 };
 use jarvis_bridge_client::{BridgeClient, BridgeConfig, BridgeError, BridgeKey, auth};
 use serde::Serialize;
@@ -178,6 +178,59 @@ fn print<T: Serialize>(value: &T) -> Result<(), BridgeError> {
     Ok(())
 }
 
+/// `HH:MM-HH:MM, ...` for a list of sessions in seconds since 00:00; `none` when empty.
+fn format_sessions(sessions: &[[i64; 2]]) -> String {
+    if sessions.is_empty() {
+        return "none today".to_owned();
+    }
+    let clock = |s: i64| format!("{:02}:{:02}", s / 3600, s % 3600 / 60);
+    sessions
+        .iter()
+        .map(|[from, to]| format!("{}-{}", clock(*from), clock(*to)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The fields EA 0.6.0 added to `get_symbol`, one line each. An older EA sends none of them.
+fn symbol_summary(info: &SymbolInfo) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(spread) = info.spread {
+        lines.push(format!("spread: {spread} points"));
+    }
+    if let (Some(long), Some(short)) = (info.swap_long, info.swap_short) {
+        let mode = info.swap_mode.as_deref().unwrap_or("?");
+        lines.push(format!("swap: long {long}, short {short} ({mode})"));
+    }
+    if let Some(mode) = info.trade_mode {
+        // The wire name, as in the JSON above.
+        let name = serde_json::to_value(mode)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        lines.push(format!("trade mode: {name}"));
+    }
+    if let Some(sessions) = &info.sessions {
+        lines.push(format!(
+            "trade sessions today (server time): {}",
+            format_sessions(&sessions.trade)
+        ));
+        lines.push(format!(
+            "quote sessions today (server time): {}",
+            format_sessions(&sessions.quote)
+        ));
+    }
+    if let Some(open) = info.trade_open_now {
+        lines.push(format!(
+            "trade open now: {}",
+            if open { "yes" } else { "no" }
+        ));
+    }
+    if lines.is_empty() {
+        lines.push("(this EA is older than 0.6.0: no spread, swaps or sessions)".to_owned());
+    }
+    lines
+}
+
 /// A trade server round trip can take seconds, so writes get at least this long.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -254,7 +307,15 @@ async fn run(cli: Cli) -> Result<(), BridgeError> {
     let key = load_key(cli.key_file.as_deref())?;
     let client = BridgeClient::new(BridgeConfig::new(cli.endpoint, timeout, key))?;
     match cli.command {
-        Cmd::Symbol { symbol } => print(&client.get_symbol(&symbol).await?),
+        Cmd::Symbol { symbol } => {
+            let info = client.get_symbol(&symbol).await?;
+            print(&info)?;
+            // The JSON on stdout stays machine-readable; the short read-out goes to stderr.
+            for line in symbol_summary(&info) {
+                eprintln!("{line}");
+            }
+            Ok(())
+        }
         Cmd::Broker => print(&client.get_broker().await?),
         Cmd::Rates {
             symbol,

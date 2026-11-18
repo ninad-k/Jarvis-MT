@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { preview } from '#lib/state/preview.svelte.ts';
-	import { account } from '#lib/state/hud.svelte.ts';
+	import { account, digitsForAny } from '#lib/state/hud.svelte.ts';
 	import { voice } from '#lib/state/voice.svelte.ts';
 	import { fmtPrice, fmtSigned, fmtVolume, tone } from '#lib/format.ts';
+	import { sizingDetail, sizingLine } from '#lib/market.ts';
 	import CountdownRing from './CountdownRing.svelte';
 
 	let dlg = $state<HTMLDialogElement>();
@@ -159,6 +160,16 @@
 									<span class="text-mute">&nbsp;· {p.count} {p.tickets.length ? 'positions' : 'orders'}</span>{/if}
 							</dd>
 						</dl>
+
+						{#if p.sizing}
+							<div class="border border-line bg-panel/60 px-3 py-2" data-testid="sizing">
+								<h3 class="hud-title mb-1">Position size</h3>
+								<p class="num text-sm font-semibold" data-testid="sizing-line">{sizingLine(p.sizing)}</p>
+								<p class="num mt-0.5 text-2xs text-mute" data-testid="sizing-detail">
+									{sizingDetail(p.sizing, p.symbols[0] ? digitsForAny(p.symbols[0]) : null)}
+								</p>
+							</div>
+						{/if}
 
 						<div>
 							<h3 class="hud-title mb-1.5">Estimated P/L {ccy ? `(${ccy})` : ''}</h3>

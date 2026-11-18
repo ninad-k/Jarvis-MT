@@ -21,6 +21,8 @@ pub struct PartialLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_daily_loss: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_risk_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_symbols: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trading_hours: Option<TradingHours>,
@@ -31,6 +33,7 @@ impl PartialLimits {
         self.max_lot.is_none()
             && self.max_positions.is_none()
             && self.max_daily_loss.is_none()
+            && self.max_risk_percent.is_none()
             && self.allowed_symbols.is_none()
             && self.trading_hours.is_none()
     }
@@ -41,6 +44,7 @@ impl PartialLimits {
             max_lot: newer.max_lot.or(self.max_lot),
             max_positions: newer.max_positions.or(self.max_positions),
             max_daily_loss: newer.max_daily_loss.or(self.max_daily_loss),
+            max_risk_percent: newer.max_risk_percent.or(self.max_risk_percent),
             allowed_symbols: newer
                 .allowed_symbols
                 .clone()
@@ -93,6 +97,9 @@ pub fn validate_stricter(config: &Limits, wanted: &PartialLimits) -> Result<(), 
     if let Some(v) = wanted.max_daily_loss {
         probe.max_daily_loss = v;
     }
+    if let Some(v) = wanted.max_risk_percent {
+        probe.max_risk_percent = v;
+    }
     if let Some(v) = &wanted.allowed_symbols {
         probe.allowed_symbols = v.clone();
     }
@@ -137,6 +144,17 @@ pub fn validate_stricter(config: &Limits, wanted: &PartialLimits) -> Result<(), 
                 "max_daily_loss {v} is higher than the configured {}; limits can only be made \
                  stricter",
                 config.max_daily_loss
+            ),
+        ));
+    }
+    if let Some(v) = wanted.max_risk_percent
+        && v > config.max_risk_percent
+    {
+        return Err(not_stricter(
+            "max_risk_percent",
+            format!(
+                "max_risk_percent {v} is higher than the configured {}; limits can only be                  made stricter",
+                config.max_risk_percent
             ),
         ));
     }
@@ -233,6 +251,9 @@ pub fn effective(config: &Limits, overrides: Option<&PartialLimits>) -> Limits {
     if let Some(v) = o.max_daily_loss.filter(|v| v.is_finite() && *v > 0.0) {
         out.max_daily_loss = out.max_daily_loss.min(v);
     }
+    if let Some(v) = o.max_risk_percent.filter(|v| v.is_finite() && *v > 0.0) {
+        out.max_risk_percent = out.max_risk_percent.min(v);
+    }
     if let Some(symbols) = &o.allowed_symbols {
         out.allowed_symbols.retain(|s| symbols.contains(s));
     }
@@ -294,6 +315,7 @@ mod tests {
             max_positions: 5,
             max_daily_loss: 500.0,
             allowed_symbols: vec!["XAUUSD".into(), "EURUSD".into(), "US30".into()],
+            max_risk_percent: 2.0,
             trading_hours: Some(TradingHours {
                 days: WEEK.to_vec(),
                 start: "00:05".into(),
@@ -323,6 +345,7 @@ mod tests {
             max_lot: Some(1.0),
             max_positions: Some(2),
             max_daily_loss: Some(100.0),
+            max_risk_percent: Some(1.0),
             allowed_symbols: Some(vec!["XAUUSD".into()]),
             trading_hours: Some(hours(&[Weekday::Mon, Weekday::Tue], "08:00", "17:00")),
         };
@@ -356,6 +379,13 @@ mod tests {
                     ..PartialLimits::default()
                 },
                 "max_daily_loss",
+            ),
+            (
+                PartialLimits {
+                    max_risk_percent: Some(2.5),
+                    ..PartialLimits::default()
+                },
+                "max_risk_percent",
             ),
             (
                 PartialLimits {
@@ -462,10 +492,12 @@ mod tests {
             max_lot: Some(0.5),
             max_positions: Some(9),
             max_daily_loss: Some(100.0),
+            max_risk_percent: Some(5.0),
             allowed_symbols: Some(vec!["XAUUSD".into(), "BTCUSD".into()]),
             trading_hours: Some(hours(&[Weekday::Mon, Weekday::Sat], "08:00", "23:59")),
         };
         let e = effective(&config(), Some(&o));
+        assert_eq!(e.max_risk_percent, 2.0, "a looser stored value never wins");
         assert_eq!(e.max_lot, 0.5);
         assert_eq!(e.max_positions, 5, "a looser stored value never wins");
         assert_eq!(e.max_daily_loss, 100.0);

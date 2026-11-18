@@ -18,6 +18,21 @@ pub struct Limits {
     /// Closing/modifying/cancelling is allowed outside these hours.
     #[serde(default)]
     pub trading_hours: Option<TradingHours>,
+    /// Most a risk-sized order may risk, as a percent of equity (0.1 to 100). It caps
+    /// `risk_percent` of `propose_order` and Prepare trade; a plain volume order is limited
+    /// by `max_lot` only.
+    #[serde(default = "default_max_risk_percent")]
+    pub max_risk_percent: f64,
+}
+
+/// The least a trade may risk, in percent of equity.
+pub const MIN_RISK_PERCENT: f64 = 0.1;
+
+/// `[limits] max_risk_percent` when the config does not say.
+pub const DEFAULT_MAX_RISK_PERCENT: f64 = 2.0;
+
+fn default_max_risk_percent() -> f64 {
+    DEFAULT_MAX_RISK_PERCENT
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +116,14 @@ impl Limits {
                 self.max_daily_loss
             ));
         }
+        if !(self.max_risk_percent.is_finite()
+            && (MIN_RISK_PERCENT..=100.0).contains(&self.max_risk_percent))
+        {
+            return Err(format!(
+                "limits.max_risk_percent must be between {MIN_RISK_PERCENT} and 100, got {}",
+                self.max_risk_percent
+            ));
+        }
         if self.allowed_symbols.iter().any(|s| s.trim().is_empty()) {
             return Err("limits.allowed_symbols must not contain empty names".to_owned());
         }
@@ -162,6 +185,7 @@ mod tests {
             max_positions: 5,
             max_daily_loss: 500.0,
             allowed_symbols: vec!["XAUUSD".into(), "EURUSD".into()],
+            max_risk_percent: 2.0,
             trading_hours: Some(TradingHours {
                 days: vec![
                     Weekday::Mon,
@@ -190,6 +214,19 @@ mod tests {
             start: start.into(),
             end: end.into(),
         }
+    }
+
+    #[test]
+    fn max_risk_percent_defaults_to_two_when_the_config_omits_it() {
+        let limits: Limits = serde_json::from_value(serde_json::json!({
+            "max_lot": 1.0,
+            "max_positions": 5,
+            "max_daily_loss": 500.0,
+            "allowed_symbols": ["XAUUSD"],
+        }))
+        .unwrap();
+        assert_eq!(limits.max_risk_percent, DEFAULT_MAX_RISK_PERCENT);
+        assert_eq!(limits.validate(), Ok(()));
     }
 
     #[test]
@@ -246,6 +283,21 @@ mod tests {
                 "nan daily loss",
                 Box::new(|l| l.max_daily_loss = f64::NAN),
                 "max_daily_loss",
+            ),
+            (
+                "risk below the minimum",
+                Box::new(|l| l.max_risk_percent = 0.05),
+                "max_risk_percent",
+            ),
+            (
+                "risk above 100",
+                Box::new(|l| l.max_risk_percent = 101.0),
+                "max_risk_percent",
+            ),
+            (
+                "nan risk",
+                Box::new(|l| l.max_risk_percent = f64::NAN),
+                "max_risk_percent",
             ),
             (
                 "empty symbol",

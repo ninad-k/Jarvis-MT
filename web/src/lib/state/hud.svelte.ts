@@ -76,6 +76,11 @@ export function digitsFor(symbol: string): number | undefined {
 	return watchlist.data?.prices.find((p) => p.symbol === symbol)?.digits;
 }
 
+/** Digits for a canonical or a broker symbol name (alerts carry the canonical one). */
+export function digitsForAny(name: string): number | undefined {
+	return watchlist.data?.prices.find((p) => p.symbol === name || p.canonical === name)?.digits;
+}
+
 class Backend {
 	/** The Arc MT server itself is unreachable. */
 	get offline(): boolean {

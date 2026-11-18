@@ -3,10 +3,12 @@
 	import Panel from './Panel.svelte';
 	import Segmented from './Segmented.svelte';
 	import MarketCard from './MarketCard.svelte';
+	import BriefingCard from './BriefingCard.svelte';
 	import MarketTrackRecord from './MarketTrackRecord.svelte';
 	import PrepareTradeDialog from './PrepareTradeDialog.svelte';
 	import { clockTime, DISCLAIMER } from '#lib/market.ts';
 	import { backend, digitsFor, watchlist } from '#lib/state/hud.svelte.ts';
+	import { briefing } from '#lib/state/briefing.svelte.ts';
 	import { market, type MarketTab } from '#lib/state/market.svelte.ts';
 	import { symbolLabel } from '#lib/symbols.ts';
 
@@ -16,6 +18,7 @@
 
 	const tabs: { id: MarketTab; label: string }[] = [
 		{ id: 'view', label: 'Analysis' },
+		{ id: 'briefing', label: 'Briefing' },
 		{ id: 'record', label: 'Track record' }
 	];
 
@@ -53,6 +56,13 @@
 		void market.analyze();
 	}
 
+	/** A symbol in the briefing: show its full analysis. */
+	function openFromBriefing(symbol: string) {
+		market.setTab('view');
+		market.symbolInput = symbol;
+		if (!market.loading && !unavailable) void market.analyze(symbol);
+	}
+
 	function pick(symbol: string) {
 		market.symbolInput = symbol;
 		if (!market.loading && !unavailable) void market.analyze(symbol);
@@ -63,6 +73,9 @@
 	{#snippet meta()}
 		{#if view && market.tab === 'view'}
 			<span title="When this view was made">{clockTime(view.generated_at)}</span>
+		{/if}
+		{#if briefing.data && market.tab === 'briefing'}
+			<span title="When this briefing was made">{clockTime(briefing.data.generated_at)}</span>
 		{/if}
 		{#if onclose}
 			<button
@@ -177,6 +190,59 @@
 					</div>
 				{/if}
 			</div>
+		</div>
+	{:else if market.tab === 'briefing'}
+		<div id="panel-briefing" role="tabpanel" aria-labelledby="tab-briefing" class="min-h-0 flex-1 overflow-y-auto" aria-busy={briefing.loading}>
+			<p class="sr-only" role="status" aria-live="polite" data-testid="briefing-live">{briefing.announcement}</p>
+			<div class="flex flex-wrap items-center justify-between gap-2 border-b border-line p-3">
+				<p class="min-w-0 flex-1 text-xs text-mute">
+					Your account, open positions, today's events and a computed view of every watchlist symbol.
+				</p>
+				<button
+					type="button"
+					class="btn btn-primary h-10 shrink-0"
+					disabled={briefing.loading || unavailable !== null}
+					title={unavailable ?? 'Build the briefing now'}
+					onclick={() => void briefing.load()}
+				>
+					{briefing.loading ? 'Preparing…' : briefing.data ? 'Refresh briefing' : 'Brief me'}
+				</button>
+			</div>
+			{#if unavailable}
+				<p class="px-3 pt-3 text-xs text-warn" role="status"><span aria-hidden="true">△ </span>{unavailable}</p>
+			{/if}
+
+			{#if briefing.data}
+				{#if briefing.phase === 'error' && briefing.error}
+					<p class="mx-3 mt-3 border border-down/60 bg-down/10 px-3 py-2 text-xs text-down" role="alert" data-testid="briefing-error">
+						<span aria-hidden="true">△ </span>{briefing.error} The briefing below is the previous one.
+					</p>
+				{/if}
+				<div class={briefing.loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+					<BriefingCard data={briefing.data} now={briefing.now} onopen={openFromBriefing} />
+				</div>
+			{:else if briefing.loading}
+				<div class="space-y-3 p-3" aria-label="Preparing your briefing" data-testid="briefing-loading">
+					<div class="skeleton h-12"></div>
+					<div class="skeleton h-16"></div>
+					<div class="skeleton h-24"></div>
+					<div class="skeleton h-28"></div>
+				</div>
+			{:else if briefing.phase === 'error'}
+				<div class="flex flex-col items-start gap-2 p-4" role="alert" data-testid="briefing-error">
+					<p class="flex items-center gap-2 text-sm font-medium text-warn"><span aria-hidden="true">△</span>Could not prepare the briefing</p>
+					<p class="text-xs text-mute">{briefing.error}</p>
+					<button type="button" class="btn" disabled={unavailable !== null} onclick={() => void briefing.load()}>Try again</button>
+				</div>
+			{:else}
+				<div class="p-4 text-xs text-mute" data-testid="briefing-empty">
+					<p class="text-sm text-ink">No briefing yet</p>
+					<p class="mt-1">
+						Press Brief me for a short summary of where you stand and what is coming today. It reads your account and
+						positions and never trades.
+					</p>
+				</div>
+			{/if}
 		</div>
 	{:else}
 		<div id="panel-record" role="tabpanel" aria-labelledby="tab-record" class="min-h-0 flex-1 overflow-y-auto">

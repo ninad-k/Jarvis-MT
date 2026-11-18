@@ -28,6 +28,11 @@ const state = new Map(SYMS.map((s) => [s.symbol, s.mid]));
 export const symInfo = (symbol: string) => SYMS.find((s) => s.symbol === symbol);
 export const mid = (symbol: string) => state.get(symbol) ?? 0;
 
+/** Move a symbol's simulated price (the e2e tests use it to cross a price alert on purpose). */
+export function setMid(symbol: string, price: number): void {
+	if (state.has(symbol) && Number.isFinite(price) && price > 0) state.set(symbol, price);
+}
+
 export function round(v: number, d: number): number {
 	const m = 10 ** d;
 	return Math.round(v * m) / m;
@@ -114,6 +119,20 @@ export function floatingProfit(p: BookPosition): number {
 	const dir = p.side === 'buy' ? 1 : -1;
 	const raw = (cur - p.price_open) * dir * p.volume * s.contract;
 	return round(p.symbol === 'USDJPY' ? raw / cur : raw, 2);
+}
+
+/** Account equity of the mock: 10 000 plus the floating profit of the book. */
+export function equity(): number {
+	return round(10000 + book.reduce((a, p) => a + floatingProfit(p), 0), 2);
+}
+
+/** Bid and ask now, without moving the simulated price. */
+export function quote(symbol: string): { bid: number; ask: number } | null {
+	const s = symInfo(symbol);
+	if (!s) return null;
+	const half = (s.spread * s.point) / 2;
+	const m = mid(symbol);
+	return { bid: round(m - half, s.digits), ask: round(m + half, s.digits) };
 }
 
 export function positions(): Position[] {

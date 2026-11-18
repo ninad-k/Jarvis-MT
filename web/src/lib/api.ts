@@ -68,6 +68,8 @@ export interface Limits {
 	max_daily_loss: number;
 	allowed_symbols: string[];
 	trading_hours: TradingHours | null;
+	/** Largest "risk %" a sized order may use (default 2). Absent on a server without risk sizing. */
+	max_risk_percent?: number;
 }
 
 /** The fields `PUT /api/settings/limits` accepts (all optional); `config` stays the ceiling. */
@@ -268,6 +270,17 @@ export interface EstPnl {
 export type PreviewStage = 'first' | 'second';
 export type PreviewTiming = 'immediate' | 'after_readback';
 
+/** How a risk-sized order got its lot size (`POST /api/market/prepare` with `risk_percent`). */
+export interface PreviewSizing {
+	risk_percent: number;
+	/** What the stop would lose, in the account currency. */
+	risk_amount: number;
+	currency: string;
+	/** Entry to stop, in price units. */
+	stop_distance: number;
+	volume: number;
+}
+
 export interface PreviewDto {
 	id: string;
 	description: string;
@@ -282,6 +295,8 @@ export interface PreviewDto {
 	stage: PreviewStage;
 	expires_at_ms: number;
 	timing: PreviewTiming;
+	/** Present when the lot size came from a risk percentage. */
+	sizing?: PreviewSizing | null;
 }
 
 export interface ChatResponse {
@@ -615,10 +630,80 @@ export interface MarketJournalResponse {
 
 export type MarketOrderType = 'market' | 'limit';
 
-export interface MarketPrepareBody {
-	view_id: string;
-	volume: number;
-	order_type: MarketOrderType;
+/** Either a lot size or a risk percentage (never both): the server works the lots out from the stop. */
+export type MarketPrepareBody = { view_id: string; order_type: MarketOrderType } & (
+	| { volume: number }
+	| { risk_percent: number }
+);
+
+// ---- Price alerts (tasks/spec-assistant-actions.md section 2) --------------------------------------
+
+export type AlertDirection = 'above' | 'below';
+export type AlertStatus = 'active' | 'triggered' | 'cancelled';
+
+export interface PriceAlert {
+	id: string;
+	/** The canonical name (`XAUUSD`). */
+	symbol: string;
+	broker_symbol: string;
+	direction: AlertDirection;
+	price: number;
+	note: string | null;
+	status: AlertStatus;
+	/** ISO UTC. */
+	created_at: string;
+	triggered_at: string | null;
+	trigger_price: number | null;
+}
+
+export interface AlertsResponse {
+	active: PriceAlert[];
+	/** The most recent triggered alerts. */
+	recent: PriceAlert[];
+}
+
+export interface AlertCreateBody {
+	symbol: string;
+	price: number;
+	direction?: AlertDirection;
+	note?: string;
+}
+
+export interface AlertTriggeredEvent {
+	type: 'alert_triggered';
+	id: string;
+	symbol: string;
+	direction: AlertDirection;
+	price: number;
+	trigger_price: number;
+	note: string | null;
+	/** ISO UTC. */
+	triggered_at: string;
+}
+
+// ---- Daily briefing (tasks/spec-assistant-actions.md section 4) ------------------------------------
+
+export interface BriefingView {
+	symbol: string;
+	broker_symbol: string;
+	bias: Bias;
+	confidence: number;
+	stand_aside: boolean;
+	stand_aside_reason: string | null;
+	summary: string;
+	/** Why this symbol has no view (the budget ran out, the bridge failed); the other fields are then placeholders. */
+	unavailable?: string;
+}
+
+export interface BriefingDto {
+	/** ISO UTC. */
+	generated_at: string;
+	account: Account;
+	positions: Position[];
+	/** Today's events for the watchlist currencies. The figures are filled in once released. */
+	events: MarketEvent[];
+	views: BriefingView[];
+	summary: string;
 }
 
 /** Events pushed over `GET /api/ws`. */
@@ -628,7 +713,8 @@ export type WsEvent =
 	| { type: 'trade_executed'; preview_id: string; results: TradeResult[] }
 	| { type: 'positions_changed' }
 	| { type: 'settings_changed' }
-	| { type: 'symbol_map_changed'; broker?: string };
+	| { type: 'symbol_map_changed'; broker?: string }
+	| AlertTriggeredEvent;
 
 // ---- Transport -----------------------------------------------------------
 
@@ -836,5 +922,14 @@ export const api = {
 		return request<MarketJournalResponse>(`/api/market/journal?${q}`, { signal });
 	},
 	/** Turns a view into the usual preview. It never confirms: the confirmation modal does that. */
-	marketPrepare: (body: MarketPrepareBody) => post<PreviewDto>('/api/market/prepare', body)
+	marketPrepare: (body: MarketPrepareBody) => post<PreviewDto>('/api/market/prepare', body),
+
+	alerts: (signal?: AbortSignal) => request<AlertsResponse>('/api/alerts', { signal }),
+	createAlert: (body: AlertCreateBody) => post<PriceAlert>('/api/alerts', body),
+	/** The server answers 204 or the cancelled alert; both mean it is gone. */
+	cancelAlert: (id: string) =>
+		request<PriceAlert | void>(`/api/alerts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+	/** Builds a view for every watchlist symbol (up to 20 s each, concurrently), so allow for it. */
+	briefing: (signal?: AbortSignal) => request<BriefingDto>('/api/briefing', { signal, timeoutMs: 60_000 })
 };

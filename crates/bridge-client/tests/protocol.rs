@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use jarvis_bridge_client::protocol::{
     Account, Command, HISTORY_LIMIT_MAX, History, HistoryQuery, Orders, PingInfo, Positions, Price,
-    Reply, ReplyError, Request, SymbolInfo, TradeResult,
+    Reply, ReplyError, Request, SymbolInfo, SymbolTradeMode, TradeResult,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -322,6 +322,81 @@ fn write_and_symbol_request_fixtures_round_trip() {
 }
 
 #[test]
+fn symbol_reply_of_an_older_ea_still_parses_with_the_new_fields_unset() {
+    // EA 0.5.0 and older send the thirteen original fields and nothing else.
+    let name = "get_symbol_legacy.reply.json";
+    let value = fixture(name);
+    let reply: Reply = round_trip(name, &value);
+    let spec: SymbolInfo = round_trip(name, &value["data"]);
+    assert_eq!(spec.symbol, "XAUUSD");
+    assert_eq!(
+        (spec.spread, spec.swap_long, spec.swap_short, spec.swap_mode),
+        (None, None, None, None)
+    );
+    assert_eq!(
+        (spec.trade_mode, spec.sessions, spec.trade_open_now),
+        (None, None, None)
+    );
+    // Decoding through the reply envelope works too, and serialising does not invent fields.
+    let again: SymbolInfo = reply.decode().expect("decode");
+    let json = serde_json::to_value(&again).unwrap();
+    for key in [
+        "spread",
+        "swap_long",
+        "swap_short",
+        "swap_mode",
+        "trade_mode",
+        "sessions",
+        "trade_open_now",
+    ] {
+        assert!(json.get(key).is_none(), "{key} must be omitted when unset");
+    }
+}
+
+#[test]
+fn symbol_reply_may_carry_only_some_of_the_new_fields() {
+    let mut data = fixture("get_symbol_legacy.reply.json")["data"].clone();
+    data["spread"] = json!(12);
+    data["trade_open_now"] = json!(false);
+    let spec: SymbolInfo = round_trip("partial symbol reply", &data);
+    assert_eq!(spec.spread, Some(12));
+    assert_eq!(spec.trade_open_now, Some(false));
+    assert!(spec.sessions.is_none() && spec.swap_mode.is_none());
+}
+
+#[test]
+fn symbol_reply_with_no_session_today_has_empty_lists() {
+    let mut data = fixture("get_symbol.reply.json")["data"].clone();
+    data["sessions"] = json!({"quote": [], "trade": []});
+    data["trade_open_now"] = json!(false);
+    let spec: SymbolInfo = round_trip("weekend symbol reply", &data);
+    let sessions = spec.sessions.expect("sessions");
+    assert!(sessions.quote.is_empty() && sessions.trade.is_empty());
+    assert!(!sessions.trade_open_at(43_200));
+}
+
+#[test]
+fn symbol_reply_with_a_bad_new_field_is_rejected() {
+    let base = fixture("get_symbol.reply.json")["data"].clone();
+    for (key, bad) in [
+        ("spread", json!("wide")),
+        ("swap_long", json!("x")),
+        ("trade_mode", json!("halfway")),
+        ("trade_open_now", json!("yes")),
+        ("sessions", json!({"quote": [[0, 1, 2]], "trade": []})),
+        ("sessions", json!({"quote": [], "trade": [["a", "b"]]})),
+        ("sessions", json!({"quote": []})),
+    ] {
+        let mut data = base.clone();
+        data[key] = bad.clone();
+        assert!(
+            serde_json::from_value::<SymbolInfo>(data).is_err(),
+            "{key} = {bad}"
+        );
+    }
+}
+
+#[test]
 fn write_and_symbol_reply_fixtures_round_trip_and_decode() {
     for (base, cmd) in WRITE_FIXTURES {
         let name = format!("{base}.reply.json");
@@ -334,6 +409,16 @@ fn write_and_symbol_reply_fixtures_round_trip_and_decode() {
             let spec: SymbolInfo = round_trip(&name, &data);
             assert_eq!(spec.stops_level, 10);
             assert!(spec.trade_allowed);
+            // The fixture is an EA 0.6.0 reply: all the later fields are there.
+            assert_eq!(spec.spread, Some(28));
+            assert_eq!(spec.swap_long, Some(-38.5));
+            assert_eq!(spec.swap_short, Some(14.2));
+            assert_eq!(spec.swap_mode.as_deref(), Some("points"));
+            assert_eq!(spec.trade_mode, Some(SymbolTradeMode::Full));
+            assert_eq!(spec.trade_open_now, Some(true));
+            let sessions = spec.sessions.expect("sessions");
+            assert_eq!(sessions.trade, vec![[0, 79_200], [82_800, 86_400]]);
+            assert_eq!(sessions.quote, sessions.trade);
         } else {
             // A trade reply carries the trade retcode in the envelope, equal to the data's.
             let result: TradeResult = round_trip(&name, &data);

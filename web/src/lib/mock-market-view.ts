@@ -22,7 +22,6 @@ import {
 	type MarketNews,
 	type MarketNewsResponse,
 	type MarketOutcome,
-	type MarketPrepareBody,
 	type MarketSetup,
 	type MarketTimeframe,
 	type MarketViewDto,
@@ -510,11 +509,17 @@ export function getMarketJournal(path: string): MarketJournalResponse {
  * and the confirmation modal decides.
  */
 export function prepareFromView(body: unknown): PreviewDto {
-	const b = (body ?? {}) as Partial<MarketPrepareBody>;
+	const b = (body ?? {}) as { view_id?: unknown; volume?: unknown; risk_percent?: unknown; order_type?: unknown };
 	const stored = typeof b.view_id === 'string' ? views.get(b.view_id) : undefined;
 	if (!stored) throw new ApiError('bad_request', 'that view is gone; analyze again', 404);
-	if (typeof b.volume !== 'number' || !Number.isFinite(b.volume) || b.volume <= 0)
-		throw new ApiError('bad_request', 'volume is required and must be greater than 0', 400);
+	const hasVolume = b.volume !== undefined;
+	const hasRisk = b.risk_percent !== undefined;
+	if (hasVolume && hasRisk) throw new ApiError('bad_request', 'give either volume or risk_percent, not both', 400);
+	if (hasRisk) {
+		if (typeof b.risk_percent !== 'number' || !Number.isFinite(b.risk_percent) || b.risk_percent <= 0)
+			throw new ApiError('bad_request', 'risk_percent must be greater than 0', 400);
+	} else if (typeof b.volume !== 'number' || !Number.isFinite(b.volume) || b.volume <= 0)
+		throw new ApiError('bad_request', 'volume (or risk_percent) is required and must be greater than 0', 400);
 	if (b.order_type !== 'market' && b.order_type !== 'limit')
 		throw new ApiError('bad_request', 'order_type must be market or limit', 400);
 	const { view, validUntil } = stored;
@@ -523,7 +528,8 @@ export function prepareFromView(body: unknown): PreviewDto {
 	assertWritable();
 
 	const s = view.setup;
-	const legs = { symbol: view.symbol, side: s.side, volume: b.volume, sl: s.stop_loss, tp: s.take_profit };
+	const size = hasRisk ? { risk_percent: b.risk_percent as number } : { volume: b.volume as number };
+	const legs = { symbol: view.symbol, side: s.side, ...size, sl: s.stop_loss, tp: s.take_profit };
 	if (b.order_type === 'market') return openPreview(legs, false);
 	return limitPreview({ ...legs, price: s.side === 'buy' ? s.entry_low : s.entry_high });
 }

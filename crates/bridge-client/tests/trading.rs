@@ -1111,6 +1111,9 @@ async fn every_write_command_times_out_without_a_resend() {
     assert_eq!(mock.executed_writes(), 0);
 }
 
+/// Wednesday 2026-11-04 12:00:00 UTC.
+const WEDNESDAY_NOON: i64 = 1_793_793_600;
+
 // ---- the golden fixtures are what the mock answers --------------------------------------------------
 
 fn fixture(name: &str) -> serde_json::Value {
@@ -1135,7 +1138,6 @@ async fn assert_mock_answers(request: &str, reply: &str, setup: impl FnOnce(&Moc
 #[tokio::test]
 async fn the_mock_reproduces_every_golden_write_fixture() {
     for base in [
-        "get_symbol",
         "order_send",
         "order_send_limit",
         "position_modify",
@@ -1150,6 +1152,11 @@ async fn the_mock_reproduces_every_golden_write_fixture() {
         )
         .await;
     }
+    // The symbol reply depends on the clock (today's sessions): pin it to Wednesday noon.
+    assert_mock_answers("get_symbol.request.json", "get_symbol.reply.json", |m| {
+        m.update_state(|s| s.clock = Some(WEDNESDAY_NOON));
+    })
+    .await;
     assert_mock_answers(
         "order_send_invalid_volume.request.json",
         "order_send_invalid_volume.reply.json",

@@ -329,6 +329,8 @@ impl BridgeClient {
         Ok(calendar)
     }
 
+    /// Trading specification of a symbol. The fields from EA 0.6.0 (spread, swaps, trade mode,
+    /// sessions, open now) are `None` when the EA is older.
     pub async fn get_symbol(&self, symbol: &str) -> Result<SymbolInfo, BridgeError> {
         self.call(Command::GetSymbol {
             symbol: symbol.to_owned(),

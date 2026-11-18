@@ -9,9 +9,10 @@ import type {
 	MarketNews,
 	MarketOutcome,
 	MarketSetup,
-	MarketViewDto
+	MarketViewDto,
+	PreviewSizing
 } from './api';
-import { decimalsOf, fmtPrice } from './format';
+import { decimalsOf, fmtPrice, fmtVolume } from './format';
 
 export const DISCLAIMER =
 	'Computed from price data, indicators, the economic calendar and headlines. It is not financial advice and no outcome is guaranteed.';
@@ -377,6 +378,56 @@ export function validateVolume(raw: string): VolumeCheck {
 	return { ok: true, value };
 }
 
+// ---- Risk-based size -----------------------------------------------------------------------------------
+
+/** The smallest risk the server accepts, and the ceiling when /api/status carries no `max_risk_percent`. */
+export const MIN_RISK_PERCENT = 0.1;
+export const DEFAULT_MAX_RISK_PERCENT = 2;
+
+/** The largest risk % to offer: the server's limit when it sent one, else 2. */
+export function riskCeiling(limits: { max_risk_percent?: number } | null | undefined): number {
+	const v = limits?.max_risk_percent;
+	return typeof v === 'number' && Number.isFinite(v) && v >= MIN_RISK_PERCENT ? v : DEFAULT_MAX_RISK_PERCENT;
+}
+
+export type RiskCheck = { ok: true; value: number } | { ok: false; error: string };
+
+/** "1", "0.5", "1.25": a percentage without trailing zeros. */
+export function fmtRisk(percent: number): string {
+	return String(Number(percent.toFixed(2)));
+}
+
+/**
+ * The risk % typed in the Prepare dialog. Like the lot size there is no default: an empty box is
+ * an error. The server still applies its own limit.
+ */
+export function validateRiskPercent(raw: string, max: number): RiskCheck {
+	const text = raw.trim();
+	if (text === '') return { ok: false, error: 'Enter how much of your equity to risk, in percent.' };
+	if (text.startsWith('-')) return { ok: false, error: `Risk must be at least ${fmtRisk(MIN_RISK_PERCENT)}%.` };
+	if (!/^(\d+\.?\d*|\.\d+)$/.test(text)) return { ok: false, error: 'Use digits only, for example 1 or 0.5.' };
+	const decimals = text.includes('.') ? text.split('.')[1].length : 0;
+	if (decimals > 2) return { ok: false, error: 'Use at most 2 decimals.' };
+	const value = Number(text);
+	if (!Number.isFinite(value) || value < MIN_RISK_PERCENT)
+		return { ok: false, error: `Risk must be at least ${fmtRisk(MIN_RISK_PERCENT)}%.` };
+	if (value > max) return { ok: false, error: `Risk is limited to ${fmtRisk(max)}% of equity.` };
+	return { ok: true, value };
+}
+
+/** "1% risk = 39.20 USD → 0.05 lots". */
+export function sizingLine(s: PreviewSizing): string {
+	const amount = fmtPrice(s.risk_amount, 2);
+	const ccy = s.currency ? ` ${s.currency}` : '';
+	return `${fmtRisk(s.risk_percent)}% risk = ${amount}${ccy} → ${fmtVolume(s.volume)} lots`;
+}
+
+/** Second line under the sizing: the distance the stop sits from the entry. */
+export function sizingDetail(s: PreviewSizing, digits?: number | null): string {
+	const d = typeof digits === 'number' && digits >= 0 ? digits : Math.max(decimalsOf(s.stop_distance), s.stop_distance >= 10 ? 2 : 4);
+	return `Stop distance ${fmtPrice(s.stop_distance, d)}`;
+}
+
 /** A setup can be prepared while the view is current. */
 export function canPrepare(view: Pick<MarketViewDto, 'setup' | 'valid_until' | 'stand_aside'>, now: number): boolean {
 	return view.setup !== null && !view.stand_aside && !isExpired(view.valid_until, now);
@@ -395,10 +446,43 @@ export function cleanSymbolInput(raw: string): string | null {
 const TOOL_LABELS: Record<string, string> = {
 	get_market_view: 'Market view',
 	get_economic_calendar: 'Economic calendar',
-	get_news: 'News'
+	get_news: 'News',
+	get_briefing: 'Briefing',
+	get_symbol_info: 'Symbol info',
+	update_watchlist: 'Update watchlist',
+	set_persona: 'Switch persona',
+	set_model: 'Switch model',
+	set_alias: 'Add spoken name',
+	remove_alias: 'Remove spoken name',
+	engage_kill_switch: 'Engage kill switch',
+	tighten_limit: 'Tighten limit',
+	create_price_alert: 'Create price alert',
+	list_price_alerts: 'List price alerts',
+	cancel_price_alert: 'Cancel price alert'
 };
 
-/** Friendly chip text for the market tools; any other tool keeps its own name. */
+/**
+ * Tools that change the user's own preferences or make trading stricter. After one of these the
+ * HUD re-reads settings, status, the watchlist and the alerts, even if the push event was missed.
+ */
+export const PREFERENCE_TOOLS: ReadonlySet<string> = new Set([
+	'update_watchlist',
+	'set_persona',
+	'set_model',
+	'set_alias',
+	'remove_alias',
+	'engage_kill_switch',
+	'tighten_limit',
+	'create_price_alert',
+	'cancel_price_alert'
+]);
+
+/** True when at least one successful call in a reply was a preference tool. */
+export function changedPreferences(calls: ReadonlyArray<{ name: string; ok: boolean }>): boolean {
+	return calls.some((c) => c.ok && PREFERENCE_TOOLS.has(c.name));
+}
+
+/** Friendly chip text for the market and assistant tools; any other tool keeps its own name. */
 export function toolLabel(name: string): string {
 	return TOOL_LABELS[name] ?? name;
 }

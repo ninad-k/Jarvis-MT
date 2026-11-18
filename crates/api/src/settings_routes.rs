@@ -114,6 +114,8 @@ struct LimitsBody {
     #[serde(default)]
     max_daily_loss: Option<f64>,
     #[serde(default)]
+    max_risk_percent: Option<f64>,
+    #[serde(default)]
     allowed_symbols: Option<Vec<String>>,
     #[serde(default)]
     trading_hours: Option<jarvis_gate::TradingHours>,
@@ -158,13 +160,14 @@ pub async fn limits_put(
         max_lot: req.max_lot,
         max_positions: req.max_positions,
         max_daily_loss: req.max_daily_loss,
+        max_risk_percent: req.max_risk_percent,
         allowed_symbols,
         trading_hours: req.trading_hours,
     };
     if wanted.is_empty() {
         return Err(ApiError::BadRequest(
             "give at least one limit to tighten (max_lot, max_positions, max_daily_loss, \
-             allowed_symbols or trading_hours)"
+             max_risk_percent, allowed_symbols or trading_hours)"
                 .to_owned(),
         ));
     }

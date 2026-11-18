@@ -28,6 +28,7 @@ pub mod serve;
 pub mod service;
 pub mod settings;
 pub mod settings_routes;
+pub mod sizing;
 pub mod state;
 pub mod static_site;
 pub mod symbols;

@@ -34,6 +34,7 @@ fn gold_info() -> SymbolInfo {
         stops_level: 10,
         trade_allowed: true,
         currency_profit: "USD".into(),
+        ..SymbolInfo::default()
     }
 }
 
@@ -52,6 +53,7 @@ fn eur_info() -> SymbolInfo {
         stops_level: 0,
         trade_allowed: true,
         currency_profit: "USD".into(),
+        ..SymbolInfo::default()
     }
 }
 
@@ -111,6 +113,7 @@ fn limits() -> Limits {
         max_positions: 5,
         max_daily_loss: 500.0,
         allowed_symbols: vec!["XAUUSD".into(), "EURUSD".into()],
+        max_risk_percent: 2.0,
         trading_hours: Some(TradingHours {
             days: vec![
                 Weekday::Mon,

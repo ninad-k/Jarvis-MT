@@ -7,12 +7,14 @@ import {
 	type ConfirmResponse,
 	type KillSwitchState,
 	type PreviewDto,
+	type PreviewSizing,
 	type Side,
 	type TradeResult,
 	type WsEvent
 } from './api';
 import {
 	book,
+	equity,
 	fillPrice,
 	floatingProfit,
 	newTicket,
@@ -235,15 +237,67 @@ function checkOpen(symbol: string, volume: number) {
 	return s;
 }
 
+/** What a size request carries: a lot size, or a risk percentage the mock turns into lots. */
+export interface SizeRequest {
+	volume?: number;
+	risk_percent?: number;
+}
+
+const usd = (v: number) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/**
+ * Lots from a risk percentage, like the server: (equity x risk%) / (stop distance x value of one
+ * price unit per lot), rounded down to 0.01. Refuses with the numbers when even 0.01 risks more.
+ */
+function sizeFor(
+	o: SizeRequest & { symbol: string; side: Side; sl: number | null },
+	entry: number
+): { volume: number; sizing: PreviewSizing | null } {
+	if (o.risk_percent === undefined) return { volume: o.volume as number, sizing: null };
+	const s = symInfo(o.symbol);
+	if (!s) throw new ApiError('gate_rejected', `symbol ${o.symbol} is not allowed`, 422);
+	if (o.volume !== undefined) throw new ApiError('bad_request', 'give either a volume or a risk percentage, not both', 400);
+	if (o.sl === null) throw new ApiError('bad_request', 'risk-based sizing needs a stop loss', 400);
+	const max = effectiveLimits().max_risk_percent ?? 2;
+	if (!(o.risk_percent >= 0.1)) throw new ApiError('bad_request', 'risk_percent must be at least 0.1', 400);
+	if (o.risk_percent > max) throw new ApiError('gate_rejected', `risk ${o.risk_percent}% exceeds max_risk_percent ${max.toFixed(1)}`, 422);
+	if (o.side === 'buy' ? o.sl >= entry : o.sl <= entry)
+		throw new ApiError('bad_request', `a ${o.side} stop loss must be ${o.side === 'buy' ? 'below' : 'above'} the entry`, 400);
+	const budget = (equity() * o.risk_percent) / 100;
+	const dist = Math.abs(entry - o.sl);
+	// Loss per lot per price unit; USDJPY is quoted in yen, so it is converted at the price.
+	const perLot = o.symbol === 'USDJPY' ? (dist * s.contract) / entry : dist * s.contract;
+	const lots = Math.floor((budget / perLot) * 100 + 1e-9) / 100;
+	if (lots < 0.01)
+		throw new ApiError(
+			'gate_rejected',
+			`${o.risk_percent}% risk is ${usd(budget)} USD; the smallest lot risks ${usd(perLot * 0.01)} USD`,
+			422
+		);
+	return {
+		volume: lots,
+		sizing: {
+			risk_percent: o.risk_percent,
+			risk_amount: round(budget, 2),
+			currency: 'USD',
+			stop_distance: round(dist, s.digits),
+			volume: lots
+		}
+	};
+}
+
+const riskText = (z: PreviewSizing | null) => (z ? `, ${z.risk_percent}% risk (${usd(z.risk_amount)} ${z.currency})` : '');
+
 export function openPreview(
-	o: { symbol: string; side: Side; volume: number; sl: number | null; tp: number | null },
+	o: SizeRequest & { symbol: string; side: Side; sl: number | null; tp: number | null },
 	voice: boolean
 ): PreviewDto {
-	const s = checkOpen(o.symbol, o.volume);
 	const entry = fillPrice(o.symbol, o.side);
+	const { volume, sizing } = sizeFor(o, entry);
+	const s = checkOpen(o.symbol, volume);
 	const dir = o.side === 'buy' ? 1 : -1;
 	const pl = (price: number) => {
-		const raw = (price - entry) * dir * o.volume * s.contract;
+		const raw = (price - entry) * dir * volume * s.contract;
 		return round(o.symbol === 'USDJPY' ? raw / price : raw, 2);
 	};
 	const warnings: string[] = [];
@@ -251,10 +305,10 @@ export function openPreview(
 	return issue(
 		{
 			id: crypto.randomUUID(),
-			description: `${o.side === 'buy' ? 'Buy' : 'Sell'} ${o.volume.toFixed(2)} ${o.symbol} at market (~${entry.toFixed(s.digits)})${o.sl !== null ? `, SL ${o.sl}` : ''}${o.tp !== null ? `, TP ${o.tp}` : ''}`,
+			description: `${o.side === 'buy' ? 'Buy' : 'Sell'} ${volume.toFixed(2)} ${o.symbol} at market (~${entry.toFixed(s.digits)})${o.sl !== null ? `, SL ${o.sl}` : ''}${o.tp !== null ? `, TP ${o.tp}` : ''}${riskText(sizing)}`,
 			symbols: [o.symbol],
 			tickets: [],
-			total_volume: o.volume,
+			total_volume: volume,
 			est_pnl: {
 				current: 0,
 				at_sl: o.sl !== null ? pl(o.sl) : null,
@@ -262,26 +316,29 @@ export function openPreview(
 			},
 			is_batch: false,
 			count: 1,
-			warnings
+			warnings,
+			sizing
 		},
-		{ kind: 'open', ...o },
+		{ kind: 'open', symbol: o.symbol, side: o.side, volume, sl: o.sl, tp: o.tp },
 		voice
 	);
 }
 
 /** A limit order at a chosen price (Prepare trade from a market view). */
-export function limitPreview(o: {
-	symbol: string;
-	side: Side;
-	volume: number;
-	price: number;
-	sl: number | null;
-	tp: number | null;
-}): PreviewDto {
-	const s = checkOpen(o.symbol, o.volume);
+export function limitPreview(
+	o: SizeRequest & {
+		symbol: string;
+		side: Side;
+		price: number;
+		sl: number | null;
+		tp: number | null;
+	}
+): PreviewDto {
+	const { volume, sizing } = sizeFor(o, o.price);
+	const s = checkOpen(o.symbol, volume);
 	const dir = o.side === 'buy' ? 1 : -1;
 	const pl = (price: number) => {
-		const raw = (price - o.price) * dir * o.volume * s.contract;
+		const raw = (price - o.price) * dir * volume * s.contract;
 		return round(o.symbol === 'USDJPY' ? raw / price : raw, 2);
 	};
 	const warnings: string[] = [];
@@ -289,10 +346,10 @@ export function limitPreview(o: {
 	return issue(
 		{
 			id: crypto.randomUUID(),
-			description: `${o.side === 'buy' ? 'Buy' : 'Sell'} limit ${o.volume.toFixed(2)} ${o.symbol} @ ${o.price.toFixed(s.digits)}${o.sl !== null ? `, SL ${o.sl}` : ''}${o.tp !== null ? `, TP ${o.tp}` : ''}`,
+			description: `${o.side === 'buy' ? 'Buy' : 'Sell'} limit ${volume.toFixed(2)} ${o.symbol} @ ${o.price.toFixed(s.digits)}${o.sl !== null ? `, SL ${o.sl}` : ''}${o.tp !== null ? `, TP ${o.tp}` : ''}${riskText(sizing)}`,
 			symbols: [o.symbol],
 			tickets: [],
-			total_volume: o.volume,
+			total_volume: volume,
 			est_pnl: {
 				current: null,
 				at_sl: o.sl !== null ? pl(o.sl) : null,
@@ -300,9 +357,10 @@ export function limitPreview(o: {
 			},
 			is_batch: false,
 			count: 1,
-			warnings
+			warnings,
+			sizing
 		},
-		{ kind: 'place_limit', ...o },
+		{ kind: 'place_limit', symbol: o.symbol, side: o.side, volume, price: o.price, sl: o.sl, tp: o.tp },
 		false
 	);
 }

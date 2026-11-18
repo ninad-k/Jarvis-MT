@@ -16,7 +16,7 @@
 #include "Json.mqh"
 
 #define JARVIS_PROTOCOL_VERSION   2
-#define JARVIS_EA_VERSION         "0.5.0"
+#define JARVIS_EA_VERSION         "0.6.0"
 
 #define JARVIS_RC_INVALID         (-1)
 #define JARVIS_RC_UNKNOWN_CMD     (-2)
@@ -27,6 +27,8 @@
 #define JARVIS_HISTORY_LIMIT_DEFAULT 100
 #define JARVIS_HISTORY_LIMIT_MAX     500
 #define JARVIS_MAX_SYMBOL_LEN        32
+#define JARVIS_MAX_SESSIONS          16   // sessions read per kind and day (MT5 allows far fewer)
+#define JARVIS_SECONDS_PER_DAY       86400
 #define JARVIS_MAX_DATETIME          32535215999   // 3000-12-31 23:59:59, MQL5 datetime max
 
 //+------------------------------------------------------------------+
@@ -224,11 +226,101 @@ int Jarvis_CmdGetPrice(CJson &req,const int args,CJsonWriter &w,string &err)
    return 0;
   }
 
+//--- SYMBOL_TRADE_MODE_* -> wire name. Unknown values count as "disabled" (fail safe).
+//--- Lives here, not in SymbolCatalog.mqh, because get_symbol needs it too.
+string Jarvis_SymbolTradeModeName(const long m)
+  {
+   switch((int)m)
+     {
+      case SYMBOL_TRADE_MODE_FULL:
+         return "full";
+      case SYMBOL_TRADE_MODE_LONGONLY:
+         return "long_only";
+      case SYMBOL_TRADE_MODE_SHORTONLY:
+         return "short_only";
+      case SYMBOL_TRADE_MODE_CLOSEONLY:
+         return "close_only";
+      case SYMBOL_TRADE_MODE_DISABLED:
+         return "disabled";
+     }
+   return "disabled";
+  }
+
+//--- SYMBOL_SWAP_MODE_* -> wire name (the constant's name in lower snake case)
+string Jarvis_SwapModeName(const long m)
+  {
+   switch((int)m)
+     {
+      case SYMBOL_SWAP_MODE_DISABLED:
+         return "disabled";
+      case SYMBOL_SWAP_MODE_POINTS:
+         return "points";
+      case SYMBOL_SWAP_MODE_CURRENCY_SYMBOL:
+         return "currency_symbol";
+      case SYMBOL_SWAP_MODE_CURRENCY_MARGIN:
+         return "currency_margin";
+      case SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT:
+         return "currency_deposit";
+      case SYMBOL_SWAP_MODE_INTEREST_CURRENT:
+         return "interest_current";
+      case SYMBOL_SWAP_MODE_INTEREST_OPEN:
+         return "interest_open";
+      case SYMBOL_SWAP_MODE_REOPEN_CURRENT:
+         return "reopen_current";
+      case SYMBOL_SWAP_MODE_REOPEN_BID:
+         return "reopen_bid";
+     }
+   return "unknown";
+  }
+
+//--- a session [from,to) contains the second of the day; the end is exclusive, so a session
+//--- ending at 24:00 (86400) covers the last second of the day
+bool Jarvis_InSession(const long from,const long to,const long secondOfDay)
+  {
+   return(from<=secondOfDay && secondOfDay<to);
+  }
+
+//+------------------------------------------------------------------+
+//| Writes "key":[[from,to],...] with today's quote or trade        |
+//| sessions of the weekday, seconds since 00:00 server time, until  |
+//| MT5 reports no more. Sets inside when the second of the day is in|
+//| one of them. Returns the number of sessions written.             |
+//+------------------------------------------------------------------+
+int Jarvis_PutSessions(CJsonWriter &w,const string key,const string sym,const ENUM_DAY_OF_WEEK day,
+                       const bool trade,const long secondOfDay,bool &inside)
+  {
+   w.Key(key);
+   w.BeginArray();
+   int n=0;
+   for(int i=0; i<JARVIS_MAX_SESSIONS; i++)
+     {
+      datetime from=0,to=0;
+      bool ok=trade?SymbolInfoSessionTrade(sym,day,i,from,to):SymbolInfoSessionQuote(sym,day,i,from,to);
+      if(!ok)
+         break;
+      long f=(long)from,t=(long)to;
+      // A session that runs to midnight is 86400; an end of 0 after a later start can only mean 24:00.
+      if(t==0 && f>0)
+         t=JARVIS_SECONDS_PER_DAY;
+      w.BeginArray();
+      w.ValRaw(IntegerToString(f));
+      w.ValRaw(IntegerToString(t));
+      w.EndArray();
+      if(Jarvis_InSession(f,t,secondOfDay))
+         inside=true;
+      n++;
+     }
+   w.EndArray();
+   return n;
+  }
+
 //+------------------------------------------------------------------+
 //| get_symbol {symbol}                                              |
 //| Trading specification. trade_allowed is true for full, long-only |
 //| and short-only symbols (order_send enforces the direction) and   |
-//| false for close-only or disabled ones.                           |
+//| false for close-only or disabled ones. EA 0.6.0 adds the current |
+//| spread, swaps, the trade mode, today's sessions and whether      |
+//| trading is open now.                                             |
 //+------------------------------------------------------------------+
 int Jarvis_CmdGetSymbol(CJson &req,const int args,CJsonWriter &w,string &err)
   {
@@ -242,10 +334,12 @@ int Jarvis_CmdGetSymbol(CJson &req,const int args,CJsonWriter &w,string &err)
    if(!Jarvis_CheckSymbol(sym,true,rc,err))
       return rc;
 
-   long digits=0,stops=0,tmode=0;
+   long digits=0,stops=0,tmode=0,spread=0,swapMode=0;
    SymbolInfoInteger(sym,SYMBOL_DIGITS,digits);
    SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL,stops);
    SymbolInfoInteger(sym,SYMBOL_TRADE_MODE,tmode);
+   SymbolInfoInteger(sym,SYMBOL_SPREAD,spread);
+   SymbolInfoInteger(sym,SYMBOL_SWAP_MODE,swapMode);
    bool allowed=(tmode==SYMBOL_TRADE_MODE_FULL || tmode==SYMBOL_TRADE_MODE_LONGONLY || tmode==SYMBOL_TRADE_MODE_SHORTONLY);
 
    w.BeginObject();
@@ -262,6 +356,24 @@ int Jarvis_CmdGetSymbol(CJson &req,const int args,CJsonWriter &w,string &err)
    w.PutInt("stops_level",stops);
    w.PutBool("trade_allowed",allowed);
    w.PutStr("currency_profit",SymbolInfoString(sym,SYMBOL_CURRENCY_PROFIT));
+   w.PutInt("spread",spread);
+   w.PutNum("swap_long",SymbolInfoDouble(sym,SYMBOL_SWAP_LONG));
+   w.PutNum("swap_short",SymbolInfoDouble(sym,SYMBOL_SWAP_SHORT));
+   w.PutStr("swap_mode",Jarvis_SwapModeName(swapMode));
+   w.PutStr("trade_mode",Jarvis_SymbolTradeModeName(tmode));
+
+   // Sessions are for the server's current weekday; "now" is the server clock too.
+   datetime serverNow=TimeTradeServer();
+   MqlDateTime parts;
+   TimeToStruct(serverNow,parts);
+   long secondOfDay=(long)parts.hour*3600+(long)parts.min*60+(long)parts.sec;
+   bool inQuote=false,inTrade=false;
+   w.Key("sessions");
+   w.BeginObject();
+   Jarvis_PutSessions(w,"quote",sym,(ENUM_DAY_OF_WEEK)parts.day_of_week,false,secondOfDay,inQuote);
+   Jarvis_PutSessions(w,"trade",sym,(ENUM_DAY_OF_WEEK)parts.day_of_week,true,secondOfDay,inTrade);
+   w.EndObject();
+   w.PutBool("trade_open_now",inTrade && tmode!=SYMBOL_TRADE_MODE_DISABLED);
    w.EndObject();
    return 0;
   }

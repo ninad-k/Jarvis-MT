@@ -160,25 +160,6 @@ int Jarvis_CatalogEnsure(string &err)
    return n;
   }
 
-//--- SYMBOL_TRADE_MODE_* -> wire name. Unknown values count as "disabled" (fail safe).
-string Jarvis_SymbolTradeModeName(const long m)
-  {
-   switch((int)m)
-     {
-      case SYMBOL_TRADE_MODE_FULL:
-         return "full";
-      case SYMBOL_TRADE_MODE_LONGONLY:
-         return "long_only";
-      case SYMBOL_TRADE_MODE_SHORTONLY:
-         return "short_only";
-      case SYMBOL_TRADE_MODE_CLOSEONLY:
-         return "close_only";
-      case SYMBOL_TRADE_MODE_DISABLED:
-         return "disabled";
-     }
-   return "disabled";
-  }
-
 //--- one catalog entry from plain values (also used by the self-test with made-up values)
 void Jarvis_PutCatalogEntry(CJsonWriter &w,const string name,const string description,const string path,
                             const string tradeMode,const bool visible,const long digits,

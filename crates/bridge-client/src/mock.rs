@@ -26,6 +26,7 @@ use crate::client::BridgeConfig;
 use crate::error::BridgeError;
 pub use crate::mock_catalog::{default_catalog, generated_catalog};
 use crate::mock_market;
+use crate::mock_symbol;
 use crate::mock_trade::Engine;
 use crate::protocol::{
     Account, BrokerInfo, CatalogSymbol, Command, Deal, DealEntry, DealType, HISTORY_LIMIT_DEFAULT,
@@ -96,8 +97,9 @@ pub struct MockState {
     /// The broker's full symbol catalog served by `list_symbols`, in any order (the mock sorts
     /// by name, byte-wise, as the EA's list is ordered). Default: [`default_catalog`].
     pub catalog: Vec<CatalogSymbol>,
-    /// The clock of `get_rates` (the forming bar) and `get_calendar` (the canned events are
-    /// placed around it), Unix seconds. `None` (the default) is the real time; set it for
+    /// The clock of `get_rates` (the forming bar), `get_calendar` (the canned events are
+    /// placed around it) and `get_symbol` (the weekday and time of day that pick today's
+    /// sessions; the mock reads it as server time with no offset), Unix seconds. `None` (the default) is the real time; set it for
     /// results that do not move between two calls.
     pub clock: Option<i64>,
     /// The next `n` `get_rates` calls answer `4401` (history not loaded yet) instead of bars,
@@ -326,6 +328,8 @@ fn default_symbols() -> Vec<SymbolInfo> {
             stops_level,
             trade_allowed: true,
             currency_profit: "USD".to_owned(),
+            // The live fields are filled per request, see `mock_symbol`.
+            ..SymbolInfo::default()
         }
     }
     vec![
@@ -747,7 +751,7 @@ fn handle(
         Command::GetRates(query) => mock_market::rates(state, id, &query),
         Command::GetCalendar(query) => mock_market::calendar(state, id, &query),
         Command::GetSymbol { symbol } => match state.symbols.iter().find(|s| s.symbol == symbol) {
-            Some(info) => ok_reply(id, info),
+            Some(info) => ok_reply(id, &mock_symbol::with_live_fields(state, info)),
             None => unknown_symbol(id, &symbol),
         },
         Command::OrderSend(_)

@@ -250,11 +250,23 @@ void TestLive()
       ExpectOk("live: get_price "+sym,"{\"id\":\"l6\",\"cmd\":\"get_price\",\"args\":{\"symbol\":\""+CJsonWriter::Escape(sym)+"\"}}",rep,true);
       ExpectOk("live: get_symbol "+sym,"{\"id\":\"l7\",\"cmd\":\"get_symbol\",\"args\":{\"symbol\":\""+CJsonWriter::Escape(sym)+"\"}}",rep,true);
       d=rep.Get(rep.Root(),"data");
-      Check(rep.Count(d)==13 && rep.Str(rep.Get(d,"symbol"))==sym && rep.Num(rep.Get(d,"volume_step"))>0.0 &&
+      Check(rep.Count(d)==20 && rep.Str(rep.Get(d,"symbol"))==sym && rep.Num(rep.Get(d,"volume_step"))>0.0 &&
             rep.Num(rep.Get(d,"volume_min"))>0.0 && rep.Num(rep.Get(d,"volume_max"))>=rep.Num(rep.Get(d,"volume_min")) &&
             rep.Num(rep.Get(d,"tick_size"))>0.0 && rep.Num(rep.Get(d,"point"))>0.0 && rep.IsWhole(rep.Get(d,"stops_level")) &&
             rep.Type(rep.Get(d,"trade_allowed"))==JV_BOOL && rep.Type(rep.Get(d,"description"))==JV_STRING &&
             rep.Type(rep.Get(d,"currency_profit"))==JV_STRING && rep.IsWhole(rep.Get(d,"digits")),"live: get_symbol fields");
+      int ss=rep.Get(d,"sessions");
+      bool sessionsOk=(rep.Type(ss)==JV_OBJECT && rep.Type(rep.Get(ss,"quote"))==JV_ARRAY && rep.Type(rep.Get(ss,"trade"))==JV_ARRAY);
+      int ts=rep.Get(ss,"trade");
+      for(int k=0; sessionsOk && k<rep.Count(ts); k++)
+        {
+         int pair=rep.At(ts,k);
+         sessionsOk=(rep.Count(pair)==2 && rep.Int(rep.At(pair,0))>=0 && rep.Int(rep.At(pair,1))>rep.Int(rep.At(pair,0)) &&
+                     rep.Int(rep.At(pair,1))<=JARVIS_SECONDS_PER_DAY);
+        }
+      Check(rep.IsWhole(rep.Get(d,"spread")) && rep.Type(rep.Get(d,"swap_long"))==JV_NUMBER && rep.Type(rep.Get(d,"swap_short"))==JV_NUMBER &&
+            rep.Type(rep.Get(d,"swap_mode"))==JV_STRING && rep.Type(rep.Get(d,"trade_mode"))==JV_STRING &&
+            rep.Type(rep.Get(d,"trade_open_now"))==JV_BOOL && sessionsOk,"live: get_symbol spread, swaps, sessions");
      }
   }
 
@@ -373,6 +385,15 @@ void TestCatalogEscaping()
          Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_SHORTONLY)=="short_only" && Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_CLOSEONLY)=="close_only" &&
          Jarvis_SymbolTradeModeName(SYMBOL_TRADE_MODE_DISABLED)=="disabled" && Jarvis_SymbolTradeModeName(99)=="disabled",
          "catalog: trade modes map to the wire names");
+   Check(Jarvis_SwapModeName(SYMBOL_SWAP_MODE_DISABLED)=="disabled" && Jarvis_SwapModeName(SYMBOL_SWAP_MODE_POINTS)=="points" &&
+         Jarvis_SwapModeName(SYMBOL_SWAP_MODE_CURRENCY_SYMBOL)=="currency_symbol" && Jarvis_SwapModeName(SYMBOL_SWAP_MODE_CURRENCY_MARGIN)=="currency_margin" &&
+         Jarvis_SwapModeName(SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT)=="currency_deposit" && Jarvis_SwapModeName(SYMBOL_SWAP_MODE_INTEREST_CURRENT)=="interest_current" &&
+         Jarvis_SwapModeName(SYMBOL_SWAP_MODE_INTEREST_OPEN)=="interest_open" && Jarvis_SwapModeName(SYMBOL_SWAP_MODE_REOPEN_CURRENT)=="reopen_current" &&
+         Jarvis_SwapModeName(SYMBOL_SWAP_MODE_REOPEN_BID)=="reopen_bid" && Jarvis_SwapModeName(99)=="unknown",
+         "symbol: swap modes map to the wire names");
+   Check(Jarvis_InSession(0,86400,0) && Jarvis_InSession(0,86400,86399) && !Jarvis_InSession(0,86400,86400) &&
+         Jarvis_InSession(3600,7200,3600) && !Jarvis_InSession(3600,7200,7200) && !Jarvis_InSession(3600,7200,3599),
+         "symbol: a session includes its start and excludes its end");
   }
 
 void TestCatalogArguments()

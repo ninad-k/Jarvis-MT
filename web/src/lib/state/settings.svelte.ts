@@ -12,6 +12,12 @@ class SettingsStore {
 	load = $state<SettingsLoad>('idle');
 	error = $state<string | null>(null);
 
+	/**
+	 * Bumped whenever the server says settings or limits changed (also from chat). The limits form
+	 * keeps its own copy, so it watches this to re-read when it has no unsaved edits.
+	 */
+	limitsTick = $state(0);
+
 	/** Writes in flight. A refresh that arrives meanwhile would show stale data, so it waits. */
 	private saving = 0;
 	private refreshAfter = false;
@@ -79,6 +85,10 @@ class SettingsStore {
 				void this.refresh();
 			}
 		}
+	}
+
+	bumpLimits(): void {
+		this.limitsTick++;
 	}
 
 	/** Adopt a value the server told us about in another response (a wake-word persona switch). */

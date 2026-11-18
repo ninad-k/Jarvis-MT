@@ -42,8 +42,9 @@
 			if (dirty.any) e.preventDefault();
 		};
 		window.addEventListener('beforeunload', warn);
-		// A broker switch in MT5 re-maps the symbols; the Symbols section follows it live.
-		const stopEvents = events.watchSymbols();
+		// A broker switch in MT5 re-maps the symbols, and a change made from chat in another window
+		// edits settings; the sections follow both live (a section with unsaved edits keeps them).
+		const stopEvents = events.watchSettingsPage();
 		return () => {
 			window.removeEventListener('beforeunload', warn);
 			stopEvents();

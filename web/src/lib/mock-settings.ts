@@ -43,6 +43,7 @@ export const CONFIG_LIMITS: Limits = {
 	max_lot: 1,
 	max_positions: 5,
 	max_daily_loss: 500,
+	max_risk_percent: 2,
 	allowed_symbols: ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'US100', 'BTCUSD'],
 	trading_hours: { days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '00:05', end: '23:55' }
 };
@@ -210,6 +211,7 @@ function merged(o: LimitsOverrides | null): Limits {
 		max_lot: o?.max_lot ?? CONFIG_LIMITS.max_lot,
 		max_positions: o?.max_positions ?? CONFIG_LIMITS.max_positions,
 		max_daily_loss: o?.max_daily_loss ?? CONFIG_LIMITS.max_daily_loss,
+		max_risk_percent: o?.max_risk_percent ?? CONFIG_LIMITS.max_risk_percent,
 		allowed_symbols: o?.allowed_symbols ?? CONFIG_LIMITS.allowed_symbols,
 		trading_hours: o?.trading_hours ?? CONFIG_LIMITS.trading_hours
 	};
@@ -249,7 +251,7 @@ function checkHours(h: unknown): TradingHours {
  */
 export function putLimits(body: unknown, checkCode: () => void): LimitsResponse {
 	if (!isObj(body)) throw bad('body must be a JSON object');
-	const known = ['totp', 'max_lot', 'max_positions', 'max_daily_loss', 'allowed_symbols', 'trading_hours'];
+	const known = ['totp', 'max_lot', 'max_positions', 'max_daily_loss', 'max_risk_percent', 'allowed_symbols', 'trading_hours'];
 	for (const k of Object.keys(body)) if (!known.includes(k)) throw bad(`unknown field: ${k}`);
 	const next: LimitsOverrides = {};
 
@@ -270,6 +272,13 @@ export function putLimits(body: unknown, checkCode: () => void): LimitsResponse 
 		if (typeof v !== 'number' || !(v > 0)) throw bad('max_daily_loss must be a number above 0');
 		if (v > CONFIG_LIMITS.max_daily_loss) throw looser(`max_daily_loss ${v} is looser than the config value ${CONFIG_LIMITS.max_daily_loss}`);
 		next.max_daily_loss = v;
+	}
+	if ('max_risk_percent' in body) {
+		const v = body.max_risk_percent;
+		const cfg = CONFIG_LIMITS.max_risk_percent ?? 2;
+		if (typeof v !== 'number' || !(v >= 0.1)) throw bad('max_risk_percent must be a number, 0.1 or more');
+		if (v > cfg) throw looser(`max_risk_percent ${v} is looser than the config value ${cfg}`);
+		next.max_risk_percent = v;
 	}
 	if ('allowed_symbols' in body) {
 		const v = body.allowed_symbols;

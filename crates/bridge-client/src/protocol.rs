@@ -501,8 +501,47 @@ pub struct SymbolCatalogPage {
     pub offset: u32,
 }
 
+/// Seconds in a day: the end of a session that runs to 24:00.
+pub const SECONDS_PER_DAY: i64 = 86_400;
+
+/// Today's quote and trade sessions of a symbol, for the current server weekday.
+///
+/// Each entry is `[from, to]` in seconds since 00:00 server time. `from` is inclusive and
+/// `to` exclusive; a session that ends at 24:00 has `to` = [`SECONDS_PER_DAY`]. An empty list
+/// means there is no such session today (a weekend, or a market that is closed all day).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sessions {
+    /// Quote sessions (`SymbolInfoSessionQuote`): when prices are streamed.
+    pub quote: Vec<[i64; 2]>,
+    /// Trade sessions (`SymbolInfoSessionTrade`): when orders are accepted.
+    pub trade: Vec<[i64; 2]>,
+}
+
+impl Sessions {
+    /// True when `second_of_day` (0..86400, server time) falls inside a quote session.
+    #[must_use]
+    pub fn quote_open_at(&self, second_of_day: i64) -> bool {
+        contains(&self.quote, second_of_day)
+    }
+
+    /// True when `second_of_day` (0..86400, server time) falls inside a trade session.
+    #[must_use]
+    pub fn trade_open_at(&self, second_of_day: i64) -> bool {
+        contains(&self.trade, second_of_day)
+    }
+}
+
+fn contains(sessions: &[[i64; 2]], second_of_day: i64) -> bool {
+    sessions
+        .iter()
+        .any(|[from, to]| *from <= second_of_day && second_of_day < *to)
+}
+
 /// `get_symbol` reply data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// The fields from `spread` on arrived with EA 0.6.0. They are optional so that the reply of an
+/// older EA still parses; a newer EA always sends all of them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SymbolInfo {
     pub symbol: String,
     pub description: String,
@@ -520,6 +559,31 @@ pub struct SymbolInfo {
     /// False when the symbol is close-only or disabled for trading.
     pub trade_allowed: bool,
     pub currency_profit: String,
+    /// Current spread in points (`SYMBOL_SPREAD`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread: Option<i64>,
+    /// Swap for a long position, in the unit named by `swap_mode` (`SYMBOL_SWAP_LONG`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_long: Option<f64>,
+    /// Swap for a short position, in the unit named by `swap_mode` (`SYMBOL_SWAP_SHORT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_short: Option<f64>,
+    /// How the swaps are calculated (`SYMBOL_SWAP_MODE`), the `SYMBOL_SWAP_MODE_*` name in
+    /// lower snake case: `disabled`, `points`, `currency_symbol`, `currency_margin`,
+    /// `currency_deposit`, `interest_current`, `interest_open`, `reopen_current`,
+    /// `reopen_bid`, or `unknown` for a mode this EA does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_mode: Option<String>,
+    /// `SYMBOL_TRADE_MODE`; `trade_allowed` is the coarse version of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trade_mode: Option<SymbolTradeMode>,
+    /// Today's sessions, by the server's current weekday.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Sessions>,
+    /// The server's time of day is inside a trade session and the trade mode is not
+    /// `disabled`. A symbol with no trade session today is closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trade_open_now: Option<bool>,
 }
 
 /// Arguments of `get_history`. Times are Unix seconds (server time as MT5 reports it).

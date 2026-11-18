@@ -19,6 +19,8 @@ mod mock_catalog;
 #[cfg(feature = "mock")]
 mod mock_market;
 #[cfg(feature = "mock")]
+mod mock_symbol;
+#[cfg(feature = "mock")]
 mod mock_trade;
 
 pub use auth::BridgeKey;

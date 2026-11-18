@@ -1,10 +1,12 @@
 import { api, type MarketJournalResponse, type MarketOrderType, type MarketViewDto, type PreviewDto } from '#lib/api.ts';
 import { describeError, toApiError, type ApiError } from '#lib/errors.ts';
-import { biasSentence, canPrepare, cleanSymbolInput, isExpired, validateVolume } from '#lib/market.ts';
+import { biasSentence, canPrepare, cleanSymbolInput, isExpired, validateRiskPercent, validateVolume } from '#lib/market.ts';
 
 export type MarketPhase = 'idle' | 'loading' | 'ready' | 'error';
 export type JournalPhase = 'idle' | 'loading' | 'ready' | 'error' | 'unsupported';
-export type MarketTab = 'view' | 'record';
+export type MarketTab = 'view' | 'briefing' | 'record';
+/** How the Prepare dialog sizes the order: a lot size, or a risk % the server turns into lots. */
+export type SizeMode = 'volume' | 'risk';
 
 const CLOCK_MS = 10_000;
 const JOURNAL_LIMIT = 15;
@@ -44,7 +46,10 @@ class MarketStore {
 	prepareOpen = $state(false);
 	/** The view the dialog was opened for, so a later analysis can't change what is being prepared. */
 	prepareView = $state<MarketViewDto | null>(null);
+	sizeMode = $state<SizeMode>('volume');
 	volume = $state('');
+	riskPercent = $state('');
+	riskError = $state<string | null>(null);
 	orderType = $state<MarketOrderType>('market');
 	volumeError = $state<string | null>(null);
 	prepareError = $state<string | null>(null);
@@ -156,8 +161,11 @@ class MarketStore {
 		this.prepareView = this.view;
 		// No default lot size, ever.
 		this.volume = '';
+		this.riskPercent = '';
+		this.sizeMode = 'volume';
 		this.orderType = 'market';
 		this.volumeError = null;
+		this.riskError = null;
 		this.prepareError = null;
 		this.preparing = false;
 		this.prepareOpen = true;
@@ -167,29 +175,43 @@ class MarketStore {
 		this.prepareOpen = false;
 		this.prepareError = null;
 		this.volumeError = null;
+		this.riskError = null;
 	}
 
 	/**
 	 * Check the volume, then ask the server for a preview. Returns it for the caller to hand to the
 	 * confirmation modal, or null with the reason shown in the dialog (a limit, the kill switch...).
 	 */
-	async submitPrepare(): Promise<PreviewDto | null> {
+	async submitPrepare(maxRisk: number): Promise<PreviewDto | null> {
 		const v = this.prepareView;
 		if (!v || this.preparing) return null;
 		this.prepareError = null;
-		const check = validateVolume(this.volume);
-		if (!check.ok) {
-			this.volumeError = check.error;
-			return null;
+		// Exactly one of the two sizes goes to the server; the other box is ignored.
+		let size: { volume: number } | { risk_percent: number };
+		if (this.sizeMode === 'risk') {
+			const risk = validateRiskPercent(this.riskPercent, maxRisk);
+			if (!risk.ok) {
+				this.riskError = risk.error;
+				return null;
+			}
+			this.riskError = null;
+			size = { risk_percent: risk.value };
+		} else {
+			const check = validateVolume(this.volume);
+			if (!check.ok) {
+				this.volumeError = check.error;
+				return null;
+			}
+			this.volumeError = null;
+			size = { volume: check.value };
 		}
-		this.volumeError = null;
 		if (isExpired(v.valid_until, Date.now())) {
 			this.prepareError = 'This view has expired. Close this and analyze again.';
 			return null;
 		}
 		this.preparing = true;
 		try {
-			const dto = await api.marketPrepare({ view_id: v.id, volume: check.value, order_type: this.orderType });
+			const dto = await api.marketPrepare({ view_id: v.id, order_type: this.orderType, ...size });
 			return this.prepareOpen ? dto : null;
 		} catch (e) {
 			const err = toApiError(e);

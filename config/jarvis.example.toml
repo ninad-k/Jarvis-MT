@@ -113,6 +113,7 @@ api_key_env = "OPENAI_API_KEY"
 max_lot = 1.0                 # per new order (closing is never limited by this)
 max_positions = 5             # open positions + pending orders after a new order
 max_daily_loss = 500.0        # account currency; new orders blocked at -500 today
+max_risk_percent = 2.0        # most a risk-sized order ("buy gold risking 1%") may risk, in percent of equity (0.1 to 100)
 # Canonical names: they apply on every broker, whatever the broker calls the instrument.
 allowed_symbols = ["XAUUSD", "XAGUSD", "US100", "US30", "US500", "EURUSD", "GBPUSD", "BTCUSD"]
 
@@ -165,7 +166,7 @@ enabled = true
 horizon_minutes = 240            # how long a view stays valid (15 to 1440)
 event_blackout_minutes = 30      # stand aside this close to a high-impact event (0 to 240)
 calendar_min_importance = "moderate"   # low | moderate | high
-rate_limit_per_minute = 30       # views and news requests per minute and session
+rate_limit_per_minute = 30       # GET /api/market/view and /api/market/news requests per minute and session
 
 # News is optional. With provider = "none" the view simply has no news factor.
 # finnhub: https://finnhub.io (free key). alphavantage: https://www.alphavantage.co (free key).

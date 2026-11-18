@@ -3,6 +3,8 @@
 	import TopBar from '#lib/components/TopBar.svelte';
 	import Orb from '#lib/components/Orb.svelte';
 	import Watchlist from '#lib/components/Watchlist.svelte';
+	import AlertsPanel from '#lib/components/AlertsPanel.svelte';
+	import AlertDialog from '#lib/components/AlertDialog.svelte';
 	import AccountStrip from '#lib/components/AccountStrip.svelte';
 	import Positions from '#lib/components/Positions.svelte';
 	import MarketView from '#lib/components/MarketView.svelte';
@@ -19,12 +21,15 @@
 	import { preview } from '#lib/state/preview.svelte.ts';
 	import { attachPushToTalk } from '#lib/state/voice.svelte.ts';
 	import { persona } from '#lib/state/persona.svelte.ts';
+	import { alerts } from '#lib/state/alerts.svelte.ts';
+	import { briefing } from '#lib/state/briefing.svelte.ts';
+	import { market } from '#lib/state/market.svelte.ts';
 
 	type Tab = 'chat' | 'watchlist' | 'positions' | 'market';
 	let tab = $state<Tab>('chat');
 
 	onMount(() => {
-		const stops = [startPolling(), events.start(), attachPushToTalk()];
+		const stops = [startPolling(), events.start(), attachPushToTalk(), alerts.start()];
 		void auth.refresh();
 		void persona.ensureLoaded();
 		return () => stops.forEach((stop) => stop());
@@ -48,9 +53,17 @@
 
 	// Below lg only the selected tab's panel is shown; at lg everything is visible.
 	const show = (t: Tab) => (tab === t ? '' : 'max-lg:hidden');
+
+	/** "Brief me" from the chat header: open the Market panel on the briefing and build it. */
+	function briefMe() {
+		tab = 'market';
+		market.setTab('briefing');
+		if (!briefing.loading) void briefing.load();
+	}
 </script>
 
 <ConfirmModal />
+<AlertDialog />
 
 <div class="flex h-dvh flex-col">
 	<TopBar />
@@ -65,14 +78,15 @@
 
 		<Segmented class="lg:hidden" label="Panels" options={tabs} bind:value={tab} />
 
-		<!-- Watchlist -->
+		<!-- Watchlist, with the alerts under it: alerts are made from a watchlist row, so they live together. -->
 		<div
 			id="panel-watchlist"
 			role="tabpanel"
 			aria-labelledby="tab-watchlist"
-			class="min-h-0 lg:col-start-1 lg:row-span-2 lg:row-start-1 {show('watchlist')}"
+			class="flex min-h-0 flex-col gap-3 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:gap-4 {show('watchlist')}"
 		>
-			<Watchlist />
+			<div class="min-h-24 flex-1 lg:min-h-48"><Watchlist /></div>
+			<AlertsPanel />
 		</div>
 
 		<!-- Chat -->
@@ -93,6 +107,14 @@
 						onclick={() => (tab = 'market')}
 					>
 						Market view
+					</button>
+					<button
+						type="button"
+						class="border border-line px-2 py-0.5 text-mute transition-colors hover:border-accent hover:text-ink"
+						title="A summary of your account, positions, today's events and the watchlist"
+						onclick={briefMe}
+					>
+						Brief me
 					</button>
 					{#if chat.messages.length > 0}
 						<button

@@ -56,6 +56,7 @@ impl O {
             price: self.price,
             sl: self.sl,
             tp: self.tp,
+            risk_percent: None,
         })
     }
 }

@@ -16,7 +16,7 @@ mod preview;
 mod tokens;
 
 pub use killswitch::{KillSwitch, KillSwitchState};
-pub use limits::{Limits, TradingHours, Weekday};
+pub use limits::{DEFAULT_MAX_RISK_PERCENT, Limits, MIN_RISK_PERCENT, TradingHours, Weekday};
 pub use preview::{
     ActionPreview, CancelSelector, CloseSelector, EstPnl, MarketSnapshot, ModifyIntent,
     OrderIntent, ProposedAction, evaluate,
