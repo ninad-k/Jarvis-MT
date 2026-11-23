@@ -17,7 +17,7 @@ tauri-build = { version = "=2.7.4", features = [] }
 
 [dependencies]
 tauri = { version = "=2.12.5", features = [] }
-tauri-plugin-store = "=2.5.0"
+tauri-plugin-store = "=2.5.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde_json = "1"
 url = "2"
